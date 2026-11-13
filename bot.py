@@ -53,7 +53,7 @@ unique_cb = filters.create(is_unique_cb)
 API_ID = int(os.environ.get("API_ID", 29904834)) 
 API_HASH = os.environ.get("API_HASH", "8b4fd9ef578af114502feeafa2d31938") 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://akash:akash@cluster0.etisrpx.mongodb.net/?appName=Cluster0")
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://drama:drama@cluster0.sa4kvgu.mongodb.net/?appName=Cluster0")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 7120801813)) 
 WEB_URL = os.environ.get("WEB_URL", "https://flixbox4ubot.onrender.com")
 
