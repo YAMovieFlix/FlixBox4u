@@ -58,7 +58,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 7120801813))
 WEB_URL = os.environ.get("WEB_URL", "https://flixbox4ubot.onrender.com")
 
 DEFAULT_ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Sudo_king")
-BOT_USERNAME = "PronWaliZone_Bot"
+BOT_USERNAME = "FlixBox4uBot"
 
 try:
     requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True")
