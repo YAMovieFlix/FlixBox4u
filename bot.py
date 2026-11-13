@@ -55,7 +55,7 @@ API_HASH = os.environ.get("API_HASH", "8b4fd9ef578af114502feeafa2d31938")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8206083172:AAHP9raleY3l2R2HBTGSVCdpcLQvgn960Mw")
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://akash:akash@cluster0.etisrpx.mongodb.net/?appName=Cluster0")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 7120801813)) 
-WEB_URL = os.environ.get("WEB_URL", "https://amiking-4vcz.onrender.com")
+WEB_URL = os.environ.get("WEB_URL", "https://flixbox4ubot.onrender.com")
 
 DEFAULT_ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Sudo_king")
 BOT_USERNAME = "PronWaliZone_Bot"
