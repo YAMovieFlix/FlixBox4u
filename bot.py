@@ -222,7 +222,7 @@ async def find_file_in_all_dbs(f_id):
     for d in await get_extra_dbs_async():
         try:
             doc = await d["files"].find_one({"_id": f_id})
-            if doc: return doc, d
+            if doc is not None: return doc, d
         except: pass
     return None, None
 
@@ -750,14 +750,14 @@ async def start_cmd(client, message):
             pf_val = user["pending_file"]; await users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}})
             if pf_val.startswith("mfile_"):
                 _, f_id, q_idx = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
-                if fd:
+                if fd is not None and tdb is not None:
                     await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}}); qs = fd.get("qualities", []); qi = int(q_idx)
                     if 0 <= qi < len(qs): return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}]", config)
                     elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
             elif pf_val.startswith("sfile_"):
                 _, f_id, si, ei, qi = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
-                if fd:
+                if fd is not None and tdb is not None:
                     await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
                     try:
                         ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
@@ -766,7 +766,7 @@ async def start_cmd(client, message):
                 return await message.reply("❌ এপিসোড ফাইল পাওয়া যায়নি!")
             else:
                 f_id = pf_val.replace("file_", ""); fd, tdb = await find_file_in_all_dbs(f_id)
-                if fd:
+                if fd is not None and tdb is not None:
                     await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
                     fs = fd.get("file_id") or (fd["qualities"][0]["file_id"] if fd.get("qualities") else None)
                     if fs: return await deliver_cached_file(client, uid, fs, fd["title"], config)
@@ -1120,7 +1120,7 @@ async def delmvpg_cb(c, q): await send_del_page(q, {"type": {"$ne": "series"}}, 
 @app.on_callback_query(filters.regex(r"^delmv_") & filters.user(ADMIN_ID) & unique_cb)
 async def delmv_cb(c, q):
     _, f_id, pg = q.data.split("_"); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb:
+    if doc is not None and tdb is not None:
         await tdb["files"].delete_one({"_id": f_id})
         await tdb["posters"].delete_one({"_id": f_id})
         poster_cache_del(f_id)
@@ -1154,7 +1154,7 @@ async def edmvpick_cb(c, q): await show_edit_movie_panel(q, q.data.split("_")[1]
 
 async def show_edit_movie_panel(mq, f_id, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
-    if not doc: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
+    if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
     qs = doc.get("qualities", []); q_str = ", ".join([x["name"] for x in qs]) if qs else ("Single File" if doc.get("file_id") else "None")
     txt = f"✏️ **Edit Movie:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n🎞 Qualities: `{q_str}`"
     btns = [[InlineKeyboardButton("✏️ Name/Year", callback_data=f"edmv_name_{f_id}"), InlineKeyboardButton("🖼 Poster", callback_data=f"edmv_poster_{f_id}")],
@@ -1168,7 +1168,7 @@ async def show_edit_movie_panel(mq, f_id, edit=True):
 @app.on_callback_query(filters.regex(r"^edmv_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmv_cb(c, q):
     _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
-    if not doc: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
+    if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
     if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); return await show_edit_movie_panel(q, f_id, edit=True)
     elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_movie_panel(q, f_id, edit=True)
     elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
@@ -1190,15 +1190,24 @@ async def edmv_cb(c, q):
         return await q.message.edit_text("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex(r"^edmvcat_") & filters.user(ADMIN_ID) & unique_cb)
-async def edmvcat_cb(c, q): _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id); (await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}})) if tdb else None; await show_edit_movie_panel(q, f_id, edit=True)
+async def edmvcat_cb(c, q):
+    _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id)
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}})
+    await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvlang_") & filters.user(ADMIN_ID) & unique_cb)
-async def edmvlang_cb(c, q): _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id); (await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}})) if tdb else None; await show_edit_movie_panel(q, f_id, edit=True)
+async def edmvlang_cb(c, q):
+    _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id)
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}})
+    await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqdel_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvqdel_cb(c, q):
     _, f_id, idx = q.data.split("_"); idx = int(idx); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb: qs = doc.get("qualities", []); qs.pop(idx) if 0 <= idx < len(qs) else None; await tdb["files"].update_one({"_id": f_id}, {"$set": {"qualities": qs}})
+    if doc is not None and tdb is not None:
+        qs = doc.get("qualities", [])
+        if 0 <= idx < len(qs): qs.pop(idx)
+        await tdb["files"].update_one({"_id": f_id}, {"$set": {"qualities": qs}})
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqadd_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1215,7 +1224,7 @@ async def handle_edmv_cq(c, m): admin_steps[m.from_user.id]["current_quality"] =
 async def handle_edmv_qf(c, m):
     st = admin_steps.get(m.from_user.id); f_id, qn = st["f_id"], st["current_quality"]
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb:
+    if doc is not None and tdb is not None:
         await tdb["files"].update_one({"_id": f_id}, {"$push": {"qualities": {"name": qn, "file_id": fid}}})
         if not doc.get("file_id"): await tdb["files"].update_one({"_id": f_id}, {"$set": {"file_id": fid}})
     st["step"] = "edmv_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
@@ -1223,7 +1232,7 @@ async def handle_edmv_qf(c, m):
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_name(c, m):
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}})
     await show_edit_movie_panel(m, f_id, edit=False)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & unique_msg)
@@ -1234,7 +1243,7 @@ async def handle_edmv_poster(c, m):
         if err or not enc:
             return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
         _, tdb = await find_file_in_all_dbs(f_id)
-        if not tdb:
+        if tdb is None:
             admin_steps.pop(m.from_user.id, None)
             return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
@@ -1254,7 +1263,7 @@ async def handle_edmv_poster_url(c, m):
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
         _, tdb = await find_file_in_all_dbs(f_id)
-        if not tdb: return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
+        if tdb is None: return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = url
         try:
@@ -1462,7 +1471,7 @@ async def delsrpg_cb(c, q): await send_del_page(q, {"type": "series"}, "delsr", 
 @app.on_callback_query(filters.regex(r"^delsr_") & filters.user(ADMIN_ID) & unique_cb)
 async def delsr_cb(c, q):
     _, f_id, pg = q.data.split("_"); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb:
+    if doc is not None and tdb is not None:
         await tdb["files"].delete_one({"_id": f_id})
         await tdb["posters"].delete_one({"_id": f_id})
         poster_cache_del(f_id)
@@ -1496,7 +1505,7 @@ async def edsrpick_cb(c, q): await show_edit_series_panel(q, q.data.split("_")[1
 
 async def show_edit_series_panel(mq, f_id, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
-    if not doc: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
+    if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
     ssns = doc.get("seasons", []); te = sum(len(s.get("episodes", [])) for s in ssns)
     txt = f"📺 **Edit Series:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n📚 Seasons: `{len(ssns)}` | Eps: `{te}`"
     btns = [[InlineKeyboardButton("✏️ Name/Year", callback_data=f"edsr_name_{f_id}"), InlineKeyboardButton("🖼 Poster", callback_data=f"edsr_poster_{f_id}")],
@@ -1510,7 +1519,7 @@ async def show_edit_series_panel(mq, f_id, edit=True):
 @app.on_callback_query(filters.regex(r"^edsr_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsr_cb(c, q):
     _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
-    if not doc: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
+    if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
     if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
@@ -1532,15 +1541,21 @@ async def edsr_cb(c, q):
         return await q.message.edit_text("📚 সিজন সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex(r"^edsrcat_") & filters.user(ADMIN_ID) & unique_cb)
-async def edsrcat_cb(c, q): _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id); (await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}})) if tdb else None; await show_edit_series_panel(q, f_id, edit=True)
+async def edsrcat_cb(c, q):
+    _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id)
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}})
+    await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrlang_") & filters.user(ADMIN_ID) & unique_cb)
-async def edsrlang_cb(c, q): _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id); (await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}})) if tdb else None; await show_edit_series_panel(q, f_id, edit=True)
+async def edsrlang_cb(c, q):
+    _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id)
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}})
+    await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_name(c, m):
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}})
     await show_edit_series_panel(m, f_id, edit=False)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & unique_msg)
@@ -1551,7 +1566,7 @@ async def handle_edsr_poster(c, m):
         if err or not enc:
             return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
         _, tdb = await find_file_in_all_dbs(f_id)
-        if not tdb:
+        if tdb is None:
             admin_steps.pop(m.from_user.id, None)
             return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
@@ -1571,7 +1586,7 @@ async def handle_edsr_poster_url(c, m):
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
         _, tdb = await find_file_in_all_dbs(f_id)
-        if not tdb: return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
+        if tdb is None: return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = url
         try:
@@ -1588,14 +1603,14 @@ async def handle_edsr_poster_url(c, m):
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addssn_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addssn(c, m):
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; sno = m.text.strip(); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb:
+    if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); si = next((i for i, s in enumerate(ssns) if str(s["season_no"]).lower() == sno.lower()), None)
         if si is None: ssns.append({"season_no": sno, "episodes": []}); si = len(ssns) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
         await show_edit_season_panel(m, f_id, si, edit=False)
 
 async def show_edit_season_panel(mq, f_id, si, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
-    if not doc or si >= len(doc.get("seasons", [])): return
+    if doc is None or si >= len(doc.get("seasons", [])): return
     ssn = doc["seasons"][si]
     btns = [[InlineKeyboardButton(f"🎬 Ep {e['ep_no']} ({len(e.get('qualities', []))} Q)", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")] for ei, e in enumerate(ssn.get("episodes", []))]
     btns += [[InlineKeyboardButton("➕ Add Episode", callback_data=f"edsrep_add_{f_id}_{si}")], [InlineKeyboardButton("🗑 Delete Season", callback_data=f"edsrep_delssn_{f_id}_{si}")], [InlineKeyboardButton("⬅️ Back", callback_data=f"edsr_mng_{f_id}")]]
@@ -1613,11 +1628,17 @@ async def edsrep_cb(c, q):
     elif act == "add": admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": ps[2], "s_idx": int(ps[3])}; return await q.message.edit_text("🎬 নতুন Episode নম্বর লিখুন:")
     elif act == "delssn":
         f_id, si = ps[2], int(ps[3]); doc, tdb = await find_file_in_all_dbs(f_id)
-        if doc and tdb: ssns = doc.get("seasons", []); ssns.pop(si) if 0 <= si < len(ssns) else None; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+        if doc is not None and tdb is not None:
+            ssns = doc.get("seasons", [])
+            if 0 <= si < len(ssns): ssns.pop(si)
+            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
         return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "delep":
         f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); doc, tdb = await find_file_in_all_dbs(f_id)
-        if doc and tdb: ssns = doc.get("seasons", []); ssns[si]["episodes"].pop(ei) if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]) else None; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+        if doc is not None and tdb is not None:
+            ssns = doc.get("seasons", [])
+            if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]): ssns[si]["episodes"].pop(ei)
+            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
         return await show_edit_season_panel(q, f_id, si, edit=True)
     elif act == "addq":
         f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); admin_steps[q.from_user.id] = {"step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "e_idx": ei}
@@ -1640,7 +1661,7 @@ async def show_edit_ep_panel(mq, f_id, si, ei, edit=True):
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addep_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addep(c, m):
     st = admin_steps.pop(m.from_user.id); f_id, si, eno = st["f_id"], st["s_idx"], m.text.strip(); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb:
+    if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); eps = ssns[si]["episodes"]; ei = next((i for i, e in enumerate(eps) if str(e["ep_no"]).lower() == eno.lower()), None)
         if ei is None: eps.append({"ep_no": eno, "qualities": []}); ei = len(eps) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
         await show_edit_ep_panel(m, f_id, si, ei, edit=False)
@@ -1648,7 +1669,10 @@ async def handle_edsr_addep(c, m):
 @app.on_callback_query(filters.regex(r"^edsrqdel_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrqdel_cb(c, q):
     _, f_id, si, ei, qi = q.data.split("_"); si, ei, qi = int(si), int(ei), int(qi); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb: ssns = doc.get("seasons", []); qs = ssns[si]["episodes"][ei]["qualities"]; qs.pop(qi) if 0 <= qi < len(qs) else None; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+    if doc is not None and tdb is not None:
+        ssns = doc.get("seasons", []); qs = ssns[si]["episodes"][ei]["qualities"]
+        if 0 <= qi < len(qs): qs.pop(qi)
+        await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
     await show_edit_ep_panel(q, f_id, si, ei, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrqadd_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1665,7 +1689,7 @@ async def handle_edsr_cq(c, m): admin_steps[m.from_user.id]["current_quality"] =
 async def handle_edsr_qf(c, m):
     st = admin_steps.get(m.from_user.id); f_id, si, ei, qn = st["f_id"], st["s_idx"], st["e_idx"], st["current_quality"]
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+    if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
     st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
 
 # ==========================================
