@@ -9,7 +9,7 @@ asyncio.set_event_loop(loop)
 from pyrogram import Client, filters, idle, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp, BotCommand
 from pyrogram.errors import UserNotParticipant, FloodWait
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, render_template_string, jsonify, request, Response, redirect
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 from bson.objectid import ObjectId
@@ -65,6 +65,7 @@ db_client, db = None, None
 users_col, files_col, cats_col, langs_col, tasks_col, titles_col = None, None, None, None, None, None
 pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col = None, None, None, None, None, None
 auto_channels_col, promotions_col, zone_ids_col, upcoming_col = None, None, None, None
+posters_col, short_links_col = None, None
 sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)["NewBot"]
 
 def get_live_web_url(conf=None):
@@ -90,6 +91,7 @@ def capture_live_host():
 async def get_db():
     global db_client, db, users_col, files_col, cats_col, langs_col, pkgs_col, links_col, config_col
     global channels_col, coupons_col, mongos_col, tasks_col, titles_col, auto_channels_col, promotions_col, zone_ids_col, upcoming_col
+    global posters_col, short_links_col
     if db_client is None:
         db_client = AsyncIOMotorClient(MONGO_URI); db = db_client["NewBot"]
         users_col, files_col, cats_col, langs_col = db["users"], db["files"], db["categories"], db["languages"]
@@ -97,6 +99,7 @@ async def get_db():
         channels_col, coupons_col, mongos_col = db["channels"], db["coupons"], db["mongos"]
         tasks_col, titles_col = db["custom_tasks"], db["auto_titles"]
         auto_channels_col, promotions_col, zone_ids_col, upcoming_col = db["auto_channels"], db["promotions"], db["zone_ids"], db["upcoming"]
+        posters_col, short_links_col = db["posters"], db["short_links"]
     return db
 
 async def get_config():
@@ -113,6 +116,7 @@ async def get_config():
             "premium_vid_coin": 50, "vid_relock_min": 1440, "spin_coin_min": 10, "spin_coin_max": 50,
             "task_coin": 20, "spin_limit": 5, "task_limit": 5, "autopost_channel": None,
             "autopost_minute": 0, "autopost_channel_idx": 0, "tutorial_vid": None,
+            "rec_group_link": "",
             "marquee_text": "VLC Player অথবা MX Player দিয়ে চালিয়ে দেখুন। ✅ সাউন্ড/অডিও সমস্যা হলে ভিডিওটি ডাউনলোড করে দেখুন।"
         }
         await config_col.insert_one(conf)
@@ -191,11 +195,61 @@ async def get_all_files_across_dbs(query_filter=None):
         except: pass
     return all_files
 
+async def save_poster_to_mongo(target_db, poster_id, b64_data, mime="image/jpeg"):
+    await target_db["posters"].update_one(
+        {"_id": poster_id},
+        {"$set": {"data": b64_data, "mime": mime, "created_at": datetime.utcnow().isoformat() + "Z"}},
+        upsert=True
+    )
+    return f"/poster/{poster_id}"
+
+def decode_b64_to_bytes(val):
+    if not val: return None, "image/jpeg"
+    mime = "image/jpeg"
+    if val.startswith("data:image"):
+        try:
+            head, b64 = val.split(",", 1)
+            m = re.search(r"data:(image/[^;]+);", head)
+            if m: mime = m.group(1)
+            return base64.b64decode(b64), mime
+        except: return None, mime
+    try: return base64.b64decode(val), mime
+    except: return None, mime
+
+def make_default_poster_svg(label="MEDIA"):
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1c1c28"/><stop offset="100%" stop-color="#3b1d5a"/></linearGradient></defs>
+  <rect width="640" height="360" fill="url(#g)"/>
+  <circle cx="320" cy="160" r="46" fill="rgba(255,0,127,0.22)" stroke="#ff007f" stroke-width="3"/>
+  <polygon points="308,140 308,180 344,160" fill="#fff"/>
+  <text x="320" y="245" fill="#fff" font-family="Arial, sans-serif" font-size="24" font-weight="bold" text-anchor="middle">{label}</text>
+</svg>"""
+    return svg.encode("utf-8")
+
 def get_tg_photo(thumb):
-    if not thumb: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+    if not thumb:
+        img = io.BytesIO(make_default_poster_svg("MEDIA")); img.name = "thumb.svg"; return img
+    if thumb.startswith("/poster/"):
+        pid = thumb.split("/poster/", 1)[1].split("?")[0]
+        for d in get_extra_dbs_sync():
+            try:
+                pdoc = d["posters"].find_one({"_id": pid})
+                if pdoc and pdoc.get("data"):
+                    raw, _ = decode_b64_to_bytes(pdoc["data"])
+                    if raw: img = io.BytesIO(raw); img.name = "thumb.jpg"; return img
+            except: pass
+        for d in get_extra_dbs_sync():
+            try:
+                fdoc = d["files"].find_one({"_id": pid})
+                if fdoc and fdoc.get("thumb_url", "").startswith("data:image"):
+                    raw, _ = decode_b64_to_bytes(fdoc["thumb_url"])
+                    if raw: img = io.BytesIO(raw); img.name = "thumb.jpg"; return img
+            except: pass
+        return f"{get_live_web_url()}{thumb}"
     if thumb.startswith("data:image"):
-        try: img = io.BytesIO(base64.b64decode(thumb.split(",")[1])); img.name = "thumb.jpg"; return img
-        except: return "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+        raw, _ = decode_b64_to_bytes(thumb)
+        if raw: img = io.BytesIO(raw); img.name = "thumb.jpg"; return img
+        return f"{get_live_web_url()}/poster/default"
     return thumb
 
 async def notify_new_post(client, file_doc, config):
@@ -340,24 +394,88 @@ async def cmd_myid(c, m): await m.reply(f"✅ বট কাজ করছে!\n�
 
 @app.on_message(filters.command("cmd", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_list(c, m):
-    await m.reply("""🛠 **সকল কমান্ড লিস্ট:**
+    part1 = """🛠 **সকল কমান্ড ও ব্যবহারের উদাহরণ (পর্ব ১/২):**
 
 🎬 **Movies & Series:**
-/movies NAME RRR 2024 | /editemovies Name Year RRR 2024 | /deletedMovies
-/addseries Batchlor point 2026 | /editeseries Batchlor point 2026 | /deleteseries
-/addupcoming | /delupcoming
-/setcategory | /deletecategory
-/setlanguage | /deletelanguage
-/cancel
+• `/movies` — নতুন মুভি এড
+  উদাহরণ: `/movies NAME RRR 2024`
+• `/editemovies` — মুভি এডিট (নাম, পোস্টার, কোয়ালিটি)
+  উদাহরণ: `/editemovies Name Year RRR 2024`
+• `/deletedmovies` — মুভি ডিলিট লিস্ট
+  উদাহরণ: `/deletedmovies`
+• `/addseries` — নতুন ওয়েব সিরিজ এড
+  উদাহরণ: `/addseries Bachelor Point 2026`
+• `/editeseries` — সিরিজ/সিজন/এপিসোড এডিট
+  উদাহরণ: `/editeseries Bachelor Point 2026`
+• `/deleteseries` — সিরিজ ডিলিট লিস্ট
+  উদাহরণ: `/deleteseries`
+• `/addupcoming` — আপকামিং শিডিউল এড (ছবিতে রিপ্লাই করেও করা যাবে)
+  উদাহরণ: `/addupcoming Pushpa 3 | আজ রাত ৮টা`
+• `/delupcoming` — আপকামিং ডিলিট
+  উদাহরণ: `/delupcoming`
+• `/setcategory` — নতুন ক্যাটাগরি এড
+  উদাহরণ: `/setcategory Action` অথবা `/setcategory 18+`
+• `/deletecategory` — ক্যাটাগরি ডিলিট
+  উদাহরণ: `/deletecategory`
+• `/setlanguage` — নতুন ভাষা এড
+  উদাহরণ: `/setlanguage Bangla`
+• `/deletelanguage` — ভাষা ডিলিট
+  উদাহরণ: `/deletelanguage`
+• `/setrecgroup` — Movie Recommendation গ্রুপ লিংক সেট
+  উদাহরণ: `/setrecgroup https://t.me/my_movie_group`
+• `/delrecgroup` — Recommendation গ্রুপ রিমুভ
+  উদাহরণ: `/delrecgroup`
+• `/cancel` — চলমান প্রসেস বাতিল
+  উদাহরণ: `/cancel`"""
 
-💰 **Monetag, Redeem & Premium:**
-/addzoonid | /deletezoonid
-/addredeem 1day 10 code
-/Premiumuserlist | /deletepremium userid
-/settutorial | /setnotice
+    part2 = """🛠 **সকল কমান্ড ও ব্যবহারের উদাহরণ (পর্ব ২/২):**
 
-🔸 **Settings & Legacy:**
-/start /stats /name /addfile /vidtitel /deltitel /auto /auto2 /promot /delpromot /delfile /delall /mongo /delmongo /mongostats /spinlimit /tasklimit /addtask /deltask /setpremcoin /spincoin /taskcoin /relocktime /delrelocktime /lockall /addlink /delink /prstep /regstep /addcnl /vercnl /delcnl /delvrcnl /brodcast /cnlbdcst /autochannel /delautochannel /allred /addcred /bdt /usd /delcred /autodel /frotect /addadmin /addtex /deltex /logo /autvid /autvidti /autpost /refbonous /refbonousoff""")
+💰 **Monetag, Adsterra, Redeem & Premium:**
+• `/addzoonid` — Monetag Zone ID এড
+  উদাহরণ: `/addzoonid 12242829`
+• `/deletezoonid` — Zone ID ডিলিট
+  উদাহরণ: `/deletezoonid`
+• `/addlink` — Adsterra / Direct Ad Link এড
+  উদাহরণ: `/addlink https://example.com/ad`
+• `/delink` — Ad Link ডিলিট
+  উদাহরণ: `/delink`
+• `/addredeem` — প্রিমিয়াম বা কয়েন রিডিম কোড তৈরি
+  উদাহরণ: `/addredeem 1day 10 VIP10` অথবা `/addredeem 50 10 COIN50`
+• `/allred` — র‍্যান্ডম কয়েন কোড তৈরি
+  উদাহরণ: `/allred 100 10-50`
+• `/Premiumuserlist` — প্রিমিয়াম ইউজার লিস্ট
+  উদাহরণ: `/Premiumuserlist`
+• `/deletepremium` — প্রিমিয়াম রিমুভ
+  উদাহরণ: `/deletepremium 12345678`
+• `/addrdiem` — নির্দিষ্ট ইউজারকে প্রিমিয়াম দেওয়া
+  উদাহরণ: `/addrdiem 12345678 30 d`
+
+⚙️ **Site, Earning & Channel Settings:**
+• `/stats` — বট স্ট্যাটিস্টিকস (উদাহরণ: `/stats`)
+• `/name` — সাইটের নাম (উদাহরণ: `/name Moviee Link`)
+• `/setnotice` — লাইভ স্ক্রলিং নোটিশ (উদাহরণ: `/setnotice নতুন মুভি পেতে জয়েন করুন`)
+• `/settutorial` — ভিডিওতে রিপ্লাই করে টিউটোরিয়াল সেট (`/settutorial`)
+• `/logo` — ছবিতে রিপ্লাই করে স্টার্ট লোগো সেট (`/logo`)
+• `/addtex` — স্টার্ট এক্সট্রা টেক্সট (উদাহরণ: `/addtex স্বাগতম!`) | `/deltex`
+• `/setpremcoin` — আনলক কয়েন সেট (উদাহরণ: `/setpremcoin 50`)
+• `/relocktime` — আনলক মেয়াদ মিনিট (উদাহরণ: `/relocktime 1440`) | `/delrelocktime`
+• `/lockall` — সবার আনলক ভিডিও রিসেট (`/lockall`)
+• `/spincoin` — স্পিন কয়েন (উদাহরণ: `/spincoin 10-50`) | `/spinlimit 5`
+• `/taskcoin` — টাস্ক কয়েন (উদাহরণ: `/taskcoin 20`) | `/tasklimit 5`
+• `/addtask` — কাস্টম টাস্ক (উদাহরণ: `/addtask Join Channel | https://t.me/ch | 50`) | `/deltask`
+• `/refbonous` — রেফার বোনাস (উদাহরণ: `/refbonous 20`) | `/refbonousoff`
+• `/usd` — USD প্যাকেজ (`/usd 100 5`) | `/bdt` — BDT প্যাকেজ (`/bdt 100 50`)
+• `/addcred` — কয়েন প্যাকেজ (`/addcred 500 = 7 d`) | `/delcred`
+• `/addcnl` — ইনলাইন চ্যানেল (`/addcnl Backup https://t.me/ch`) | `/delcnl`
+• `/vercnl` — Must Join চ্যানেল (`/vercnl -100123456 https://t.me/ch`) | `/delvrcnl`
+• `/autochannel` — অটো পোস্ট চ্যানেল (`/autochannel -100123456 30 60`) | `/delautochannel`
+• `/brodcast` ও `/cnlbdcst` — মেসেজে রিপ্লাই করে ব্রডকাস্ট
+• `/autodel 600` | `/frotect on` | `/addadmin Sudo_king`
+• `/mongo <uri>` | `/delmongo` | `/mongostats`
+• `/addfile` | `/delfile <id>` | `/delall` | `/vidtitel <title>` | `/deltitel` | `/auto` | `/auto2 <title>` | `/promot` (ছবিতে রিপ্লাই করে `/promot Title | https://t.me/...`) | `/delpromot`"""
+
+    await m.reply(part1)
+    await m.reply(part2)
 
 @app.on_message(filters.command("stats", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_stats(c, m):
@@ -410,6 +528,35 @@ async def cmd_simple_config(c, m):
         val = int(arg) if tp == "int" else (arg.replace("@", "") if tp == "admin" else arg)
         await config_col.update_one({"_id": "settings"}, {"$set": {k: val}}); await m.reply(f"✅ সেট হয়েছে: **{k}** = `{val}`")
     except: await m.reply(f"❌ ভুল ইনপুট! উদাহরণ:\n`{ex}`")
+
+@app.on_message(filters.command("setrecgroup", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_setrecgroup(c, m):
+    parts = m.text.split(None, 1)
+    if len(parts) < 2:
+        admin_steps[m.from_user.id] = {"step": "set_rec_group_wait"}
+        return await m.reply("👥 আপনার **Movie Recommendation গ্রুপের লিংক** দিন:\nউদাহরণ: `https://t.me/my_movie_group`")
+    link = parts[1].strip()
+    if not link.startswith("http"):
+        link = "https://t.me/" + link.lstrip("@")
+    await get_db()
+    await config_col.update_one({"_id": "settings"}, {"$set": {"rec_group_link": link}}, upsert=True)
+    await m.reply(f"✅ Movie Recommendation গ্রুপ লিংক সেট হয়েছে:\n🔗 `{link}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("set_rec_group_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_set_rec_group_text(c, m):
+    link = m.text.strip()
+    if not link.startswith("http"):
+        link = "https://t.me/" + link.lstrip("@")
+    await get_db()
+    await config_col.update_one({"_id": "settings"}, {"$set": {"rec_group_link": link}}, upsert=True)
+    admin_steps.pop(m.from_user.id, None)
+    await m.reply(f"✅ Movie Recommendation গ্রুপ লিংক সেট হয়েছে:\n🔗 `{link}`")
+
+@app.on_message(filters.command("delrecgroup", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_delrecgroup(c, m):
+    await get_db()
+    await config_col.update_one({"_id": "settings"}, {"$set": {"rec_group_link": ""}}, upsert=True)
+    await m.reply("✅ Movie Recommendation গ্রুপ লিংক রিমুভ করা হয়েছে!")
 
 @app.on_message(filters.command("settutorial", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_settutorial(c, m):
@@ -562,31 +709,39 @@ async def dellang_cb(c, q): await get_db(); await langs_col.delete_one({"_id": O
 async def cmd_addupcoming(c, m):
     txt = m.text.replace("/addupcoming", "").strip()
     if "|" not in txt: admin_steps[m.from_user.id] = {"step": "upc_title_time"}; return await m.reply("📅 আপকামিং মুভি/সিরিজের নাম ও সময় লিখুন:\nউদাহরণ: `Bachelor Point Ep 140 | আজ সন্ধ্যা ৭টা`")
-    title, rtime = [x.strip() for x in txt.split("|", 1)]; thumb = "https://placehold.co/600x360/6c5ce7/ffffff?text=Upcoming"
+    title, rtime = [x.strip() for x in txt.split("|", 1)]
+    await get_db(); pid = "upc_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    thumb = "/poster/default"
     if m.reply_to_message and m.reply_to_message.photo:
         path = await m.reply_to_message.download()
-        with open(path, "rb") as f: thumb = f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode('utf-8')}"
+        with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
         os.remove(path)
-    await get_db(); await upcoming_col.insert_one({"title": title, "release_time": rtime, "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
+        thumb = await save_poster_to_mongo(db, pid, enc, "image/jpeg")
+    await upcoming_col.insert_one({"title": title, "release_time": rtime, "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
     await m.reply(f"✅ আপকামিং অ্যাড হয়েছে!\n🎬 **{title}** | 🕒 {rtime}")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("upc_title_time") & ~filters.regex(r"^/") & unique_msg)
 async def handle_upc_text(c, m):
     title, rtime = [x.strip() for x in m.text.split("|", 1)] if "|" in m.text else (m.text.strip(), "Coming Soon")
     admin_steps[m.from_user.id] = {"step": "upc_photo", "title": title, "release_time": rtime}
-    await m.reply("🖼 পোস্টার ছবি পাঠান (বা Skip করুন):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Skip Poster", callback_data="upc_skip")]]))
+    await m.reply("🖼 ল্যান্ডস্কোপ পোস্টার ছবি পাঠান (বা Skip করুন):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Skip Poster", callback_data="upc_skip")]]))
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("upc_photo") & unique_msg)
 async def handle_upc_photo(c, m):
     st = admin_steps.pop(m.from_user.id); path = await m.download()
-    with open(path, "rb") as f: thumb = f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode('utf-8')}"
-    os.remove(path); await get_db(); await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
-    await m.reply(f"✅ আপকামিং অ্যাড হয়েছে: **{st['title']}**")
+    with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
+    ext = path.split('.')[-1].lower() if '.' in path else 'jpeg'
+    mime = f"image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'}"
+    os.remove(path); await get_db()
+    pid = "upc_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    thumb = await save_poster_to_mongo(db, pid, enc, mime)
+    await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
+    await m.reply(f"✅ আপকামিং ও পোস্টার MongoDB-তে সেভ হয়েছে: **{st['title']}**")
 
 @app.on_callback_query(filters.regex(r"^upc_skip$") & filters.user(ADMIN_ID) & unique_cb)
 async def upc_skip_cb(c, q):
     st = admin_steps.pop(q.from_user.id, None)
-    if st: await get_db(); await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": "https://placehold.co/600x360/6c5ce7/ffffff?text=Upcoming", "created_at": datetime.utcnow().isoformat() + "Z"}); await q.message.edit_text(f"✅ আপকামিং অ্যাড হয়েছে: **{st['title']}**")
+    if st: await get_db(); await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": "/poster/default", "created_at": datetime.utcnow().isoformat() + "Z"}); await q.message.edit_text(f"✅ আপকামিং অ্যাড হয়েছে: **{st['title']}**")
 
 @app.on_message(filters.command("delupcoming", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_delupcoming(c, m):
@@ -667,19 +822,19 @@ async def cmd_deletepremium(c, m):
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
 
 # ==========================================
-# 7. MOVIES WORKFLOW
+# 7. MOVIES WORKFLOW (LANDSCAPE POSTER HOSTED IN MONGODB)
 # ==========================================
 @app.on_message(filters.command("movies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_movies(c, m):
     name, year = parse_name_year(m.text, "/movies")
     if not name: admin_steps[m.from_user.id] = {"step": "mv_name_year"}; return await m.reply("🎬 **মুভির নাম ও সাল দিন:**\nউদাহরণ: `RRR 2024`")
-    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None}
+    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg"}
     mk, _ = await get_cat_markup("mvcat", "mvcat_skip"); await m.reply(f"🎬 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_name_year") & ~filters.regex(r"^/") & unique_msg)
 async def handle_mv_name_year(c, m):
     name, year = parse_name_year(m.text, "")
-    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None}
+    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg"}
     mk, _ = await get_cat_markup("mvcat", "mvcat_skip"); await m.reply(f"🎬 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_callback_query(filters.regex(r"^mvcat_") & filters.user(ADMIN_ID) & unique_cb)
@@ -726,14 +881,14 @@ async def mvsave_ask_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     st["step"] = "mv_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
-    await q.message.edit_text(f"🖼 **পোস্টার ছবি দিন** (বা Skip)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Movie", callback_data="mvsave_final")]]))
+    await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Movie", callback_data="mvsave_final")]]))
 
 @app.on_callback_query(filters.regex(r"^mvprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
 async def mvprem_toggle_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if st:
         st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
-        await q.message.edit_text(f"🖼 **পোস্টার ছবি দিন** (বা Skip)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Movie", callback_data="mvsave_final")]]))
+        await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Movie", callback_data="mvsave_final")]]))
 
 async def finalize_save_movie(c, uid, msg_obj):
     st = admin_steps.pop(uid, None)
@@ -744,18 +899,25 @@ async def finalize_save_movie(c, uid, msg_obj):
             s = await d.command("dbstats")
             if s["dataSize"] < min_sz: min_sz = s["dataSize"]; target_db = d
         except: pass
+    thumb_url = "/poster/default"
+    if st.get("poster_b64"):
+        thumb_url = await save_poster_to_mongo(target_db, short_id, st["poster_b64"], st.get("poster_mime", "image/jpeg"))
+    elif st.get("thumb_url"):
+        thumb_url = st["thumb_url"]
     ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
-    nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": st["qualities"][0]["file_id"] if st.get("qualities") else None, "qualities": st.get("qualities", []), "thumb_url": st.get("thumb_url") or "https://placehold.co/600x400/1c1c24/ff007f?text=Movie", "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+    nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": st["qualities"][0]["file_id"] if st.get("qualities") else None, "qualities": st.get("qualities", []), "thumb_url": thumb_url, "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await target_db["files"].insert_one(nm); await notify_new_post(c, nm, await get_config())
-    await msg_obj.edit_text(f"✅ **মুভি সেভ হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`")
+    await msg_obj.edit_text(f"✅ **মুভি ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`")
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & unique_msg)
 async def handle_mv_poster(c, m):
-    msg = await m.reply("⏳ পোস্টার সেভ হচ্ছে..."); path = await m.download()
+    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার MongoDB-তে সেভ হচ্ছে..."); path = await m.download()
     try:
         with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
-        ext = path.split('.')[-1].lower() if '.' in path else 'jpg'
-        admin_steps[m.from_user.id]["thumb_url"] = f"data:image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'};base64,{enc}"; os.remove(path)
+        ext = path.split('.')[-1].lower() if '.' in path else 'jpeg'
+        admin_steps[m.from_user.id]["poster_b64"] = enc
+        admin_steps[m.from_user.id]["poster_mime"] = f"image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'}"
+        os.remove(path)
     except: pass
     await finalize_save_movie(c, m.from_user.id, msg)
 
@@ -784,7 +946,10 @@ async def delmvpg_cb(c, q): await send_del_page(q, {"type": {"$ne": "series"}}, 
 @app.on_callback_query(filters.regex(r"^delmv_") & filters.user(ADMIN_ID) & unique_cb)
 async def delmv_cb(c, q):
     _, f_id, pg = q.data.split("_"); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb: await tdb["files"].delete_one({"_id": f_id}); await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
+    if doc and tdb:
+        await tdb["files"].delete_one({"_id": f_id})
+        await tdb["posters"].delete_one({"_id": f_id})
+        await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
     await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(pg), edit=True)
 
 @app.on_message(filters.command("editemovies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -820,9 +985,9 @@ async def edmv_cb(c, q):
     if not doc: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
     if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); return await show_edit_movie_panel(q, f_id, edit=True)
     elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_movie_panel(q, f_id, edit=True)
-    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
     elif act == "name": admin_steps[q.from_user.id] = {"step": "edmv_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন (যেমন: `RRR 2024`):")
-    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন পোস্টার ছবি পাঠান:")
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি পাঠান:")
     elif act == "cat":
         cats = await get_categories_list()
         if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
@@ -877,28 +1042,31 @@ async def handle_edmv_name(c, m):
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & unique_msg)
 async def handle_edmv_poster(c, m):
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ আপডেট হচ্ছে..."); path = await m.download()
+    f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে..."); path = await m.download()
     try:
         with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
-        ext = path.split('.')[-1].lower() if '.' in path else 'jpg'; os.remove(path); _, tdb = await find_file_in_all_dbs(f_id)
-        if tdb: await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": f"data:image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'};base64,{enc}"}})
+        ext = path.split('.')[-1].lower() if '.' in path else 'jpeg'; os.remove(path); _, tdb = await find_file_in_all_dbs(f_id)
+        if tdb:
+            mime = f"image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'}"
+            purl = await save_poster_to_mongo(tdb, f_id, enc, mime)
+            await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
     except: pass
     await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
 
 # ==========================================
-# 8. SERIES WORKFLOW
+# 8. SERIES WORKFLOW (LANDSCAPE POSTER HOSTED IN MONGODB)
 # ==========================================
 @app.on_message(filters.command("addseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_addseries(c, m):
     name, year = parse_name_year(m.text, "/addseries")
     if not name: admin_steps[m.from_user.id] = {"step": "sr_name_year"}; return await m.reply("📺 **সিরিজের নাম ও সাল দিন:**\nউদাহরণ: `Bachelor Point 2026`")
-    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None}
+    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg"}
     mk, _ = await get_cat_markup("srcat", "srcat_skip"); await m.reply(f"📺 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_name_year") & ~filters.regex(r"^/") & unique_msg)
 async def handle_sr_name_year(c, m):
     name, year = parse_name_year(m.text, "")
-    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None}
+    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg"}
     mk, _ = await get_cat_markup("srcat", "srcat_skip"); await m.reply(f"📺 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_callback_query(filters.regex(r"^srcat_") & filters.user(ADMIN_ID) & unique_cb)
@@ -996,14 +1164,14 @@ async def srsave_ask_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     st["step"] = "sr_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
-    await q.message.edit_text(f"🖼 **পোস্টার ছবি দিন** (বা Skip)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Series", callback_data="srsave_final")]]))
+    await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Series", callback_data="srsave_final")]]))
 
 @app.on_callback_query(filters.regex(r"^srprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
 async def srprem_toggle_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if st:
         st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
-        await q.message.edit_text(f"🖼 **পোস্টার ছবি দিন** (বা Skip)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Series", callback_data="srsave_final")]]))
+        await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Series", callback_data="srsave_final")]]))
 
 async def finalize_save_series(c, uid, mo):
     st = admin_steps.pop(uid, None)
@@ -1014,18 +1182,25 @@ async def finalize_save_series(c, uid, mo):
             s = await d.command("dbstats")
             if s["dataSize"] < ms: ms = s["dataSize"]; tdb = d
         except: pass
+    thumb_url = "/poster/default"
+    if st.get("poster_b64"):
+        thumb_url = await save_poster_to_mongo(tdb, sid, st["poster_b64"], st.get("poster_mime", "image/jpeg"))
+    elif st.get("thumb_url"):
+        thumb_url = st["thumb_url"]
     ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
-    ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": None, "seasons": st.get("seasons", []), "thumb_url": st.get("thumb_url") or "https://placehold.co/600x400/1c1c24/ff007f?text=Series", "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+    ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": None, "seasons": st.get("seasons", []), "thumb_url": thumb_url, "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await tdb["files"].insert_one(ns); await notify_new_post(c, ns, await get_config())
-    await mo.edit_text(f"✅ **সিরিজ সেভ হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`")
+    await mo.edit_text(f"✅ **সিরিজ ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`")
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & unique_msg)
 async def handle_sr_poster(c, m):
-    msg = await m.reply("⏳ পোস্টার সেভ হচ্ছে..."); path = await m.download()
+    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার MongoDB-তে সেভ হচ্ছে..."); path = await m.download()
     try:
         with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
-        ext = path.split('.')[-1].lower() if '.' in path else 'jpg'
-        admin_steps[m.from_user.id]["thumb_url"] = f"data:image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'};base64,{enc}"; os.remove(path)
+        ext = path.split('.')[-1].lower() if '.' in path else 'jpeg'
+        admin_steps[m.from_user.id]["poster_b64"] = enc
+        admin_steps[m.from_user.id]["poster_mime"] = f"image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'}"
+        os.remove(path)
     except: pass
     await finalize_save_series(c, m.from_user.id, msg)
 
@@ -1041,7 +1216,10 @@ async def delsrpg_cb(c, q): await send_del_page(q, {"type": "series"}, "delsr", 
 @app.on_callback_query(filters.regex(r"^delsr_") & filters.user(ADMIN_ID) & unique_cb)
 async def delsr_cb(c, q):
     _, f_id, pg = q.data.split("_"); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc and tdb: await tdb["files"].delete_one({"_id": f_id}); await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
+    if doc and tdb:
+        await tdb["files"].delete_one({"_id": f_id})
+        await tdb["posters"].delete_one({"_id": f_id})
+        await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
     await send_del_page(q, {"type": "series"}, "delsr", int(pg), edit=True)
 
 @app.on_message(filters.command("editeseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -1077,9 +1255,9 @@ async def edsr_cb(c, q):
     if not doc: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
     if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_series_panel(q, f_id, edit=True)
-    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
     elif act == "name": admin_steps[q.from_user.id] = {"step": "edsr_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন:")
-    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন পোস্টার ছবি দিন:")
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি দিন:")
     elif act == "cat":
         cats = await get_categories_list()
         if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
@@ -1109,11 +1287,14 @@ async def handle_edsr_name(c, m):
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & unique_msg)
 async def handle_edsr_poster(c, m):
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ আপডেট হচ্ছে..."); path = await m.download()
+    f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে..."); path = await m.download()
     try:
         with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
-        ext = path.split('.')[-1].lower() if '.' in path else 'jpg'; os.remove(path); _, tdb = await find_file_in_all_dbs(f_id)
-        if tdb: await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": f"data:image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'};base64,{enc}"}})
+        ext = path.split('.')[-1].lower() if '.' in path else 'jpeg'; os.remove(path); _, tdb = await find_file_in_all_dbs(f_id)
+        if tdb:
+            mime = f"image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'}"
+            purl = await save_poster_to_mongo(tdb, f_id, enc, mime)
+            await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
     except: pass
     await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
 
@@ -1207,16 +1388,18 @@ async def handle_edsr_qf(c, m):
 async def cmd_addfile(c, m): admin_steps[m.from_user.id] = {"step": "name"}; await m.reply("১. ফাইলের নাম/টাইটেল দিন (যেমন: `Pushpa 2`):")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("name") & ~filters.regex(r"^/") & unique_msg)
-async def handle_admin_name(c, m): admin_steps[m.from_user.id]["title"] = m.text; admin_steps[m.from_user.id]["step"] = "thumb"; await m.reply("২. ফাইলের ছবি (Photo) দিন:")
+async def handle_admin_name(c, m): admin_steps[m.from_user.id]["title"] = m.text; admin_steps[m.from_user.id]["step"] = "thumb"; await m.reply("২. ফাইলের ল্যান্ডস্কোপ ছবি (Photo) দিন:")
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("thumb") & unique_msg)
 async def handle_admin_photo(c, m):
     msg = await m.reply("⏳ সেভ হচ্ছে..."); path = await m.download()
     try:
         with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
-        ext = path.split('.')[-1].lower() if '.' in path else 'jpg'
-        admin_steps[m.from_user.id]["thumb_url"] = f"data:image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'};base64,{enc}"; os.remove(path)
-    except: admin_steps[m.from_user.id]["thumb_url"] = "https://placehold.co/600x400/1c1c24/ff007f?text=Media"
+        ext = path.split('.')[-1].lower() if '.' in path else 'jpeg'
+        admin_steps[m.from_user.id]["poster_b64"] = enc
+        admin_steps[m.from_user.id]["poster_mime"] = f"image/{ext if ext in ['png','webp','gif','jpeg','jpg'] else 'jpeg'}"
+        os.remove(path)
+    except: pass
     await msg.edit_text("ভিডিও টাইপ?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="ftype_prem")], [InlineKeyboardButton("👤 Regular", callback_data="ftype_reg")]]))
 
 @app.on_callback_query(filters.regex(r"^ftype_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1232,8 +1415,12 @@ async def handle_admin_file(c, m):
             st = await d.command("dbstats")
             if st["dataSize"] < ms: ms = st["dataSize"]; tdb = d
         except: pass
-    nf = {"_id": sid, "title": admin_steps[m.from_user.id]["title"], "category": "All", "is_premium": admin_steps[m.from_user.id].get("is_premium", False), "file_id": fid, "thumb_url": admin_steps[m.from_user.id].get("thumb_url"), "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-    await tdb["files"].insert_one(nf); del admin_steps[m.from_user.id]; await notify_new_post(c, nf, await get_config()); await msg.edit_text(f"✅ ফাইল অ্যাড হয়েছে! ID: `{sid}`")
+    st_data = admin_steps[m.from_user.id]
+    thumb_url = "/poster/default"
+    if st_data.get("poster_b64"):
+        thumb_url = await save_poster_to_mongo(tdb, sid, st_data["poster_b64"], st_data.get("poster_mime", "image/jpeg"))
+    nf = {"_id": sid, "title": st_data["title"], "category": "All", "is_premium": st_data.get("is_premium", False), "file_id": fid, "thumb_url": thumb_url, "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+    await tdb["files"].insert_one(nf); del admin_steps[m.from_user.id]; await notify_new_post(c, nf, await get_config()); await msg.edit_text(f"✅ ফাইল ও পোস্টার MongoDB-তে অ্যাড হয়েছে! ID: `{sid}`")
 
 LEGACY_EXAMPLES = {
     "vidtitel": "`/vidtitel নতুন বাংলা নাটক`", "delfile": "`/delfile AbCd1234`",
@@ -1257,10 +1444,14 @@ async def cmd_legacy_router(c, m):
         if cmd == "delfile":
             if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['delfile']}")
             for d in await get_extra_dbs_async():
-                if (await d["files"].delete_one({"_id": parts[1]})).deleted_count > 0: return await m.reply("✅ ফাইল ডিলিট হয়েছে!")
+                if (await d["files"].delete_one({"_id": parts[1]})).deleted_count > 0:
+                    await d["posters"].delete_one({"_id": parts[1]})
+                    return await m.reply("✅ ফাইল ডিলিট হয়েছে!")
             return await m.reply("❌ ফাইল পাওয়া যায়নি!")
         if cmd == "delall":
-            for d in await get_extra_dbs_async(): await d["files"].delete_many({})
+            for d in await get_extra_dbs_async():
+                await d["files"].delete_many({})
+                await d["posters"].delete_many({})
             return await m.reply("✅ সব ফাইল ডিলিট হয়েছে!")
         if cmd == "mongo":
             if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['mongo']}")
@@ -1352,8 +1543,11 @@ async def cmd_auto_promo(c, m):
     if cmd == "promot":
         if not m.reply_to_message or not m.reply_to_message.photo or "|" not in m.text: return await m.reply("❌ **নিয়ম:** ফটোতে রিপ্লাই করে `/promot Title | https://t.me/...` লিখুন।")
         t, l = [x.strip() for x in m.text.replace("/promot", "").split("|", 1)]; path = await m.reply_to_message.download()
-        with open(path, "rb") as f: b64 = f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode('utf-8')}"
-        os.remove(path); await get_db(); await promotions_col.insert_one({"title": t, "link": l, "image": b64}); return await m.reply(f"✅ প্রোমোট অ্যাড হয়েছে: **{t}**")
+        with open(path, "rb") as f: enc = base64.b64encode(f.read()).decode('utf-8')
+        os.remove(path); await get_db()
+        pid = "promo_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        purl = await save_poster_to_mongo(db, pid, enc, "image/jpeg")
+        await promotions_col.insert_one({"title": t, "link": l, "image": purl}); return await m.reply(f"✅ প্রোমোট ও পোস্টার MongoDB-তে অ্যাড হয়েছে: **{t}**")
     if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document): return await m.reply("❌ ভিডিওতে রিপ্লাই করুন।")
     fid = (m.reply_to_message.video or m.reply_to_message.document).file_id
     if cmd == "auto":
@@ -1362,7 +1556,7 @@ async def cmd_auto_promo(c, m):
         admin_steps[m.from_user.id] = {"file_id": fid}; return await m.reply("টাইটেল সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t['title'], callback_data=f"selttl_{t['_id']}")] for t in ts]))
     title = m.text.replace("/auto2", "").strip()
     if not title: return await m.reply("❌ **উদাহরণ:** ভিডিওতে রিপ্লাই করে `/auto2 নতুন নাটক` লিখুন।")
-    admin_steps[m.from_user.id] = {"step": "auto_wait", "title": title, "file_id": fid, "thumb_url": "https://placehold.co/600x400/1c1c24/ff007f?text=Media"}
+    admin_steps[m.from_user.id] = {"step": "auto_wait", "title": title, "file_id": fid, "thumb_url": "/poster/default"}
     await m.reply(f"✅ **{title}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="auto_prem")], [InlineKeyboardButton("👤 Regular", callback_data="auto_reg")]]))
 
 @app.on_callback_query(filters.regex(r"^(selttl|auto)_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1371,24 +1565,191 @@ async def legacy_auto_cb(c, q):
     if not sd: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     if q.data.startswith("selttl_"):
         await get_db(); td = await titles_col.find_one({"_id": ObjectId(q.data.split("_")[1])})
-        admin_steps[q.from_user.id] = {"step": "auto_wait", "title": td["title"], "file_id": sd["file_id"], "thumb_url": "https://placehold.co/600x400/1c1c24/ff007f?text=Media"}
+        admin_steps[q.from_user.id] = {"step": "auto_wait", "title": td["title"], "file_id": sd["file_id"], "thumb_url": "/poster/default"}
         return await q.message.edit_text(f"✅ **{td['title']}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="auto_prem")], [InlineKeyboardButton("👤 Regular", callback_data="auto_reg")]]))
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
 
 # ==========================================
-# 10. FLASK WEB API
+# 10. FLASK WEB API & MONGODB POSTER HOSTING + SHORTENER AD GATE
 # ==========================================
+@web.route('/poster/<poster_id>')
+def serve_poster_from_mongo(poster_id):
+    if poster_id == "default":
+        return Response(make_default_poster_svg("MEDIA"), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+    for d in get_extra_dbs_sync():
+        try:
+            pdoc = d["posters"].find_one({"_id": poster_id})
+            if pdoc and pdoc.get("data"):
+                raw, mime = decode_b64_to_bytes(pdoc["data"])
+                if raw: return Response(raw, mimetype=pdoc.get("mime", mime), headers={"Cache-Control": "public, max-age=86400"})
+        except: pass
+
+    if poster_id.startswith("promo_"):
+        try:
+            pr = sync_db["promotions"].find_one({"_id": ObjectId(poster_id[6:])})
+            if pr and pr.get("image"):
+                if pr["image"].startswith("data:image"):
+                    raw, mime = decode_b64_to_bytes(pr["image"])
+                    if raw: return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=86400"})
+                elif pr["image"].startswith("http"):
+                    return redirect(pr["image"])
+        except: pass
+
+    if poster_id.startswith("upc_"):
+        try:
+            up = sync_db["upcoming"].find_one({"_id": ObjectId(poster_id[4:])})
+            if up and up.get("thumb_url"):
+                if up["thumb_url"].startswith("data:image"):
+                    raw, mime = decode_b64_to_bytes(up["thumb_url"])
+                    if raw: return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=86400"})
+                elif up["thumb_url"].startswith("http"):
+                    return redirect(up["thumb_url"])
+        except: pass
+
+    for d in get_extra_dbs_sync():
+        try:
+            fdoc = d["files"].find_one({"_id": poster_id})
+            if fdoc and fdoc.get("thumb_url"):
+                tu = fdoc["thumb_url"]
+                if tu.startswith("data:image"):
+                    raw, mime = decode_b64_to_bytes(tu)
+                    if raw: return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=86400"})
+                elif tu.startswith("http"):
+                    return redirect(tu)
+        except: pass
+
+    return Response(make_default_poster_svg("POSTER"), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+
 @web.route('/api/shorten', methods=['POST'])
 def api_shorten():
     url = (request.json.get("url") or "").strip()
     if not url.startswith("http"): return jsonify({"status": "error", "msg": "সঠিক URL দিন (https://...)"})
     try:
-        r = requests.get(f"https://tinyurl.com/api-create.php?url={url}", timeout=6)
-        if r.status_code == 200 and r.text.startswith("http"): return jsonify({"status": "success", "short_url": r.text.strip()})
-    except: pass
-    return jsonify({"status": "error", "msg": "Shortener ব্যর্থ হয়েছে।"})
+        code = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+        while sync_db["short_links"].find_one({"_id": code}):
+            code = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+        sync_db["short_links"].insert_one({
+            "_id": code,
+            "url": url,
+            "clicks": 0,
+            "created_at": datetime.utcnow().isoformat() + "Z"
+        })
+        conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+        live_url = get_live_web_url(conf)
+        return jsonify({"status": "success", "short_url": f"{live_url}/s/{code}"})
+    except Exception as e:
+        return jsonify({"status": "error", "msg": f"Shortener ত্রুটি: {e}"})
+
+SHORT_VERIFY_HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>{{ site_name }} — Link Verification</title>
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet">
+{% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" async></script>{% endfor %}
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#fff;font-family:'Hind Siliguri',sans-serif;display:flex;align-items:center;justify-content:center;padding:18px}
+.card{background:#fff;color:#0f172a;width:100%;max-width:420px;border-radius:22px;padding:24px 20px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-weight:700;font-size:12px;padding:4px 12px;border-radius:20px;margin-bottom:10px}
+h2{margin:0 0 8px 0;font-size:21px}
+p{margin:0 0 18px 0;font-size:13.5px;color:#64748b}
+.btn{width:100%;border:none;padding:13px 16px;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn-monetag{background:linear-gradient(90deg,#6c5ce7,#4f46e5);color:#fff}
+.btn-link{background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff}
+.btn-go{background:linear-gradient(90deg,#10b981,#059669);color:#fff;display:none;text-decoration:none}
+.timer-box{display:none;background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-bottom:12px}
+.timer-num{font-size:38px;font-weight:800;color:#e11d48;line-height:1.1}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="badge">🔗 {{ site_name }} Safe Link</div>
+  <h2>লিংকটি ভেরিফাই করুন</h2>
+  <p>আপনার সুবিধামতো যেকোনো একটি অ্যাড ভেরিফিকেশন সম্পন্ন করে আসল লিংকে যান।</p>
+
+  <div id="verify-options">
+    {% if zone_ids %}
+    <button class="btn btn-monetag" onclick="verifyMonetag()">📺 Monetag Ad দিয়ে Verify করুন</button>
+    {% endif %}
+    {% if ad_link %}
+    <button class="btn btn-link" onclick="verifyLinkAd()">🔗 Link Ad (Adsterra) দিয়ে Verify করুন</button>
+    {% endif %}
+    {% if not zone_ids and not ad_link %}
+    <button class="btn btn-monetag" onclick="startDirectWait()">⚡ Verify & Continue</button>
+    {% endif %}
+  </div>
+
+  <div class="timer-box" id="timer-box">
+    <div style="font-size:13px;color:#475569;">অনুগ্রহ করে অপেক্ষা করুন...</div>
+    <div class="timer-num" id="t-num">{{ wait_time }}</div>
+  </div>
+
+  <a id="go-btn" class="btn btn-go" href="{{ target_url }}">✅ লিংক আনলক হয়েছে — এখানে ক্লিক করুন</a>
+</div>
+<script>
+const targetUrl={{ target_url_json | safe }};
+const adLink={{ ad_link_json | safe }};
+const zoneIds={{ zone_ids_json | safe }};
+const waitTime={{ wait_time }};
+
+function unlockTarget(){
+  document.getElementById('verify-options').style.display='none';
+  document.getElementById('timer-box').style.display='none';
+  const g=document.getElementById('go-btn');
+  g.style.display='flex';
+  g.href=targetUrl;
+}
+async function verifyMonetag(){
+  const zid=zoneIds[0];
+  if(zid && typeof window['show_'+zid]==='function'){
+    try{ await window['show_'+zid](); unlockTarget(); return; }catch(e){}
+  }
+  startCountdown(3);
+}
+function verifyLinkAd(){
+  if(adLink){ try{ window.open(adLink,'_blank'); }catch(e){} }
+  startCountdown(waitTime||5);
+}
+function startDirectWait(){ startCountdown(3); }
+function startCountdown(sec){
+  document.getElementById('verify-options').style.display='none';
+  const tb=document.getElementById('timer-box'), tn=document.getElementById('t-num');
+  tb.style.display='block'; tn.innerText=sec;
+  let t=sec;
+  const iv=setInterval(()=>{
+    t--; tn.innerText=Math.max(0,t);
+    if(t<=0){ clearInterval(iv); unlockTarget(); }
+  },1000);
+}
+</script>
+</body>
+</html>"""
+
+@web.route('/s/<code>')
+def short_link_gate(code):
+    doc = sync_db["short_links"].find_one({"_id": code})
+    if not doc:
+        return "<h2 style='font-family:sans-serif;text-align:center;margin-top:50px;'>❌ লিংকটি পাওয়া যায়নি বা মেয়াদ শেষ হয়েছে!</h2>", 404
+    sync_db["short_links"].update_one({"_id": code}, {"$inc": {"clicks": 1}})
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    links = list(sync_db["ad_links"].find())
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    ad_link = random.choice(links)["link"] if links else None
+    wait_time = random.choice(conf.get("direk_wait", [5]))
+    return render_template_string(
+        SHORT_VERIFY_HTML,
+        site_name=conf.get("site_name", "Moviee Link"),
+        target_url=doc["url"],
+        target_url_json=json.dumps(doc["url"]),
+        ad_link=ad_link,
+        ad_link_json=json.dumps(ad_link),
+        zone_ids=zones,
+        zone_ids_json=json.dumps(zones),
+        wait_time=wait_time
+    )
 
 @web.route('/api/rates')
 def api_rates():
@@ -1404,16 +1765,30 @@ def get_ad_api(user_id, file_id):
     for d in get_extra_dbs_sync():
         fd = d["files"].find_one({"_id": file_id})
         if fd: break
-    if user.get("premium_until") and user["premium_until"] > datetime.now(): return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
+    if user.get("premium_until") and user["premium_until"] > datetime.now():
+        return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
     if file_id in user.get("unlocked_files", {}):
         try:
-            if datetime.fromisoformat(user["unlocked_files"][file_id].replace("Z", "")) > datetime.utcnow(): return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
+            if datetime.fromisoformat(user["unlocked_files"][file_id].replace("Z", "")) > datetime.utcnow():
+                return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
         except: pass
-    if fd and fd.get("is_premium"): return jsonify({"show_ad": False, "is_unlocked": False, "requires_coin": True, "coin_price": config.get("premium_vid_coin", 50)})
     zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
     links = list(sync_db["ad_links"].find())
-    if config.get("ads_on", True) and (links or zones):
-        return jsonify({"show_ad": True, "ad_link": random.choice(links)["link"] if links else None, "zone_id": random.choice(zones) if zones else None, "wait_time": random.choice(config.get("direk_wait", [5])), "requires_coin": False, "coin_price": config.get("premium_vid_coin", 50)})
+    coin_price = config.get("premium_vid_coin", 50)
+    is_prem_file = bool(fd and fd.get("is_premium"))
+    ads_on = config.get("ads_on", True)
+    if is_prem_file or (ads_on and (links or zones)):
+        return jsonify({
+            "show_ad": True,
+            "is_unlocked": False,
+            "is_premium_file": is_prem_file,
+            "requires_coin": is_prem_file,
+            "coin_price": coin_price,
+            "user_balance": user.get("balance", 0),
+            "ad_link": random.choice(links)["link"] if links else None,
+            "zone_id": random.choice(zones) if zones else None,
+            "wait_time": random.choice(config.get("direk_wait", [5]))
+        })
     return jsonify({"show_ad": False, "is_unlocked": True})
 
 @web.route('/api/unlock_file', methods=['POST'])
@@ -1559,17 +1934,17 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 .page{display:none}.page.active{display:block}
 .sec-head{padding:10px 14px 6px 14px;font-size:15.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
 .pin-scroll{display:flex;gap:10px;overflow-x:auto;padding:0 14px 10px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
-.pin-card{min-width:160px;max-width:160px;cursor:pointer}.pin-img-w{position:relative;width:100%;height:94px;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,.08)}.pin-img-w img{width:100%;height:100%;object-fit:cover}
+.pin-card{min-width:168px;max-width:168px;cursor:pointer}.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,.08);background:#111}.pin-img-w img{width:100%;height:100%;object-fit:cover}
 .pin-tag{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;padding:2px 7px;border-radius:10px}.pin-t{font-size:12.5px;font-weight:600;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid #7c6cf6;box-shadow:0 4px 14px rgba(108,92,231,.08);cursor:pointer}
-.feed-img-w{position:relative;width:100%;height:200px;background:#111}.feed-img-w img{width:100%;height:100%;object-fit:cover}
+.feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#111}.feed-img-w img{width:100%;height:100%;object-fit:cover}
 .b-new{position:absolute;top:10px;left:10px;background:#2979ff;color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px}.b-type{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.75);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px}
 .feed-body{padding:10px 12px 12px 12px}.feed-title{font-size:15px;font-weight:700;margin-bottom:3px}.feed-meta{font-size:12px;color:#777;display:flex;justify-content:space-between}
 .car-wrap{display:flex;gap:12px;overflow-x:auto;padding:4px 0 12px 0;scrollbar-width:none}.car-wrap::-webkit-scrollbar{display:none}
-.p-slide{min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;height:140px;object-fit:cover}.p-slide-b{padding:10px 12px}
+.p-slide{min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover}.p-slide-b{padding:10px 12px}
 .watch-pill{background:#e63946;color:#fff;border:none;padding:6px 16px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
 .det-hdr{background:#fff;padding:12px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #eee;position:sticky;top:0;z-index:95}.back-btn{width:34px;height:34px;border-radius:50%;background:#f1f3f5;border:none;font-size:18px;cursor:pointer}
-.det-img-w{position:relative;width:100%;height:220px;background:#000}.det-img-w img{width:100%;height:100%;object-fit:cover}.hd-b{position:absolute;top:12px;left:12px;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
+.det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#000}.det-img-w img{width:100%;height:100%;object-fit:cover}.hd-b{position:absolute;top:12px;left:12px;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
 .det-body{background:#fff;padding:14px 16px}.det-title{font-size:19px;font-weight:700;margin:0 0 8px 0}.d-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.d-tag{background:#f1f5f9;color:#475569;padding:3px 10px;border-radius:12px;font-size:11.5px;font-weight:600}
 .stats-r{display:flex;justify-content:space-around;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9;margin-bottom:12px}.stat-i{text-align:center;font-size:12px;color:#64748b}.stat-i b{display:block;font-size:15px;color:#111}
 .shr-c{width:38px;height:38px;border-radius:50%;background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;font-size:16px;cursor:pointer}.tip-ban{background:#fff8eb;border:1px solid #fde68a;color:#92400e;padding:9px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:10px}
@@ -1593,6 +1968,7 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 .modal-card{background:#fff;color:#111;border-radius:22px;padding:22px 18px;width:100%;max-width:390px;text-align:center;box-shadow:0 15px 40px rgba(0,0,0,.25);max-height:88vh;overflow-y:auto;position:relative}
 .age-card{background:#1c1d2b;color:#fff;border-radius:22px;padding:24px 20px;width:100%;max-width:370px;text-align:center;border:1px solid rgba(255,255,255,.1)}.age-warn{background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#fca5a5;padding:12px;border-radius:12px;font-size:13px;margin:14px 0}
 .wel-item{text-align:left;font-size:13.5px;line-height:1.55;margin-bottom:10px;color:#334155}
+.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff}
 </style>
 </head>
 <body>
@@ -1619,6 +1995,14 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
   <div class="age-warn">⚠️ আপনার বয়স ১৮+ না হলে এই ক্যাটাগরি ব্যবহার করবেন না।</div>
   <button class="btn-p" style="background:linear-gradient(90deg,#00e5a3,#00d4ff);color:#000;margin-bottom:10px;" onclick="confirm18()">✅ হ্যাঁ, আমার বয়স ১৮+ বছর</button>
   <button class="btn-p" style="background:transparent;border:1px solid #475569;color:#94a3b8;" onclick="deny18()">❌ না, বের হয়ে যান</button>
+</div></div>
+
+<div id="unlock-modal" class="modal-ov"><div class="modal-card">
+  <button onclick="document.getElementById('unlock-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
+  <div style="font-size:38px;margin-bottom:4px;">🔓</div>
+  <h3 style="margin:0 0 6px 0;color:#0f172a;">ফাইল আনলক করুন</h3>
+  <p style="font-size:13px;color:#64748b;margin:0 0 14px 0;">আপনার যেটি সহজ মনে হয়, সেটি দিয়ে আনলক করে ডাউনলোড করুন:</p>
+  <div id="unlock-options-area"></div>
 </div></div>
 
 <div id="ad-modal" class="modal-ov"><div class="modal-card"><h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3><p style="font-size:13px;color:#64748b;">সম্পূর্ণ অ্যাড দেখুন</p><h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1><button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button></div></div>
@@ -1674,7 +2058,7 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 
 <div id="page-setting" class="page">
   <div class="card-box" style="text-align:center;">
-    <img id="u-pic" src="https://placehold.co/100x100/6c5ce7/ffffff?text=User" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #6c5ce7;">
+    <img id="u-pic" src="/poster/default" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #6c5ce7;">
     <h3 id="u-name" style="margin:8px 0 2px 0;">User</h3><div style="font-size:12px;color:#64748b;">ID: <span id="u-id"></span></div>
     <div id="u-prem-status" style="display:inline-block;margin-top:8px;padding:4px 12px;border-radius:14px;font-size:12px;font-weight:700;background:#f1f5f9;">👤 Regular Member</div>
     <div id="u-prem-exp" style="font-size:11.5px;color:#d97706;margin-top:4px;"></div><h2 style="margin:12px 0 0 0;color:#4f46e5;">🪙 <span id="u-bal">0</span> Coins</h2>
@@ -1695,7 +2079,7 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 
 <script>
 const tg=window.Telegram.WebApp; tg.expand();
-const botUsername="{{ bot_username }}", siteName="{{ site_name }}";
+const botUsername="{{ bot_username }}", siteName="{{ site_name }}", recGroupLink={{ rec_group_link_json | safe }};
 const allFiles={{ files_json | safe }}, categories={{ categories_json | safe }}, dbLanguages={{ languages_json | safe }};
 const promotions={{ promotions_json | safe }}, upcomingList={{ upcoming_json | safe }}, zoneIds={{ zone_ids_json | safe }};
 
@@ -1731,7 +2115,7 @@ function deny18(){pendingCat=null;document.getElementById('age-modal').style.dis
 function setLang(l){activeLang=l;renderFilters();renderFeed();}
 renderFilters();
 
-function renderPinned(){let ps=allFiles.filter(f=>f.pinned);if(!ps.length)ps=allFiles.slice(0,6);document.getElementById('pinned-list').innerHTML=ps.map(f=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img src="${f.thumb_url||'https://placehold.co/300x180?text=Video'}"><div class="pin-tag">📌 Pinned</div></div><div class="pin-t">${f.title}</div></div>`).join('');}
+function renderPinned(){let ps=allFiles.filter(f=>f.pinned);if(!ps.length)ps=allFiles.slice(0,6);document.getElementById('pinned-list').innerHTML=ps.map(f=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">📌 Pinned</div></div><div class="pin-t">${f.title}</div></div>`).join('');}
 renderPinned();
 
 function timeAgo(iso){if(!iso)return 'Recently';const s=Math.floor((new Date()-new Date(iso))/1000);if(s<3600)return Math.max(1,Math.floor(s/60))+' min ago';if(s<86400)return Math.floor(s/3600)+' hr ago';return new Date(iso).toLocaleDateString();}
@@ -1747,15 +2131,15 @@ function renderFeed(){
   let h='';
   list.forEach((f,i)=>{
     const tl=f.type==='series'?'📺 Series':(f.is_premium?'💎 VIP':'🎬 Movie');
-    h+=`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img src="${f.thumb_url||'https://placehold.co/600x340?text=Video'}"><div class="b-new">🆕 New</div><div class="b-type">${tl}</div></div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
-    if((i+1)%3===0&&promotions.length>0)h+=`<div class="car-wrap">`+promotions.map(p=>`<div class="p-slide" onclick="openTgLink('${p.link}')"><img src="${p.image}"><div class="p-slide-b"><div style="font-size:14px;font-weight:700;margin-bottom:6px;">${p.title}</div><button class="watch-pill">Watch Now</button></div></div>`).join('')+`</div>`;
+    h+=`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img src="${f.thumb_url||'/poster/default'}"><div class="b-new">🆕 New</div><div class="b-type">${tl}</div></div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
+    if((i+1)%3===0&&promotions.length>0)h+=`<div class="car-wrap">`+promotions.map(p=>`<div class="p-slide" onclick="openTgLink('${p.link}')"><img src="${p.image||'/poster/default'}"><div class="p-slide-b"><div style="font-size:14px;font-weight:700;margin-bottom:6px;">${p.title}</div><button class="watch-pill">Watch Now</button></div></div>`).join('')+`</div>`;
   });
   document.getElementById('feed-list').innerHTML=h||"<p style='text-align:center;color:#777;padding:30px;'>কোনো ভিডিও পাওয়া যায়নি!</p>";
 }
 renderFeed();
 
-function renderFavs(){const ids=[...new Set([...(userState.favorites||[]),...(userState.history||[])])];const its=allFiles.filter(f=>ids.includes(f._id));document.getElementById('fav-list').innerHTML=its.map(f=>`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img src="${f.thumb_url}"><div class="b-new">🔖 Saved</div></div><div class="feed-body"><div class="feed-title">${f.title}</div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:30px;'>কোনো সেভ করা ভিডিও নেই!</p>";}
-function renderUpcoming(){document.getElementById('upcoming-list').innerHTML=upcomingList.map(u=>`<div class="feed-card"><div class="feed-img-w"><img src="${u.thumb_url}"><div class="b-new">📅 UPCOMING</div><div class="b-type">🕒 ${u.release_time}</div></div><div class="feed-body"><div class="feed-title">${u.title}</div><div class="feed-meta"><span>Release: ${u.release_time}</span></div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো আপকামিং শিডিউল নেই!</p>";document.getElementById('promo-full-list').innerHTML=promotions.map(p=>`<div class="feed-card" onclick="openTgLink('${p.link}')"><div class="feed-img-w"><img src="${p.image}"><div class="b-new">⭐ PROMO</div></div><div class="feed-body"><div class="feed-title">${p.title}</div></div></div>`).join('');}
+function renderFavs(){const ids=[...new Set([...(userState.favorites||[]),...(userState.history||[])])];const its=allFiles.filter(f=>ids.includes(f._id));document.getElementById('fav-list').innerHTML=its.map(f=>`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img src="${f.thumb_url||'/poster/default'}"><div class="b-new">🔖 Saved</div></div><div class="feed-body"><div class="feed-title">${f.title}</div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:30px;'>কোনো সেভ করা ভিডিও নেই!</p>";}
+function renderUpcoming(){document.getElementById('upcoming-list').innerHTML=upcomingList.map(u=>`<div class="feed-card"><div class="feed-img-w"><img src="${u.thumb_url||'/poster/default'}"><div class="b-new">📅 UPCOMING</div><div class="b-type">🕒 ${u.release_time}</div></div><div class="feed-body"><div class="feed-title">${u.title}</div><div class="feed-meta"><span>Release: ${u.release_time}</span></div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো আপকামিং শিডিউল নেই!</p>";document.getElementById('promo-full-list').innerHTML=promotions.map(p=>`<div class="feed-card" onclick="openTgLink('${p.link}')"><div class="feed-img-w"><img src="${p.image||'/poster/default'}"><div class="b-new">⭐ PROMO</div></div><div class="feed-body"><div class="feed-title">${p.title}</div></div></div>`).join('');}
 renderUpcoming();
 
 function openDetails(id){
@@ -1763,7 +2147,7 @@ function openDetails(id){
   if((curFile.category||'').includes('18')&&sessionStorage.getItem('age_18_ok')!=='1'){pendingCat=curFile.category;document.getElementById('age-modal').style.display='flex';return;}
   curSeasonIdx=0; document.getElementById('main-chrome').style.display='none'; document.getElementById('bottom-nav').style.display='none'; document.getElementById('float-search-btn').style.display='none';
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); document.getElementById('page-details').classList.add('active'); document.getElementById('cmt-bar').style.display='flex'; window.scrollTo(0,0);
-  document.getElementById('det-poster').src=curFile.thumb_url||'https://placehold.co/600x340?text=Video'; document.getElementById('det-title').innerText=curFile.title;
+  document.getElementById('det-poster').src=curFile.thumb_url||'/poster/default'; document.getElementById('det-title').innerText=curFile.title;
   document.getElementById('det-likes').innerText=(curFile.likes||[]).length; document.getElementById('det-views').innerText=curFile.views||0;
   document.getElementById('det-cmts-cnt').innerText=(curFile.comments||[]).length; document.getElementById('cmt-cnt-h').innerText=(curFile.comments||[]).length;
   let tags=[]; if(curFile.year)tags.push(curFile.year); if(curFile.category)tags.push(curFile.category); if(curFile.language)tags.push(curFile.language);
@@ -1794,21 +2178,58 @@ function renderSelectors(){
 function scrollToDownload(){document.getElementById('det-selector-area')?.scrollIntoView({behavior:'smooth'});}
 function openBotTutorial(){openTgLink(`https://t.me/${botUsername}?start=home`);}
 
+let pendingUnlockData=null;
 async function triggerDownload(sp){
   const dl=`https://t.me/${botUsername}?start=${sp}`, res=await fetch(`/api/get_ad/${userId}/${curFile._id}`), ad=await res.json();
-  if(ad.requires_coin){
-    if(confirm(`প্রিমিয়াম ভিডিও আনলক করতে ${ad.coin_price} কয়েন লাগবে। আনলক করবেন?`)){
-      const r2=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:curFile._id,method:'coin'})});
-      const d2=await r2.json(); if(d2.status==='success'){loadUser();openTgLink(dl);}else alert(d2.msg);
-    } return;
-  }
   if(!ad.show_ad){openTgLink(dl);return;}
+  pendingUnlockData={dl,ad,fileId:curFile._id};
   const zid=ad.zone_id||(zoneIds.length?zoneIds[0]:null);
-  if(zid&&typeof window['show_'+zid]==='function'){
-    try{await window['show_'+zid]();await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:curFile._id,method:'ad'})});openTgLink(dl);return;}catch(e){}
+  let h=`<button class="unlock-opt" style="background:linear-gradient(90deg,#f59e0b,#d97706);" onclick="unlockWithCoin()"><span>🪙 কয়েন দিয়ে আনলক (${ad.coin_price} Coins)</span><span>আপনার: ${userState.balance}</span></button>`;
+  if(zid){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="unlockWithMonetag('${zid}')"><span>📺 Monetag Zone Ad দিয়ে আনলক</span><span>Easy ⚡</span></button>`;
   }
-  if(ad.ad_link)runAdTimer(ad.ad_link,ad.wait_time||5,async()=>{await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:curFile._id,method:'ad'})});openTgLink(dl);});
-  else openTgLink(dl);
+  if(ad.ad_link){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="unlockWithAdsterra()"><span>🔗 Adsterra / Link Ad দিয়ে আনলক</span><span>${ad.wait_time||5}s ⏳</span></button>`;
+  }
+  document.getElementById('unlock-options-area').innerHTML=h;
+  document.getElementById('unlock-modal').style.display='flex';
+}
+
+async function unlockWithCoin(){
+  if(!pendingUnlockData)return;
+  const {dl,fileId}=pendingUnlockData;
+  const r2=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'coin'})});
+  const d2=await r2.json();
+  if(d2.status==='success'){
+    document.getElementById('unlock-modal').style.display='none';
+    loadUser();
+    openTgLink(dl);
+  } else alert(d2.msg);
+}
+
+async function unlockWithMonetag(zid){
+  if(!pendingUnlockData)return;
+  const {dl,fileId}=pendingUnlockData;
+  document.getElementById('unlock-modal').style.display='none';
+  if(zid&&typeof window['show_'+zid]==='function'){
+    try{
+      await window['show_'+zid]();
+      await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'monetag'})});
+      openTgLink(dl);
+      return;
+    }catch(e){}
+  }
+  alert('⚠️ Monetag অ্যাড লোড হয়নি, অন্য মাধ্যম বা কয়েক সেকেন্ড পর আবার চেষ্টা করুন।');
+}
+
+function unlockWithAdsterra(){
+  if(!pendingUnlockData)return;
+  const {dl,ad,fileId}=pendingUnlockData;
+  document.getElementById('unlock-modal').style.display='none';
+  runAdTimer(ad.ad_link,ad.wait_time||5,async()=>{
+    await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'adsterra'})});
+    openTgLink(dl);
+  });
 }
 
 function runAdTimer(link,sec,onDone){
@@ -1847,8 +2268,8 @@ const TOOLS=[
   {id:'word',sec:'🧰 More Useful Tools',ico:'🔤',bg:'#e0e7ff',bl:'#fecdd3',name:'Text Case & Word Count',desc:'Case & word count',n:1},
   {id:'zakat',sec:'🧰 More Useful Tools',ico:'🕌',bg:'#fef9c3',bl:'#bbf7d0',name:'Zakat Calculator',desc:'2.5% Zakat calc',n:1},
   {id:'color',sec:'🧰 More Useful Tools',ico:'🎨',bg:'#ffe4e6',bl:'#fbcfe8',name:'Color Picker',desc:'HEX, RGB, HSL codes',n:1},
-  {id:'short',sec:'🌟 More Tools',ico:'🔗',bg:'#e0f2fe',bl:'#ddd6fe',name:'Link Shortener',desc:'Shorten long links'},
-  {id:'mrec',sec:'🌟 More Tools',ico:'🎬',bg:'#f1f5f9',bl:'#fecaca',name:'Movie Recommendation',desc:'Find random movies'}
+  {id:'short',sec:'🌟 More Tools',ico:'🔗',bg:'#e0f2fe',bl:'#ddd6fe',name:'Link Shortener',desc:'Shorten with Ad Gate'},
+  {id:'mrec',sec:'🌟 More Tools',ico:'🎬',bg:'#f1f5f9',bl:'#fecaca',name:'Movie Recommendation',desc:'Join Movie Group'}
 ];
 
 function renderTools(){
@@ -1862,6 +2283,9 @@ function renderTools(){
 
 let tasbihCnt=0;
 function openTool(id){
+  if(id==='mrec'&&recGroupLink){
+    openTgLink(recGroupLink);
+  }
   const t=TOOLS.find(x=>x.id===id); document.getElementById('tool-m-title').innerText=t.ico+' '+t.name;
   const b=document.getElementById('tool-m-body'); document.getElementById('tool-modal').style.display='flex';
   const ui={
@@ -1883,8 +2307,10 @@ function openTool(id){
     word:`<span class="tool-lbl">যেকোনো লেখা লিখুন (যেমন: Hello World 2026)</span><textarea id="ti1" class="s-input" rows="3" placeholder="যেমন: Hello World 2026" onkeyup="calcWord()"></textarea><div style="display:flex;gap:6px;margin-top:8px;"><button class="btn-p" onclick="ti1.value=ti1.value.toUpperCase();calcWord()">UPPER</button><button class="btn-p" onclick="ti1.value=ti1.value.toLowerCase();calcWord()">lower</button></div><div id="tr" class="tool-res"></div>`,
     zakat:`<span class="tool-lbl">মোট সম্পদ/টাকা/সোনা (যেমন: 500000)</span><input type="number" id="ti1" class="s-input" placeholder="যেমন: 500000"><span class="tool-lbl">ঋণ থাকলে লিখুন (যেমন: 0)</span><input type="number" id="ti2" class="s-input" placeholder="যেমন: 0" value="0"><br><br><button class="btn-p" onclick="calcZakat()">Calculate 2.5%</button><div id="tr" class="tool-res"></div>`,
     color:`<span class="tool-lbl">যেকোনো কালার সিলেক্ট করুন</span><input type="color" id="ti1" value="#6c5ce7" style="width:100%;height:50px;border:none;cursor:pointer;" oninput="pickCol()"><div id="tr" class="tool-res"></div>`,
-    short:`<span class="tool-lbl">বড় লিংক দিন (যেমন: https://google.com/search?q=movies)</span><input id="ti1" class="s-input" placeholder="যেমন: https://google.com"><br><br><button class="btn-p" onclick="shortUrl()">Shorten Link</button><div id="tr" class="tool-res"></div>`,
-    mrec:`<button class="btn-p" onclick="recMovie()">🎲 Suggest a Movie/Series</button><div id="tr" class="tool-res"></div>`
+    short:`<span class="tool-lbl">বড় লিংক দিন (যেমন: https://google.com/search?q=movies)</span><input id="ti1" class="s-input" placeholder="যেমন: https://google.com"><br><br><button class="btn-p" onclick="shortUrl()">Shorten Link (With Ads)</button><div id="tr" class="tool-res"></div>`,
+    mrec: recGroupLink
+      ? `<p style="font-size:13.5px;color:#475569;">মুভি রিকোয়েস্ট ও সাজেশন পেতে আমাদের অফিসিয়াল গ্রুপে জয়েন করুন!</p><button class="btn-p" onclick="openTgLink('${recGroupLink}')">👥 Join Movie Recommendation Group</button><br><br><button class="btn-p" style="background:#0f172a;" onclick="recMovie()">🎲 Suggest Random Movie</button><div id="tr" class="tool-res"></div>`
+      : `<button class="btn-p" onclick="recMovie()">🎲 Suggest a Movie/Series</button><div id="tr" class="tool-res"></div>`
   };
   b.innerHTML=ui[id];
   if(id==='blood')showBlood();
@@ -1908,7 +2334,7 @@ function calcDDiff(){const d1=new Date(ti1.value),d2=new Date(ti2.value);if(isNa
 function calcWord(){const t=ti1.value;tr.innerHTML=`Words: <b>${t.trim()?t.trim().split(/\s+/).length:0}</b> | Chars: <b>${t.length}</b>`;}
 function calcZakat(){const net=Math.max(0,(+ti1.value||0)-(+ti2.value||0));tr.innerHTML=`🕌 Net Wealth: <b>${net}</b><br>Zakat (2.5%): <b>${(net*0.025).toFixed(2)}</b>`;}
 function pickCol(){const h=ti1.value,r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);tr.innerHTML=`HEX: <b>${h}</b><br>RGB: <b>rgb(${r},${g},${b})</b>`;}
-async function shortUrl(){const res=await(await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:ti1.value})})).json();tr.innerHTML=res.status==='success'?`🔗 <a href="${res.short_url}" target="_blank">${res.short_url}</a>`:res.msg;}
+async function shortUrl(){const res=await(await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:ti1.value})})).json();if(res.status==='success'){tr.innerHTML=`🔗 <a href="${res.short_url}" target="_blank">${res.short_url}</a><br><br><button class="btn-p" onclick="navigator.clipboard.writeText('${res.short_url}');alert('✅ Short Link Copied!')">📋 Copy Short Link</button>`;}else{tr.innerHTML=res.msg;}}
 function recMovie(){if(!allFiles.length)return;const f=allFiles[Math.floor(Math.random()*allFiles.length)];tr.innerHTML=`🎬 <b>${f.title}</b><br><br><button class="btn-p" onclick="document.getElementById('tool-modal').style.display='none';openDetails('${f._id}')">Watch Now</button>`;}
 
 async function loadEarn(){
@@ -1932,13 +2358,18 @@ function copyRef(){const i=document.getElementById('ref-inp');i.select();navigat
 </script>
 </body>
 </html>"""
+
 @web.route('/')
 def home():
     files = []
     for d in get_extra_dbs_sync():
         try: files.extend(list(d["files"].find().sort("_id", -1)))
         except: pass
-    for f in files: f["_id"] = str(f["_id"])
+    for f in files:
+        f["_id"] = str(f["_id"])
+        tu = f.get("thumb_url") or ""
+        if tu.startswith("data:image") or not tu or "placehold.co" in tu:
+            f["thumb_url"] = f"/poster/{f['_id']}" if tu.startswith("data:image") else "/poster/default"
 
     try: config = sync_db["config"].find_one({"_id": "settings"}) or {}
     except: config = {}
@@ -1948,11 +2379,17 @@ def home():
     except: langs = []
     try:
         promos = list(sync_db["promotions"].find())
-        for p in promos: p["_id"] = str(p["_id"])
+        for p in promos:
+            p["_id"] = str(p["_id"])
+            if (p.get("image") or "").startswith("data:image"):
+                p["image"] = f"/poster/promo_{p['_id']}"
     except: promos = []
     try:
         upcs = list(sync_db["upcoming"].find().sort("_id", -1))
-        for u in upcs: u["_id"] = str(u["_id"])
+        for u in upcs:
+            u["_id"] = str(u["_id"])
+            if (u.get("thumb_url") or "").startswith("data:image"):
+                u["thumb_url"] = f"/poster/upc_{u['_id']}"
     except: upcs = []
     try: pkgs = list(sync_db["packages"].find())
     except: pkgs = []
@@ -1973,6 +2410,7 @@ def home():
         bot_username=BOT_USERNAME,
         admin_username=config.get("payment_admin", DEFAULT_ADMIN_USERNAME),
         site_name=config.get("site_name", "Moviee Link"),
+        rec_group_link_json=json.dumps(config.get("rec_group_link", "")),
         marquee_text=config.get("marquee_text", "VLC Player অথবা MX Player দিয়ে চালিয়ে দেখুন। ✅ সাউন্ড/অডিও সমস্যা হলে ভিডিওটি ডাউনলোড করে দেখুন।"),
         ref_coin=config.get("ref_coin", 10)
     )
@@ -1999,7 +2437,7 @@ async def main_bot():
     try:
         commands = [
             BotCommand("start", "বট স্টার্ট করুন"),
-            BotCommand("cmd", "সকল কমান্ড লিস্ট (Admin)"),
+            BotCommand("cmd", "সকল কমান্ড ও উদাহরণ (Admin)"),
             BotCommand("stats", "বট স্ট্যাটিস্টিকস (Admin)"),
             BotCommand("movies", "নতুন মুভি এড (Admin)"),
             BotCommand("editemovies", "মুভি এডিট (Admin)"),
@@ -2013,6 +2451,8 @@ async def main_bot():
             BotCommand("deletecategory", "ক্যাটাগরি ডিলিট (Admin)"),
             BotCommand("setlanguage", "ভাষা এড (Admin)"),
             BotCommand("deletelanguage", "ভাষা ডিলিট (Admin)"),
+            BotCommand("setrecgroup", "Recommendation গ্রুপ সেট (Admin)"),
+            BotCommand("delrecgroup", "Recommendation গ্রুপ রিমুভ (Admin)"),
             BotCommand("addzoonid", "Monetag Zone ID এড (Admin)"),
             BotCommand("deletezoonid", "Zone ID ডিলিট (Admin)"),
             BotCommand("addredeem", "রিডিম কোড তৈরি (Admin)"),
