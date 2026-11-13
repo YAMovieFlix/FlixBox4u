@@ -73,7 +73,7 @@ EXTRA_URI_CACHE = {"uris": None, "ts": 0}
 
 def poster_cache_put(pid, raw_bytes, mime="image/jpeg"):
     if not pid or not raw_bytes: return
-    if len(POSTER_CACHE) >= 150:
+    if len(POSTER_CACHE) >= 200:
         try: POSTER_CACHE.pop(next(iter(POSTER_CACHE)))
         except: POSTER_CACHE.clear()
     POSTER_CACHE[pid] = (raw_bytes, mime)
@@ -198,7 +198,7 @@ async def get_extra_dbs_async():
     async for m in mongos_col.find():
         uri = m["uri"]
         if uri not in async_mongo_clients:
-            try: async_mongo_clients[uri] = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)["NewBot"]
+            try: async_mongo_clients[uri] = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=3000)["NewBot"]
             except: continue
         dbs.append(async_mongo_clients[uri])
     return dbs
@@ -212,7 +212,7 @@ def get_extra_dbs_sync():
             EXTRA_URI_CACHE["ts"] = now
         for uri in EXTRA_URI_CACHE["uris"]:
             if uri not in sync_mongo_clients:
-                try: sync_mongo_clients[uri] = MongoClient(uri, serverSelectionTimeoutMS=5000)["NewBot"]
+                try: sync_mongo_clients[uri] = MongoClient(uri, serverSelectionTimeoutMS=3000)["NewBot"]
                 except: continue
             dbs.append(sync_mongo_clients[uri])
     except: pass
@@ -233,29 +233,45 @@ async def get_all_files_across_dbs(query_filter=None):
         except: pass
     return all_files
 
+def _bot_api_download_sync(file_id):
+    gf = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": file_id}, timeout=10).json()
+    if not gf.get("ok") or not gf.get("result", {}).get("file_path"):
+        return None
+    fpath = gf["result"]["file_path"]
+    r = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fpath}", timeout=15)
+    if r.status_code == 200 and r.content:
+        return r.content
+    return None
+
 async def extract_image_from_message(client, msg):
     try:
         media = msg.photo or msg.document
         if not media:
-            return None, "image/jpeg", None, "ছবি পাওয়া যায়নি!"
+            return None, "image/jpeg", None, "❌ ছবি পাওয়া যায়নি!"
         if msg.document and msg.document.mime_type and not msg.document.mime_type.startswith("image/"):
             return None, "image/jpeg", None, "❌ দয়া করে একটি ছবি (Photo/Image) পাঠান!"
         raw = None
-        try:
-            bio = await client.download_media(media.file_id, in_memory=True)
-            if bio is not None:
-                raw = bio.getvalue() if hasattr(bio, "getvalue") else (bytes(bio) if isinstance(bio, (bytes, bytearray)) else None)
-        except Exception as e1:
-            print("in_memory download fallback:", e1, flush=True)
+        if BOT_TOKEN:
+            try:
+                raw = await asyncio.to_thread(_bot_api_download_sync, media.file_id)
+            except Exception as e0:
+                print("Bot API photo download fallback:", e0, flush=True)
         if not raw:
             try:
-                path = await msg.download()
+                bio = await asyncio.wait_for(client.download_media(media.file_id, in_memory=True), timeout=20)
+                if bio is not None:
+                    raw = bio.getvalue() if hasattr(bio, "getvalue") else (bytes(bio) if isinstance(bio, (bytes, bytearray)) else None)
+            except Exception as e1:
+                print("Pyrogram in_memory download fallback:", e1, flush=True)
+        if not raw:
+            try:
+                path = await asyncio.wait_for(msg.download(), timeout=20)
                 if path and os.path.exists(path):
                     with open(path, "rb") as f: raw = f.read()
                     try: os.remove(path)
                     except: pass
             except Exception as e2:
-                print("disk download fallback error:", e2, flush=True)
+                print("Pyrogram disk download fallback:", e2, flush=True)
         if not raw:
             return None, "image/jpeg", None, "❌ ছবি ডাউনলোড করা যায়নি, আবার চেষ্টা করুন!"
         if len(raw) > 10 * 1024 * 1024:
@@ -270,7 +286,7 @@ async def extract_image_from_message(client, msg):
         traceback.print_exc()
         return None, "image/jpeg", None, f"❌ ইমেজ প্রসেসিং এরর: {e}"
 
-async def save_poster_to_mongo(target_db, poster_id, b64_data, mime="image/jpeg"):
+async def save_poster_to_mongo(target_db, poster_id, b64_data, mime="image/jpeg", live_url=None):
     if mime == "image/jpg": mime = "image/jpeg"
     payload = {"data": b64_data, "mime": mime, "created_at": datetime.utcnow().isoformat() + "Z"}
     try:
@@ -283,7 +299,8 @@ async def save_poster_to_mongo(target_db, poster_id, b64_data, mime="image/jpeg"
         raw, _ = decode_b64_to_bytes(b64_data)
         if raw: poster_cache_put(poster_id, raw, mime)
     except: pass
-    return f"/poster/{poster_id}"
+    base = (live_url or get_live_web_url()).rstrip("/")
+    return f"{base}/poster/{poster_id}"
 
 def decode_b64_to_bytes(val):
     if not val: return None, "image/jpeg"
@@ -300,22 +317,19 @@ def decode_b64_to_bytes(val):
     try: return base64.b64decode(val), mime
     except: return None, mime
 
-def make_default_poster_svg(label="MEDIA"):
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
-  <defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1c1c28"/><stop offset="100%" stop-color="#3b1d5a"/></linearGradient></defs>
+def make_clean_placeholder_svg():
+    svg = """<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#141624"/><stop offset="100%" stop-color="#271b3d"/></linearGradient></defs>
   <rect width="640" height="360" fill="url(#g)"/>
-  <circle cx="320" cy="160" r="46" fill="rgba(255,0,127,0.22)" stroke="#ff007f" stroke-width="3"/>
-  <polygon points="308,140 308,180 344,160" fill="#fff"/>
-  <text x="320" y="245" fill="#fff" font-family="Arial, sans-serif" font-size="24" font-weight="bold" text-anchor="middle">{label}</text>
 </svg>"""
     return svg.encode("utf-8")
 
 def get_tg_photo(thumb, tg_thumb_id=None):
     if tg_thumb_id:
         return tg_thumb_id
-    if not thumb or thumb == "/poster/default":
+    if not thumb or thumb.endswith("/poster/default"):
         return None
-    if thumb.startswith("/poster/"):
+    if "/poster/" in thumb:
         pid = thumb.split("/poster/", 1)[1].split("?")[0]
         if pid in POSTER_CACHE:
             img = io.BytesIO(POSTER_CACHE[pid][0]); img.name = "thumb.jpg"; return img
@@ -335,7 +349,7 @@ def get_tg_photo(thumb, tg_thumb_id=None):
                     raw, _ = decode_b64_to_bytes(fdoc["thumb_url"])
                     if raw: img = io.BytesIO(raw); img.name = "thumb.jpg"; return img
             except: pass
-        return f"{get_live_web_url()}{thumb}"
+        return thumb if thumb.startswith("http") else f"{get_live_web_url()}{thumb}"
     if thumb.startswith("data:image"):
         raw, _ = decode_b64_to_bytes(thumb)
         if raw: img = io.BytesIO(raw); img.name = "thumb.jpg"; return img
@@ -462,14 +476,14 @@ async def get_lang_markup(prefix, skip_cb):
     btns.append([InlineKeyboardButton("⏭ Skip Language", callback_data=skip_cb)])
     return InlineKeyboardMarkup(btns), langs
 
-def get_quality_markup(prefix, skip_cb):
+def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish"):
     btns, row = [], []
     for q in QUALITIES:
         row.append(InlineKeyboardButton(f"🎬 {q}", callback_data=f"{prefix}_{q}"))
         if len(row) == 3: btns.append(row); row = []
     if row: btns.append(row)
     btns.append([InlineKeyboardButton("➕ Custom Quality", callback_data=f"{prefix}_custom")])
-    btns.append([InlineKeyboardButton("⏭ Skip / Finish", callback_data=skip_cb)])
+    btns.append([InlineKeyboardButton(finish_label, callback_data=skip_cb)])
     return InlineKeyboardMarkup(btns)
 
 def is_in_step(step_name):
@@ -507,13 +521,13 @@ async def cmd_list(c, m):
 🎬 **Movies & Series:**
 • /movies — নতুন মুভি এড
   কপি: `/movies NAME RRR 2024`
-• /editemovies — মুভি এডিট (নাম, পোস্টার, কোয়ালিটি)
-  কপি: `/editemovies Name Year RRR 2024`
+• /editemovies — মুভি এডিট (নাম লিখে সার্চ করুন)
+  কপি: `/editemovies RRR`
 • /deletedmovies — মুভি ডিলিট লিস্ট
 • /addseries — নতুন ওয়েব সিরিজ এড
   কপি: `/addseries Bachelor Point 2026`
-• /editeseries — সিরিজ/সিজন/এপিসোড এডিট
-  কপি: `/editeseries Bachelor Point 2026`
+• /editeseries — সিরিজ এডিট (নাম লিখে সার্চ করুন)
+  কপি: `/editeseries Bachelor Point`
 • /deleteseries — সিরিজ ডিলিট লিস্ট
 • /addupcoming — আপকামিং শিডিউল এড (ছবিতে রিপ্লাই করেও করা যাবে)
   কপি: `/addupcoming Pushpa 3 | আজ রাত ৮টা`
@@ -841,11 +855,12 @@ async def cmd_addupcoming(c, m):
     txt = re.sub(r"^/addupcoming(?:@\w+)?\s*", "", m.text, count=1, flags=re.IGNORECASE).strip()
     if "|" not in txt: admin_steps[m.from_user.id] = {"step": "upc_title_time"}; return await m.reply("📅 আপকামিং মুভি/সিরিজের নাম ও সময় লিখুন:\nউদাহরণ: `Bachelor Point Ep 140 | আজ সন্ধ্যা ৭টা`")
     title, rtime = [x.strip() for x in txt.split("|", 1)]
-    await get_db(); pid = "upc_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    thumb = "/poster/default"
+    await get_db(); conf = await get_config(); live_url = get_live_web_url(conf)
+    pid = "upc_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    thumb = ""
     if m.reply_to_message and (m.reply_to_message.photo or m.reply_to_message.document):
         enc, mime, _, err = await extract_image_from_message(c, m.reply_to_message)
-        if enc: thumb = await save_poster_to_mongo(db, pid, enc, mime)
+        if enc: thumb = await save_poster_to_mongo(db, pid, enc, mime, live_url)
     await upcoming_col.insert_one({"title": title, "release_time": rtime, "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
     await m.reply(f"✅ আপকামিং অ্যাড হয়েছে!\n🎬 **{title}** | 🕒 {rtime}")
 
@@ -853,23 +868,22 @@ async def cmd_addupcoming(c, m):
 async def handle_upc_text(c, m):
     title, rtime = [x.strip() for x in m.text.split("|", 1)] if "|" in m.text else (m.text.strip(), "Coming Soon")
     admin_steps[m.from_user.id] = {"step": "upc_photo", "title": title, "release_time": rtime}
-    await m.reply("🖼 ল্যান্ডস্কোপ পোস্টার ছবি পাঠান (বা Skip করুন):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Skip Poster", callback_data="upc_skip")]]))
+    await m.reply("🖼 ল্যান্ডস্কোপ পোস্টার ছবি পাঠান:")
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("upc_photo") & unique_msg)
 async def handle_upc_photo(c, m):
-    enc, mime, _, err = await extract_image_from_message(c, m)
-    if err or not enc:
-        return await m.reply(err or "❌ ছবি ডাউনলোড করা যায়নি, আবার ছবি পাঠান অথবা Skip করুন।")
-    st = admin_steps.pop(m.from_user.id); await get_db()
-    pid = "upc_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-    thumb = await save_poster_to_mongo(db, pid, enc, mime)
-    await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
-    await m.reply(f"✅ আপকামিং ও পোস্টার MongoDB-তে সেভ হয়েছে: **{st['title']}**")
-
-@app.on_callback_query(filters.regex(r"^upc_skip$") & filters.user(ADMIN_ID) & unique_cb)
-async def upc_skip_cb(c, q):
-    st = admin_steps.pop(q.from_user.id, None)
-    if st: await get_db(); await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": "/poster/default", "created_at": datetime.utcnow().isoformat() + "Z"}); await q.message.edit_text(f"✅ আপকামিং অ্যাড হয়েছে: **{st['title']}**")
+    msg = await m.reply("⏳ আপকামিং পোস্টার MongoDB-তে সেভ হচ্ছে...")
+    try:
+        enc, mime, _, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(err or "❌ ছবি ডাউনলোড করা যায়নি, আবার ছবি পাঠান।")
+        st = admin_steps.pop(m.from_user.id); await get_db(); conf = await get_config(); live_url = get_live_web_url(conf)
+        pid = "upc_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        thumb = await save_poster_to_mongo(db, pid, enc, mime, live_url)
+        await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
+        await msg.edit_text(f"✅ আপকামিং ও পোস্টার MongoDB-তে সেভ হয়েছে: **{st['title']}**")
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
 
 @app.on_message(filters.command("delupcoming", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_delupcoming(c, m):
@@ -950,7 +964,7 @@ async def cmd_deletepremium(c, m):
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
 
 # ==========================================
-# 7. MOVIES WORKFLOW (LANDSCAPE POSTER HOSTED IN MONGODB)
+# 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT)
 # ==========================================
 @app.on_message(filters.command("movies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_movies(c, m):
@@ -982,8 +996,59 @@ async def mvlang_cb(c, q):
     val = q.data.split("_")[1]
     if val == "skip": st["language"] = ""
     else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
-    st["step"] = "mv_qual_wait"
-    await q.message.edit_text(f"✅ Language: **{st['language'] or 'None'}**\n\n৩. আনলিমিটেড **Quality** অ্যাড করুন (বা Skip):", reply_markup=get_quality_markup("mvqual", "mvsave_ask"))
+    st["step"] = "mv_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    await q.message.edit_text(
+        f"✅ Language: **{st['language'] or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="mvprem_toggle")]])
+    )
+
+@app.on_callback_query(filters.regex(r"^mvprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
+async def mvprem_toggle_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if st:
+        st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
+        await q.message.edit_text(
+            f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="mvprem_toggle")]])
+        )
+
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & unique_msg)
+async def handle_mv_poster(c, m):
+    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার নেওয়া হচ্ছে...")
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(f"{err or '❌ পোস্টার রিসিভ করা যায়নি!'} দয়া করে আবার ছবি পাঠান।")
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/movies` দিন।")
+        st["poster_b64"] = enc; st["poster_mime"] = mime; st["tg_thumb_id"] = tg_fid; st["step"] = "mv_qual_wait"
+        await msg.edit_text("✅ **পোস্টার রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন (শেষে **Save Movie** বাটনে ক্লিক করুন):", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now"))
+    except Exception as e:
+        await msg.edit_text(f"❌ পোস্টার এরর: `{e}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & ~filters.regex(r"^/") & unique_msg)
+async def handle_mv_poster_url(c, m):
+    url = m.text.strip()
+    if not url.startswith("http"):
+        return await m.reply("❌ দয়া করে একটি ল্যান্ডস্কোপ ছবি (Photo) অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
+    msg = await m.reply("⏳ ইমেজ লিংক প্রসেস হচ্ছে...")
+    try:
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/movies` দিন।")
+        try:
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
+            ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if r.status_code == 200 and r.content and ct.startswith("image/"):
+                st["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
+                st["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
+            else:
+                st["thumb_url"] = url
+        except:
+            st["thumb_url"] = url
+        st["step"] = "mv_qual_wait"
+        await msg.edit_text("✅ **পোস্টার লিংক রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now"))
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
 
 @app.on_callback_query(filters.regex(r"^mvqual_") & filters.user(ADMIN_ID) & unique_cb)
 async def mvqual_cb(c, q):
@@ -1002,70 +1067,33 @@ async def handle_mv_custom_qname(c, m):
 async def handle_mv_qual_file(c, m):
     st = admin_steps[m.from_user.id]; f_id = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
     q_name = st.get("current_quality", "HD"); st["qualities"].append({"name": q_name, "file_id": f_id}); st["step"] = "mv_qual_wait"
-    await m.reply(f"✅ **{q_name}** অ্যাড হয়েছে! (`{', '.join([q['name'] for q in st['qualities']])}`)", reply_markup=get_quality_markup("mvqual", "mvsave_ask"))
-
-@app.on_callback_query(filters.regex(r"^mvsave_ask$") & filters.user(ADMIN_ID) & unique_cb)
-async def mvsave_ask_cb(c, q):
-    st = admin_steps.get(q.from_user.id)
-    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
-    st["step"] = "mv_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
-    await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি বা ছবির লিংক দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Movie", callback_data="mvsave_final")]]))
-
-@app.on_callback_query(filters.regex(r"^mvprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
-async def mvprem_toggle_cb(c, q):
-    st = admin_steps.get(q.from_user.id)
-    if st:
-        st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
-        await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি বা ছবির লিংক দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Movie", callback_data="mvsave_final")]]))
+    await m.reply(f"✅ **{q_name}** অ্যাড হয়েছে! (`{', '.join([q['name'] for q in st['qualities']])}`)\nআরও কোয়ালিটি যোগ করুন অথবা সেভ করুন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now"))
 
 async def finalize_save_movie(c, uid, msg_obj):
     st = admin_steps.pop(uid, None)
     if not st: return
-    short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async(); target_db, min_sz = dbs[0], float('inf')
-    for d in dbs:
-        try:
-            s = await d.command("dbstats")
-            if s["dataSize"] < min_sz: min_sz = s["dataSize"]; target_db = d
-        except: pass
-    thumb_url = "/poster/default"
-    if st.get("poster_b64"):
-        thumb_url = await save_poster_to_mongo(target_db, short_id, st["poster_b64"], st.get("poster_mime", "image/jpeg"))
-    elif st.get("thumb_url"):
-        thumb_url = st["thumb_url"]
-    ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
-    nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": st["qualities"][0]["file_id"] if st.get("qualities") else None, "qualities": st.get("qualities", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-    await target_db["files"].insert_one(nm); await notify_new_post(c, nm, await get_config())
-    poster_status = "✅ MongoDB-তে সেভ হয়েছে" if thumb_url != "/poster/default" else "ℹ️ Default (Skip করা হয়েছে)"
-    await msg_obj.edit_text(f"✅ **মুভি সেভ হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`\n🖼 পোস্টার: {poster_status}")
-
-@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & unique_msg)
-async def handle_mv_poster(c, m):
-    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার MongoDB-তে সেভ হচ্ছে...")
-    enc, mime, tg_fid, err = await extract_image_from_message(c, m)
-    if err or not enc:
-        return await msg.edit_text(f"{err or '❌ পোস্টার সেভ করা যায়নি!'} দয়া করে আবার ছবি পাঠান অথবা Skip বাটনে ক্লিক করুন।")
-    admin_steps[m.from_user.id]["poster_b64"] = enc
-    admin_steps[m.from_user.id]["poster_mime"] = mime
-    admin_steps[m.from_user.id]["tg_thumb_id"] = tg_fid
-    await finalize_save_movie(c, m.from_user.id, msg)
-
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & ~filters.regex(r"^/") & unique_msg)
-async def handle_mv_poster_url(c, m):
-    url = m.text.strip()
-    if not url.startswith("http"):
-        return await m.reply("❌ দয়া করে একটি ছবি (Photo) অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
-    msg = await m.reply("⏳ ইমেজ লিংক থেকে পোস্টার MongoDB-তে সেভ হচ্ছে...")
     try:
-        r = requests.get(url, timeout=10)
-        ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-        if r.status_code == 200 and r.content and ct.startswith("image/"):
-            admin_steps[m.from_user.id]["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
-            admin_steps[m.from_user.id]["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
-        else:
-            admin_steps[m.from_user.id]["thumb_url"] = url
-    except:
-        admin_steps[m.from_user.id]["thumb_url"] = url
-    await finalize_save_movie(c, m.from_user.id, msg)
+        await msg_obj.edit_text("⏳ MongoDB-তে মুভি ও পোস্টার সেভ হচ্ছে...")
+        short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        dbs = await get_extra_dbs_async(); target_db, min_sz = dbs[0], float('inf')
+        for d in dbs:
+            try:
+                s = await d.command("dbstats")
+                if s["dataSize"] < min_sz: min_sz = s["dataSize"]; target_db = d
+            except: pass
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        thumb_url = ""
+        if st.get("poster_b64"):
+            thumb_url = await save_poster_to_mongo(target_db, short_id, st["poster_b64"], st.get("poster_mime", "image/jpeg"), live_url)
+        elif st.get("thumb_url"):
+            thumb_url = st["thumb_url"]
+        ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+        nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": st["qualities"][0]["file_id"] if st.get("qualities") else None, "qualities": st.get("qualities", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        await target_db["files"].insert_one(nm); await notify_new_post(c, nm, conf)
+        await msg_obj.edit_text(f"✅ **মুভি ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
+    except Exception as e:
+        traceback.print_exc()
+        await msg_obj.edit_text(f"❌ সেভ করতে সমস্যা হয়েছে: `{e}`")
 
 @app.on_callback_query(filters.regex(r"^mvsave_final$") & filters.user(ADMIN_ID) & unique_cb)
 async def mvsave_final_cb(c, q): await finalize_save_movie(c, q.from_user.id, q.message)
@@ -1101,14 +1129,25 @@ async def delmv_cb(c, q):
 
 @app.on_message(filters.command("editemovies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_edit_movies(c, m):
-    name, year = parse_name_year(m.text, "/editemovies"); all_m = await get_all_files_across_dbs({"type": {"$ne": "series"}})
-    if name:
-        ms = [d for d in all_m if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
-        if len(ms) == 1: return await show_edit_movie_panel(m, ms[0]["_id"], edit=False)
-        elif ms: return await m.reply("🔍 ম্যাচ হওয়া মুভি:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in ms[:15]]))
-        return await m.reply(f"❌ '{name}' পাওয়া যায়নি! উদাহরণ: `/editemovies Name Year RRR 2024`")
-    if not all_m: return await m.reply("❌ কোনো মুভি নেই! উদাহরণ: `/movies NAME RRR 2024`")
-    await m.reply("✏️ মুভি সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in all_m[:15]]))
+    name, year = parse_name_year(m.text, "/editemovies")
+    if not name:
+        admin_steps[m.from_user.id] = {"step": "edmv_search_wait"}
+        return await m.reply("🔍 **যে মুভি এডিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `RRR` অথবা `RRR 2022`")
+    all_m = await get_all_files_across_dbs({"type": {"$ne": "series"}})
+    ms = [d for d in all_m if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_movie_panel(m, ms[0]["_id"], edit=False)
+    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in ms[:20]]))
+    return await m.reply(f"❌ '{name}' নামে কোনো মুভি পাওয়া যায়নি!")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edmv_search(c, m):
+    admin_steps.pop(m.from_user.id, None)
+    name, year = parse_name_year(m.text, "")
+    all_m = await get_all_files_across_dbs({"type": {"$ne": "series"}})
+    ms = [d for d in all_m if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_movie_panel(m, ms[0]["_id"], edit=False)
+    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in ms[:20]]))
+    return await m.reply(f"❌ '{name}' নামে কোনো মুভি পাওয়া যায়নি! আবার `/editemovies` দিয়ে সার্চ করুন।")
 
 @app.on_callback_query(filters.regex(r"^edmvpick_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvpick_cb(c, q): await show_edit_movie_panel(q, q.data.split("_")[1], edit=True)
@@ -1134,7 +1173,7 @@ async def edmv_cb(c, q):
     elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_movie_panel(q, f_id, edit=True)
     elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
     elif act == "name": admin_steps[q.from_user.id] = {"step": "edmv_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন (যেমন: `RRR 2024`):")
-    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি বা ছবির লিংক পাঠান:")
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক পাঠান:")
     elif act == "cat":
         cats = await get_categories_list()
         if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
@@ -1143,7 +1182,7 @@ async def edmv_cb(c, q):
         ls = await get_languages_list()
         if not ls: return await q.answer("❌ আগে /setlanguage দিয়ে ভাষা অ্যাড করুন!", show_alert=True)
         return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edmvlang_{f_id}_{i}")] for i, ln in enumerate(ls)]))
-    elif act == "addq": admin_steps[q.from_user.id] = {"step": "edmv_addq_pick", "f_id": f_id}; return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}"))
+    elif act == "addq": admin_steps[q.from_user.id] = {"step": "edmv_addq_pick", "f_id": f_id}; return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
     elif act == "delq":
         qs = doc.get("qualities", [])
         if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
@@ -1179,7 +1218,7 @@ async def handle_edmv_qf(c, m):
     if doc and tdb:
         await tdb["files"].update_one({"_id": f_id}, {"$push": {"qualities": {"name": qn, "file_id": fid}}})
         if not doc.get("file_id"): await tdb["files"].update_one({"_id": f_id}, {"$set": {"file_id": fid}})
-    st["step"] = "edmv_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}"))
+    st["step"] = "edmv_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_name(c, m):
@@ -1190,15 +1229,22 @@ async def handle_edmv_name(c, m):
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & unique_msg)
 async def handle_edmv_poster(c, m):
     f_id = admin_steps[m.from_user.id]["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
-    enc, mime, tg_fid, err = await extract_image_from_message(c, m)
-    if err or not enc:
-        return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
-    admin_steps.pop(m.from_user.id, None)
-    _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb:
-        purl = await save_poster_to_mongo(tdb, f_id, enc, mime)
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
+        _, tdb = await find_file_in_all_dbs(f_id)
+        if not tdb:
+            admin_steps.pop(m.from_user.id, None)
+            return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
-    await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
+        admin_steps.pop(m.from_user.id, None)
+        await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
+    except Exception as e:
+        traceback.print_exc()
+        await msg.edit_text(f"❌ পোস্টার আপডেট এরর: `{e}`")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_poster_url(c, m):
@@ -1206,20 +1252,24 @@ async def handle_edmv_poster_url(c, m):
     if not url.startswith("http"):
         return await m.reply("❌ দয়া করে ছবি অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
-    _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb:
+    try:
+        _, tdb = await find_file_in_all_dbs(f_id)
+        if not tdb: return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = url
         try:
-            r = requests.get(url, timeout=10)
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
             ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
             if r.status_code == 200 and r.content and ct.startswith("image/"):
-                purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct)
-            else: purl = url
-        except: purl = url
+                purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
+        except: pass
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
-    await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
+        await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
 
 # ==========================================
-# 8. SERIES WORKFLOW (LANDSCAPE POSTER HOSTED IN MONGODB)
+# 8. SERIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT)
 # ==========================================
 @app.on_message(filters.command("addseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_addseries(c, m):
@@ -1251,12 +1301,63 @@ async def srlang_cb(c, q):
     val = q.data.split("_")[1]
     if val == "skip": st["language"] = ""
     else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
-    await prompt_series_season(q.message, st, edit=True)
+    st["step"] = "sr_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    await q.message.edit_text(
+        f"✅ Language: **{st['language'] or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="srprem_toggle")]])
+    )
+
+@app.on_callback_query(filters.regex(r"^srprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
+async def srprem_toggle_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if st:
+        st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
+        await q.message.edit_text(
+            f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="srprem_toggle")]])
+        )
+
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & unique_msg)
+async def handle_sr_poster(c, m):
+    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার নেওয়া হচ্ছে...")
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(f"{err or '❌ পোস্টার রিসিভ করা যায়নি!'} দয়া করে আবার ছবি পাঠান।")
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/addseries` দিন।")
+        st["poster_b64"] = enc; st["poster_mime"] = mime; st["tg_thumb_id"] = tg_fid
+        await prompt_series_season(msg, st, edit=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ পোস্টার এরর: `{e}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & ~filters.regex(r"^/") & unique_msg)
+async def handle_sr_poster_url(c, m):
+    url = m.text.strip()
+    if not url.startswith("http"):
+        return await m.reply("❌ দয়া করে একটি ল্যান্ডস্কোপ ছবি (Photo) অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
+    msg = await m.reply("⏳ ইমেজ লিংক প্রসেস হচ্ছে...")
+    try:
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/addseries` দিন।")
+        try:
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
+            ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if r.status_code == 200 and r.content and ct.startswith("image/"):
+                st["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
+                st["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
+            else:
+                st["thumb_url"] = url
+        except:
+            st["thumb_url"] = url
+        await prompt_series_season(msg, st, edit=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
 
 async def prompt_series_season(mo, st, edit=True):
     st["step"] = "sr_season_no"; ns = len(st["seasons"]) + 1
-    btns = [[InlineKeyboardButton(f"📺 Season {ns}", callback_data=f"srssn_{ns}")], [InlineKeyboardButton("⏭ Skip / Save Series", callback_data="srsave_ask")]]
-    txt = f"🌐 Language: **{st['language'] or 'None'}**\n\n৩. **Season নম্বর দিন** (যেমন: `1` বা `5`):"
+    btns = [[InlineKeyboardButton(f"📺 Season {ns}", callback_data=f"srssn_{ns}")], [InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
+    txt = f"✅ পোস্টার রেডি!\n\n৪. **Season নম্বর দিন** (যেমন: `1` বা `5`):"
     if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
@@ -1273,7 +1374,7 @@ def get_or_create_episode(st, si, eno):
 
 async def prompt_series_episode(mo, st, edit=True):
     st["step"] = "sr_ep_no"; ssn = st["seasons"][st["cur_s_idx"]]; ne = len(ssn["episodes"]) + 1
-    btns = [[InlineKeyboardButton(f"🎬 Episode {ne}", callback_data=f"srep_{ne}")], [InlineKeyboardButton("➕ Add Another Season", callback_data="srssn_new")], [InlineKeyboardButton("⏭ Skip / Save Series", callback_data="srsave_ask")]]
+    btns = [[InlineKeyboardButton(f"🎬 Episode {ne}", callback_data=f"srep_{ne}")], [InlineKeyboardButton("➕ Add Another Season", callback_data="srssn_new")], [InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
     txt = f"📺 **Season {ssn['season_no']}**\nএবার **Episode নম্বর দিন** (যেমন: `1` বা `134`):"
     if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
@@ -1297,13 +1398,13 @@ async def srep_cb(c, q):
     if v == "next": return await prompt_series_episode(q.message, st, edit=True)
     st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], v); st["step"] = "sr_qual_wait"
     ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
-    await q.message.edit_text(f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\nআনলিমিটেড **Quality** অ্যাড করুন:", reply_markup=get_quality_markup("srqual", "srep_next"))
+    await q.message.edit_text(f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\nআনলিমিটেড **Quality** অ্যাড করুন:", reply_markup=get_quality_markup("srqual", "srep_next", "⏭ Next Episode"))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_ep_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_sr_eno(c, m):
     st = admin_steps[m.from_user.id]; st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], m.text.strip()); st["step"] = "sr_qual_wait"
     ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
-    await m.reply(f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\nআনলিমিটেড **Quality** অ্যাড করুন:", reply_markup=get_quality_markup("srqual", "srep_next"))
+    await m.reply(f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\nআনলিমিটেড **Quality** অ্যাড করুন:", reply_markup=get_quality_markup("srqual", "srep_next", "⏭ Next Episode"))
 
 @app.on_callback_query(filters.regex(r"^srqual_") & filters.user(ADMIN_ID) & unique_cb)
 async def srqual_cb(c, q):
@@ -1321,71 +1422,33 @@ async def handle_sr_qf(c, m):
     st = admin_steps[m.from_user.id]; fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
     qn = st.get("current_quality", "HD"); ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
     ep["qualities"].append({"name": qn, "file_id": fid}); st["step"] = "sr_qual_wait"
-    btns = get_quality_markup("srqual", "srep_next").inline_keyboard + [[InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_ask")]]
+    btns = get_quality_markup("srqual", "srep_next", "⏭ Next Episode").inline_keyboard + [[InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
     await m.reply(f"✅ S{ssn['season_no']} E{ep['ep_no']} - **{qn}** অ্যাড হয়েছে!", reply_markup=InlineKeyboardMarkup(btns))
-
-@app.on_callback_query(filters.regex(r"^srsave_ask$") & filters.user(ADMIN_ID) & unique_cb)
-async def srsave_ask_cb(c, q):
-    st = admin_steps.get(q.from_user.id)
-    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
-    st["step"] = "sr_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
-    await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি বা ছবির লিংক দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Series", callback_data="srsave_final")]]))
-
-@app.on_callback_query(filters.regex(r"^srprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
-async def srprem_toggle_cb(c, q):
-    st = admin_steps.get(q.from_user.id)
-    if st:
-        st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
-        await q.message.edit_text(f"🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি বা ছবির লিংক দিন** (আপনার MongoDB-তে হোস্ট হবে, বা Skip করুন)।\n🔰 টাইপ: **{ps}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⏭ Skip & Save Series", callback_data="srsave_final")]]))
 
 async def finalize_save_series(c, uid, mo):
     st = admin_steps.pop(uid, None)
     if not st: return
-    sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async(); tdb, ms = dbs[0], float('inf')
-    for d in dbs:
-        try:
-            s = await d.command("dbstats")
-            if s["dataSize"] < ms: ms = s["dataSize"]; tdb = d
-        except: pass
-    thumb_url = "/poster/default"
-    if st.get("poster_b64"):
-        thumb_url = await save_poster_to_mongo(tdb, sid, st["poster_b64"], st.get("poster_mime", "image/jpeg"))
-    elif st.get("thumb_url"):
-        thumb_url = st["thumb_url"]
-    ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
-    ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": None, "seasons": st.get("seasons", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-    await tdb["files"].insert_one(ns); await notify_new_post(c, ns, await get_config())
-    poster_status = "✅ MongoDB-তে সেভ হয়েছে" if thumb_url != "/poster/default" else "ℹ️ Default (Skip করা হয়েছে)"
-    await mo.edit_text(f"✅ **সিরিজ সেভ হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`\n🖼 পোস্টার: {poster_status}")
-
-@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & unique_msg)
-async def handle_sr_poster(c, m):
-    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার MongoDB-তে সেভ হচ্ছে...")
-    enc, mime, tg_fid, err = await extract_image_from_message(c, m)
-    if err or not enc:
-        return await msg.edit_text(f"{err or '❌ পোস্টার সেভ করা যায়নি!'} দয়া করে আবার ছবি পাঠান অথবা Skip বাটনে ক্লিক করুন।")
-    admin_steps[m.from_user.id]["poster_b64"] = enc
-    admin_steps[m.from_user.id]["poster_mime"] = mime
-    admin_steps[m.from_user.id]["tg_thumb_id"] = tg_fid
-    await finalize_save_series(c, m.from_user.id, msg)
-
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & ~filters.regex(r"^/") & unique_msg)
-async def handle_sr_poster_url(c, m):
-    url = m.text.strip()
-    if not url.startswith("http"):
-        return await m.reply("❌ দয়া করে একটি ছবি (Photo) অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
-    msg = await m.reply("⏳ ইমেজ লিংক থেকে পোস্টার MongoDB-তে সেভ হচ্ছে...")
     try:
-        r = requests.get(url, timeout=10)
-        ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-        if r.status_code == 200 and r.content and ct.startswith("image/"):
-            admin_steps[m.from_user.id]["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
-            admin_steps[m.from_user.id]["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
-        else:
-            admin_steps[m.from_user.id]["thumb_url"] = url
-    except:
-        admin_steps[m.from_user.id]["thumb_url"] = url
-    await finalize_save_series(c, m.from_user.id, msg)
+        await mo.edit_text("⏳ MongoDB-তে সিরিজ ও পোস্টার সেভ হচ্ছে...")
+        sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async(); tdb, ms = dbs[0], float('inf')
+        for d in dbs:
+            try:
+                s = await d.command("dbstats")
+                if s["dataSize"] < ms: ms = s["dataSize"]; tdb = d
+            except: pass
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        thumb_url = ""
+        if st.get("poster_b64"):
+            thumb_url = await save_poster_to_mongo(tdb, sid, st["poster_b64"], st.get("poster_mime", "image/jpeg"), live_url)
+        elif st.get("thumb_url"):
+            thumb_url = st["thumb_url"]
+        ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+        ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": None, "seasons": st.get("seasons", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        await tdb["files"].insert_one(ns); await notify_new_post(c, ns, conf)
+        await mo.edit_text(f"✅ **সিরিজ ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
+    except Exception as e:
+        traceback.print_exc()
+        await mo.edit_text(f"❌ সেভ করতে সমস্যা হয়েছে: `{e}`")
 
 @app.on_callback_query(filters.regex(r"^srsave_final$") & filters.user(ADMIN_ID) & unique_cb)
 async def srsave_final_cb(c, q): await finalize_save_series(c, q.from_user.id, q.message)
@@ -1408,14 +1471,25 @@ async def delsr_cb(c, q):
 
 @app.on_message(filters.command("editeseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_edit_series(c, m):
-    name, year = parse_name_year(m.text, "/editeseries"); alls = await get_all_files_across_dbs({"type": "series"})
-    if name:
-        ms = [d for d in alls if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
-        if len(ms) == 1: return await show_edit_series_panel(m, ms[0]["_id"], edit=False)
-        elif ms: return await m.reply("🔍 ম্যাচ হওয়া সিরিজ:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in ms[:15]]))
-        return await m.reply(f"❌ '{name}' পাওয়া যায়নি! উদাহরণ: `/editeseries Batchlor point 2026`")
-    if not alls: return await m.reply("❌ কোনো সিরিজ নেই! উদাহরণ: `/addseries Batchlor point 2026`")
-    await m.reply("✏️ সিরিজ সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in alls[:15]]))
+    name, year = parse_name_year(m.text, "/editeseries")
+    if not name:
+        admin_steps[m.from_user.id] = {"step": "edsr_search_wait"}
+        return await m.reply("🔍 **যে ওয়েব সিরিজ এডিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `Bachelor Point`")
+    alls = await get_all_files_across_dbs({"type": "series"})
+    ms = [d for d in alls if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_series_panel(m, ms[0]["_id"], edit=False)
+    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in ms[:20]]))
+    return await m.reply(f"❌ '{name}' নামে কোনো সিরিজ পাওয়া যায়নি!")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_search(c, m):
+    admin_steps.pop(m.from_user.id, None)
+    name, year = parse_name_year(m.text, "")
+    alls = await get_all_files_across_dbs({"type": "series"})
+    ms = [d for d in alls if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_series_panel(m, ms[0]["_id"], edit=False)
+    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in ms[:20]]))
+    return await m.reply(f"❌ '{name}' নামে কোনো সিরিজ পাওয়া যায়নি! আবার `/editeseries` দিয়ে সার্চ করুন।")
 
 @app.on_callback_query(filters.regex(r"^edsrpick_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrpick_cb(c, q): await show_edit_series_panel(q, q.data.split("_")[1], edit=True)
@@ -1441,7 +1515,7 @@ async def edsr_cb(c, q):
     elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
     elif act == "name": admin_steps[q.from_user.id] = {"step": "edsr_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন:")
-    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি বা ছবির লিংক দিন:")
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক দিন:")
     elif act == "cat":
         cats = await get_categories_list()
         if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
@@ -1472,15 +1546,22 @@ async def handle_edsr_name(c, m):
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & unique_msg)
 async def handle_edsr_poster(c, m):
     f_id = admin_steps[m.from_user.id]["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
-    enc, mime, tg_fid, err = await extract_image_from_message(c, m)
-    if err or not enc:
-        return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
-    admin_steps.pop(m.from_user.id, None)
-    _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb:
-        purl = await save_poster_to_mongo(tdb, f_id, enc, mime)
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
+        _, tdb = await find_file_in_all_dbs(f_id)
+        if not tdb:
+            admin_steps.pop(m.from_user.id, None)
+            return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
-    await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
+        admin_steps.pop(m.from_user.id, None)
+        await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
+    except Exception as e:
+        traceback.print_exc()
+        await msg.edit_text(f"❌ পোস্টার আপডেট এরর: `{e}`")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_poster_url(c, m):
@@ -1488,17 +1569,21 @@ async def handle_edsr_poster_url(c, m):
     if not url.startswith("http"):
         return await m.reply("❌ দয়া করে ছবি অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
-    _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb:
+    try:
+        _, tdb = await find_file_in_all_dbs(f_id)
+        if not tdb: return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = url
         try:
-            r = requests.get(url, timeout=10)
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
             ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
             if r.status_code == 200 and r.content and ct.startswith("image/"):
-                purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct)
-            else: purl = url
-        except: purl = url
+                purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
+        except: pass
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
-    await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
+        await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addssn_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addssn(c, m):
@@ -1536,7 +1621,7 @@ async def edsrep_cb(c, q):
         return await show_edit_season_panel(q, f_id, si, edit=True)
     elif act == "addq":
         f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); admin_steps[q.from_user.id] = {"step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "e_idx": ei}
-        return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}"))
+        return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
     elif act == "delqmenu":
         f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); doc, _ = await find_file_in_all_dbs(f_id); qs = doc["seasons"][si]["episodes"][ei].get("qualities", [])
         if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
@@ -1581,7 +1666,7 @@ async def handle_edsr_qf(c, m):
     st = admin_steps.get(m.from_user.id); f_id, si, ei, qn = st["f_id"], st["s_idx"], st["e_idx"], st["current_quality"]
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc and tdb: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
-    st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}"))
+    st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
 
 # ==========================================
 # 9. LEGACY COMMANDS (WITH EXAMPLES WHEN EMPTY)
@@ -1617,11 +1702,12 @@ async def handle_admin_file(c, m):
             if st["dataSize"] < ms: ms = st["dataSize"]; tdb = d
         except: pass
     st_data = admin_steps[m.from_user.id]
-    thumb_url = "/poster/default"
+    conf = await get_config(); live_url = get_live_web_url(conf)
+    thumb_url = ""
     if st_data.get("poster_b64"):
-        thumb_url = await save_poster_to_mongo(tdb, sid, st_data["poster_b64"], st_data.get("poster_mime", "image/jpeg"))
+        thumb_url = await save_poster_to_mongo(tdb, sid, st_data["poster_b64"], st_data.get("poster_mime", "image/jpeg"), live_url)
     nf = {"_id": sid, "title": st_data["title"], "category": "All", "is_premium": st_data.get("is_premium", False), "file_id": fid, "thumb_url": thumb_url, "tg_thumb_id": st_data.get("tg_thumb_id"), "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-    await tdb["files"].insert_one(nf); del admin_steps[m.from_user.id]; await notify_new_post(c, nf, await get_config()); await msg.edit_text(f"✅ ফাইল ও পোস্টার MongoDB-তে অ্যাড হয়েছে! ID: `{sid}`")
+    await tdb["files"].insert_one(nf); del admin_steps[m.from_user.id]; await notify_new_post(c, nf, conf); await msg.edit_text(f"✅ ফাইল ও পোস্টার MongoDB-তে অ্যাড হয়েছে! ID: `{sid}`")
 
 LEGACY_EXAMPLES = {
     "vidtitel": "`/vidtitel নতুন বাংলা নাটক`", "delfile": "`/delfile AbCd1234`",
@@ -1752,9 +1838,9 @@ async def cmd_auto_promo(c, m):
         t, l = [x.strip() for x in clean_txt.split("|", 1)]
         enc, mime, _, err = await extract_image_from_message(c, m.reply_to_message)
         if err or not enc: return await m.reply(err or "❌ ছবি ডাউনলোড করা যায়নি!")
-        await get_db()
+        await get_db(); conf = await get_config(); live_url = get_live_web_url(conf)
         pid = "promo_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-        purl = await save_poster_to_mongo(db, pid, enc, mime)
+        purl = await save_poster_to_mongo(db, pid, enc, mime, live_url)
         await promotions_col.insert_one({"title": t, "link": l, "image": purl}); return await m.reply(f"✅ প্রোমোট ও পোস্টার MongoDB-তে অ্যাড হয়েছে: **{t}**")
     if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document): return await m.reply("❌ ভিডিওতে রিপ্লাই করুন।")
     fid = (m.reply_to_message.video or m.reply_to_message.document).file_id
@@ -1764,7 +1850,7 @@ async def cmd_auto_promo(c, m):
         admin_steps[m.from_user.id] = {"file_id": fid}; return await m.reply("টাইটেল সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t['title'], callback_data=f"selttl_{t['_id']}")] for t in ts]))
     title = re.sub(r"^/auto2(?:@\w+)?\s*", "", m.text, count=1, flags=re.IGNORECASE).strip()
     if not title: return await m.reply("❌ **উদাহরণ:** ভিডিওতে রিপ্লাই করে `/auto2 নতুন নাটক` লিখুন।")
-    admin_steps[m.from_user.id] = {"step": "auto_wait", "title": title, "file_id": fid, "thumb_url": "/poster/default"}
+    admin_steps[m.from_user.id] = {"step": "auto_wait", "title": title, "file_id": fid, "thumb_url": ""}
     await m.reply(f"✅ **{title}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="auto_prem")], [InlineKeyboardButton("👤 Regular", callback_data="auto_reg")]]))
 
 @app.on_callback_query(filters.regex(r"^(selttl|auto)_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1773,7 +1859,7 @@ async def legacy_auto_cb(c, q):
     if not sd: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     if q.data.startswith("selttl_"):
         await get_db(); td = await titles_col.find_one({"_id": ObjectId(q.data.split("_")[1])})
-        admin_steps[q.from_user.id] = {"step": "auto_wait", "title": td["title"], "file_id": sd["file_id"], "thumb_url": "/poster/default"}
+        admin_steps[q.from_user.id] = {"step": "auto_wait", "title": td["title"], "file_id": sd["file_id"], "thumb_url": ""}
         return await q.message.edit_text(f"✅ **{td['title']}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="auto_prem")], [InlineKeyboardButton("👤 Regular", callback_data="auto_reg")]]))
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
@@ -1785,7 +1871,7 @@ async def legacy_auto_cb(c, q):
 @web.route('/poster/<poster_id>')
 def serve_poster_from_mongo(poster_id):
     if poster_id == "default":
-        return Response(make_default_poster_svg("MEDIA"), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=604800"})
+        return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=604800"})
 
     if poster_id in POSTER_CACHE:
         raw, mime = POSTER_CACHE[poster_id]
@@ -1839,11 +1925,11 @@ def serve_poster_from_mongo(poster_id):
                     if raw:
                         poster_cache_put(poster_id, raw, mime)
                         return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=604800"})
-                elif tu.startswith("http"):
+                elif tu.startswith("http") and "/poster/" not in tu:
                     return redirect(tu)
         except: pass
 
-    return Response(make_default_poster_svg("POSTER"), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+    return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
 
 @web.route('/tutorial_video')
 def serve_tutorial_video():
@@ -1890,6 +1976,7 @@ def serve_tutorial_video():
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
         return send_file(cache_path, mimetype="video/mp4", conditional=True)
     return "Tutorial video unavailable", 404
+
 @web.route('/api/shorten', methods=['POST'])
 def api_shorten():
     url = (request.json.get("url") or "").strip()
@@ -2204,17 +2291,17 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 .page{display:none}.page.active{display:block}
 .sec-head{padding:10px 14px 6px 14px;font-size:15.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
 .pin-scroll{display:flex;gap:10px;overflow-x:auto;padding:0 14px 10px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
-.pin-card{min-width:168px;max-width:168px;cursor:pointer}.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,.08);background:#1c1c28}.pin-img-w img{width:100%;height:100%;object-fit:cover}
+.pin-card{min-width:168px;max-width:168px;cursor:pointer}.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,.08);background:#141624}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block}
 .pin-tag{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;padding:2px 7px;border-radius:10px}.pin-t{font-size:12.5px;font-weight:600;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid #7c6cf6;box-shadow:0 4px 14px rgba(108,92,231,.08);cursor:pointer}
-.feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#1c1c28}.feed-img-w img{width:100%;height:100%;object-fit:cover}
+.feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#141624}.feed-img-w img{width:100%;height:100%;object-fit:cover;display:block}
 .b-new{position:absolute;top:10px;left:10px;background:#2979ff;color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px}.b-type{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.75);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px}
 .feed-body{padding:10px 12px 12px 12px}.feed-title{font-size:15px;font-weight:700;margin-bottom:3px}.feed-meta{font-size:12px;color:#777;display:flex;justify-content:space-between}
 .car-wrap{display:flex;gap:12px;overflow-x:auto;padding:4px 0 12px 0;scrollbar-width:none}.car-wrap::-webkit-scrollbar{display:none}
-.p-slide{min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover}.p-slide-b{padding:10px 12px}
+.p-slide{min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.p-slide-b{padding:10px 12px}
 .watch-pill{background:#e63946;color:#fff;border:none;padding:6px 16px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
 .det-hdr{background:#fff;padding:12px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #eee;position:sticky;top:0;z-index:95}.back-btn{width:34px;height:34px;border-radius:50%;background:#f1f3f5;border:none;font-size:18px;cursor:pointer}
-.det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#000}.det-img-w img{width:100%;height:100%;object-fit:cover}.hd-b{position:absolute;top:12px;left:12px;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
+.det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#141624}.det-img-w img{width:100%;height:100%;object-fit:cover;display:block}.hd-b{position:absolute;top:12px;left:12px;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
 .det-body{background:#fff;padding:14px 16px}.det-title{font-size:19px;font-weight:700;margin:0 0 8px 0}.d-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.d-tag{background:#f1f5f9;color:#475569;padding:3px 10px;border-radius:12px;font-size:11.5px;font-weight:600}
 .stats-r{display:flex;justify-content:space-around;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9;margin-bottom:12px}.stat-i{text-align:center;font-size:12px;color:#64748b}.stat-i b{display:block;font-size:15px;color:#111}
 .shr-c{width:38px;height:38px;border-radius:50%;background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;font-size:16px;cursor:pointer}.tip-ban{background:#fff8eb;border:1px solid #fde68a;color:#92400e;padding:9px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:10px}
@@ -2667,14 +2754,22 @@ function copyRef(){const i=document.getElementById('ref-inp');i.select();navigat
 
 @web.route('/')
 def home():
+    try: config = sync_db["config"].find_one({"_id": "settings"}) or {}
+    except: config = {}
+    live_url = get_live_web_url(config)
+
     files = []
     for d in get_extra_dbs_sync():
         try:
             for doc in d["files"].find().sort("_id", -1):
                 fid = str(doc["_id"])
                 tu = doc.get("thumb_url") or ""
-                if tu.startswith("data:image") or not tu or "placehold.co" in tu:
-                    tu = f"/poster/{fid}" if tu.startswith("data:image") else "/poster/default"
+                if "/poster/" in tu:
+                    tu = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
+                elif tu.startswith("data:image"):
+                    tu = f"{live_url}/poster/{fid}"
+                elif not tu or "placehold.co" in tu:
+                    tu = f"{live_url}/poster/default"
                 clean_doc = {
                     "_id": fid,
                     "type": doc.get("type", "movie"),
@@ -2709,8 +2804,6 @@ def home():
                 files.append(clean_doc)
         except: pass
 
-    try: config = sync_db["config"].find_one({"_id": "settings"}) or {}
-    except: config = {}
     try: cats = [c["name"] for c in sync_db["categories"].find()]
     except: cats = []
     try: langs = [l["name"] for l in sync_db["languages"].find()]
@@ -2719,15 +2812,21 @@ def home():
         promos = list(sync_db["promotions"].find())
         for p in promos:
             p["_id"] = str(p["_id"])
-            if (p.get("image") or "").startswith("data:image"):
-                p["image"] = f"/poster/promo_{p['_id']}"
+            img = p.get("image") or ""
+            if "/poster/" in img:
+                p["image"] = f"{live_url}/poster/{img.split('/poster/', 1)[1]}"
+            elif img.startswith("data:image"):
+                p["image"] = f"{live_url}/poster/promo_{p['_id']}"
     except: promos = []
     try:
         upcs = list(sync_db["upcoming"].find().sort("_id", -1))
         for u in upcs:
             u["_id"] = str(u["_id"])
-            if (u.get("thumb_url") or "").startswith("data:image"):
-                u["thumb_url"] = f"/poster/upc_{u['_id']}"
+            tu = u.get("thumb_url") or ""
+            if "/poster/" in tu:
+                u["thumb_url"] = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
+            elif tu.startswith("data:image"):
+                u["thumb_url"] = f"{live_url}/poster/upc_{u['_id']}"
     except: upcs = []
     try: pkgs = list(sync_db["packages"].find())
     except: pkgs = []
