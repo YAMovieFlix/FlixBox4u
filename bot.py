@@ -48,7 +48,7 @@ def detect_web_url():
         if os.environ.get(k, "").strip(): return os.environ[k].strip().rstrip("/")
     if os.environ.get("KOYEB_PUBLIC_DOMAIN"): return f"https://{os.environ['KOYEB_PUBLIC_DOMAIN'].strip()}".rstrip("/")
     if os.environ.get("VERCEL_URL"): return f"https://{os.environ['VERCEL_URL'].strip()}".rstrip("/")
-    return "https://flixbox4ubot.onrender.com"
+    return "https://resident-chris-akashvaikh-0a1f684c.apps.mistral.run"
 
 WEB_URL = detect_web_url()
 DEFAULT_ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Sudo_king")
