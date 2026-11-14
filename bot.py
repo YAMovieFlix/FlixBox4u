@@ -73,6 +73,7 @@ POSTER_CACHE = {}
 EXTRA_URI_CACHE = {"uris": None, "ts": 0}
 HOME_DATA_CACHE = {"data": None, "ts": 0}
 WEB_POOL = ThreadPoolExecutor(max_workers=8)
+TUTORIAL_DL_LOCK = threading.Lock()
 
 def invalidate_home_cache():
     HOME_DATA_CACHE["data"] = None
@@ -249,6 +250,60 @@ def _bot_api_download_sync(file_id):
     if r.status_code == 200 and r.content:
         return r.content
     return None
+
+def ensure_tutorial_cached_sync(vid):
+    if not vid or str(vid).startswith("http"):
+        return None
+    vid_hash = hashlib.md5(str(vid).encode()).hexdigest()[:14]
+    cache_path = f"/tmp/tutorial_{vid_hash}.mp4"
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+        return cache_path
+    with TUTORIAL_DL_LOCK:
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+            return cache_path
+        tmp_mp4 = f"/tmp/tut_tmp_{vid_hash}.mp4"
+        if BOT_TOKEN:
+            try:
+                gf = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": vid}, timeout=15).json()
+                if gf.get("ok") and gf["result"].get("file_path"):
+                    fpath = gf["result"]["file_path"]
+                    vr = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fpath}", stream=True, timeout=120)
+                    if vr.status_code == 200:
+                        with open(tmp_mp4, "wb") as f:
+                            for ch in vr.iter_content(chunk_size=65536):
+                                if ch: f.write(ch)
+                        if os.path.exists(tmp_mp4) and os.path.getsize(tmp_mp4) > 0:
+                            os.replace(tmp_mp4, cache_path)
+                            return cache_path
+            except Exception as e:
+                print("Bot API tutorial download fallback:", e, flush=True)
+        if getattr(app, "is_connected", False):
+            try:
+                fut = asyncio.run_coroutine_threadsafe(app.download_media(vid, file_name=tmp_mp4), loop)
+                res_p = fut.result(timeout=180)
+                if res_p and os.path.exists(res_p) and os.path.getsize(res_p) > 0:
+                    os.replace(res_p, cache_path)
+                    return cache_path
+            except Exception as e:
+                print("Pyrogram tutorial download error:", e, flush=True)
+    return cache_path if (os.path.exists(cache_path) and os.path.getsize(cache_path) > 0) else None
+
+async def record_daily_unique_view(tdb, f_id, uid):
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        u = await users_col.find_one({"_id": uid}, {"daily_viewed": 1}) or {}
+        dv = u.get("daily_viewed", {})
+        today_list = dv.get(today, [])
+        if f_id in today_list:
+            return False
+        new_dv = {today: today_list + [f_id]}
+        await users_col.update_one({"_id": uid}, {"$set": {"daily_viewed": new_dv}}, upsert=True)
+        await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
+        invalidate_home_cache()
+        return True
+    except Exception as e:
+        print("record_daily_unique_view error:", e, flush=True)
+        return False
 
 async def extract_image_from_message(client, msg):
     try:
@@ -443,7 +498,6 @@ async def background_tasks():
                         if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(app, int(c_id), msg.id, ch["delete_min"] * 60))
                     except: pass
         except Exception as e: print("BG Task Error:", e)
-
 # ==========================================
 # 4. HELPER BUILDERS (100% DYNAMIC MONGODB)
 # ==========================================
@@ -733,11 +787,21 @@ async def cmd_delrecgroup(c, m):
 async def cmd_settutorial(c, m):
     await get_db()
     parts = m.text.split(None, 1)
-    if m.reply_to_message and (m.reply_to_message.video or m.reply_to_message.animation):
-        vid_id = (m.reply_to_message.video or m.reply_to_message.animation).file_id
+    if m.reply_to_message and (m.reply_to_message.video or m.reply_to_message.animation or m.reply_to_message.document):
+        media = m.reply_to_message.video or m.reply_to_message.animation or m.reply_to_message.document
+        vid_id = media.file_id
         await config_col.update_one({"_id": "settings"}, {"$set": {"tutorial_vid": vid_id}}, upsert=True)
         invalidate_home_cache()
-        await m.reply("✅ টিউটোরিয়াল ভিডিও সেট হয়েছে! এখন প্রতিটি ভিডিওর Detail পেজেও সরাসরি চলবে।")
+        status_msg = await m.reply("⏳ টিউটোরিয়াল ভিডিও সার্ভারে ক্যাশ করা হচ্ছে, অপেক্ষা করুন...")
+        try:
+            vid_hash = hashlib.md5(str(vid_id).encode()).hexdigest()[:14]
+            cache_path = f"/tmp/tutorial_{vid_hash}.mp4"
+            dl_path = await c.download_media(m.reply_to_message, file_name=cache_path + ".part")
+            if dl_path and os.path.exists(dl_path) and os.path.getsize(dl_path) > 0:
+                os.replace(dl_path, cache_path)
+            await status_msg.edit_text("✅ টিউটোরিয়াল ভিডিও সেট ও ক্যাশ হয়েছে! এখন মিনি অ্যাপে সাথে সাথে প্লে হবে।")
+        except Exception as e:
+            await status_msg.edit_text(f"✅ টিউটোরিয়াল ভিডিও সেট হয়েছে! (স্ট্রিমিং ব্যাকআপ সক্রিয়)")
     elif len(parts) > 1 and parts[1].strip().startswith("http"):
         await config_col.update_one({"_id": "settings"}, {"$set": {"tutorial_vid": parts[1].strip()}}, upsert=True)
         invalidate_home_cache()
@@ -761,7 +825,7 @@ async def start_cmd(client, message):
 
         user = await users_col.find_one({"_id": uid})
         if not user:
-            await users_col.insert_one({"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": [], "favorites": [], "unlocked_files": {}, "spin_count": 0, "task_count": 0, "last_activity_date": None, "custom_tasks_done": []})
+            await users_col.insert_one({"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": [], "favorites": [], "unlocked_files": {}, "spin_count": 0, "task_count": 0, "last_activity_date": None, "custom_tasks_done": [], "daily_viewed": {}})
             if ref_by and ref_by != uid and config.get("ref_on", True):
                 await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
                 try: await client.send_message(ref_by, f"🎉 রেফার বোনাস! +{config.get('ref_coin', 10)} Coins")
@@ -784,14 +848,14 @@ async def start_cmd(client, message):
             if pf_val.startswith("mfile_"):
                 _, f_id, q_idx = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
                 if fd is not None and tdb is not None:
-                    await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}}); qs = fd.get("qualities", []); qi = int(q_idx)
+                    await record_daily_unique_view(tdb, f_id, uid); qs = fd.get("qualities", []); qi = int(q_idx)
                     if 0 <= qi < len(qs): return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}]", config)
                     elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
             elif pf_val.startswith("sfile_"):
                 _, f_id, si, ei, qi = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
                 if fd is not None and tdb is not None:
-                    await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
+                    await record_daily_unique_view(tdb, f_id, uid)
                     try:
                         ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
                         return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}]", config)
@@ -800,7 +864,7 @@ async def start_cmd(client, message):
             else:
                 f_id = pf_val.replace("file_", ""); fd, tdb = await find_file_in_all_dbs(f_id)
                 if fd is not None and tdb is not None:
-                    await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
+                    await record_daily_unique_view(tdb, f_id, uid)
                     fs = fd.get("file_id") or (fd["qualities"][0]["file_id"] if fd.get("qualities") else None)
                     if fs: return await deliver_cached_file(client, uid, fs, fd["title"], config)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
@@ -997,8 +1061,7 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
-
-# ==========================================
+    # ==========================================
 # 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
 async def show_mv_poster_prompt(mo, st, edit=True):
@@ -2023,9 +2086,8 @@ async def legacy_auto_cb(c, q):
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
-
-# ==========================================
-# 10. FLASK WEB API & MONGODB POSTER HOSTING + LOGO + WELCOME AUDIO + TUTORIAL + SHORTENER
+    # ==========================================
+# 10. FLASK WEB API & MONGODB POSTER HOSTING + LOGO + WELCOME AUDIO + HTTP 206 TUTORIAL + SHORTENER
 # ==========================================
 @web.route('/poster/<poster_id>')
 def serve_poster_from_mongo(poster_id):
@@ -2162,42 +2224,56 @@ def serve_tutorial_video():
     if str(vid).startswith("http"):
         return redirect(vid)
 
-    vid_hash = hashlib.md5(str(vid).encode()).hexdigest()[:14]
-    cache_path = f"/tmp/tutorial_{vid_hash}.mp4"
+    cache_path = ensure_tutorial_cached_sync(vid)
+    if not cache_path or not os.path.exists(cache_path) or os.path.getsize(cache_path) == 0:
+        return "Tutorial video unavailable", 404
 
-    if not os.path.exists(cache_path) or os.path.getsize(cache_path) == 0:
-        downloaded = False
-        if BOT_TOKEN:
-            try:
-                gf = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": vid}, timeout=12).json()
-                if gf.get("ok") and gf["result"].get("file_path"):
-                    fpath = gf["result"]["file_path"]
-                    vr = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fpath}", stream=True, timeout=60)
-                    if vr.status_code == 200:
-                        tmp_p = cache_path + ".part"
-                        with open(tmp_p, "wb") as f:
-                            for ch in vr.iter_content(chunk_size=65536):
-                                if ch: f.write(ch)
-                        if os.path.getsize(tmp_p) > 0:
-                            os.replace(tmp_p, cache_path)
-                            downloaded = True
-            except Exception as e:
-                print("Bot API tutorial download fallback:", e, flush=True)
+    file_size = os.path.getsize(cache_path)
+    range_header = request.headers.get("Range", None)
+    if range_header:
+        byte1, byte2 = 0, None
+        m = re.search(r"bytes=(\d+)-(\d*)", range_header)
+        if m:
+            byte1 = int(m.group(1))
+            if m.group(2):
+                byte2 = int(m.group(2))
+        if byte2 is None or byte2 >= file_size:
+            byte2 = file_size - 1
+        if byte1 >= file_size:
+            return Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+        length = byte2 - byte1 + 1
 
-        if not downloaded and getattr(app, "is_connected", False):
-            try:
-                tmp_p = cache_path + ".part"
-                fut = asyncio.run_coroutine_threadsafe(app.download_media(vid, file_name=tmp_p), loop)
-                res_p = fut.result(timeout=120)
-                if res_p and os.path.exists(res_p) and os.path.getsize(res_p) > 0:
-                    os.replace(res_p, cache_path)
-                    downloaded = True
-            except Exception as e:
-                print("Pyrogram tutorial download error:", e, flush=True)
+        def generate_range():
+            with open(cache_path, "rb") as f:
+                f.seek(byte1)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
 
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-        return send_file(cache_path, mimetype="video/mp4", conditional=True)
-    return "Tutorial video unavailable", 404
+        rv = Response(generate_range(), 206, mimetype="video/mp4", direct_passthrough=True)
+        rv.headers["Content-Range"] = f"bytes {byte1}-{byte2}/{file_size}"
+        rv.headers["Accept-Ranges"] = "bytes"
+        rv.headers["Content-Length"] = str(length)
+        rv.headers["Cache-Control"] = "public, max-age=86400"
+        return rv
+
+    def generate_full():
+        with open(cache_path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+
+    rv = Response(generate_full(), 200, mimetype="video/mp4", direct_passthrough=True)
+    rv.headers["Accept-Ranges"] = "bytes"
+    rv.headers["Content-Length"] = str(file_size)
+    rv.headers["Cache-Control"] = "public, max-age=86400"
+    return rv
 
 @web.route('/api/shorten', methods=['POST'])
 def api_shorten():
@@ -2225,11 +2301,11 @@ SHORT_VERIFY_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>{{ site_name }} — Link Verification</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet">
-{% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" async></script>{% endfor %}
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+{% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" defer></script>{% endfor %}
 <style>
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#fff;font-family:'Hind Siliguri',sans-serif;display:flex;align-items:center;justify-content:center;padding:18px}
+body{margin:0;min-height:100vh;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#fff;font-family:'Hind Siliguri',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;padding:18px}
 .card{background:#fff;color:#0f172a;width:100%;max-width:420px;border-radius:22px;padding:24px 20px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.35)}
 .badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-weight:700;font-size:12px;padding:4px 12px;border-radius:20px;margin-bottom:10px}
 h2{margin:0 0 8px 0;font-size:21px}
@@ -2484,9 +2560,8 @@ def build_user_state_dict(user_id):
 @web.route('/api/user/<int:user_id>')
 def get_user(user_id):
     return jsonify(build_user_state_dict(user_id))
-
-# ==========================================
-# 11. HTML MINI APP UI (ANIMATED + FAST LOAD + PROFILE + MOVIE/SERIES + LOGO VOICE)
+    # ==========================================
+# 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html>
@@ -2499,94 +2574,117 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 {% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" defer></script>{% endfor %}
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',system-ui,-apple-system,sans-serif;margin:0;padding-bottom:92px;min-height:100vh}
-@keyframes btnShine{0%{left:-120%}100%{left:140%}}
-@keyframes fadeInSlide{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-@keyframes popIn{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
+body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',system-ui,-apple-system,sans-serif;margin:0;padding-bottom:94px;min-height:100vh}
+@keyframes btnShine{0%{left:-120%}100%{left:150%}}
+@keyframes gradFlow{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes fadeInSlide{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes popIn{from{opacity:0;transform:scale(.88)}to{opacity:1;transform:scale(1)}}
 @keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(108,92,231,.45)}50%{box-shadow:0 0 0 8px rgba(108,92,231,0)}}
-@keyframes floatLogo{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-4px) scale(1.03)}}
+@keyframes floatLogo{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-5px) scale(1.04)}}
 @keyframes spinRing{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-@keyframes dotBlink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
-@keyframes navPop{0%{transform:scale(1)}50%{transform:scale(1.18)}100%{transform:scale(1.05)}}
+@keyframes dotBlink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
+@keyframes navPop{0%{transform:translateY(0) scale(1)}50%{transform:translateY(-4px) scale(1.18)}100%{transform:translateY(-1px) scale(1.06)}}
+@keyframes rippleAnim{to{transform:scale(4);opacity:0}}
+@keyframes gentleBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
 
-button,.cat-pill,.lang-pill,.nav-i,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c,.r-search,.float-search{
-  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .2s ease,opacity .2s ease,background .25s ease;
+.anim-btn,button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c{
+  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .22s ease,background .25s ease;
   position:relative;overflow:hidden;
 }
-button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active,.r-search:active,.float-search:active{
-  transform:scale(.93)!important;
+button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active{
+  transform:scale(.92)!important;
 }
 .btn-p::after,.q-btn::after,.p-dl::after,.unlock-opt::after,.watch-pill::after,.tut-btn::after,.cat-pill.active::after{
-  content:"";position:absolute;top:0;left:-120%;width:60%;height:100%;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.32),transparent);
-  transform:skewX(-20deg);animation:btnShine 3.2s infinite ease-in-out;pointer-events:none;
+  content:"";position:absolute;top:0;left:-120%;width:55%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.38),transparent);
+  transform:skewX(-20deg);animation:btnShine 2.6s infinite ease-in-out;pointer-events:none;
 }
+.ripple-fx{position:absolute;border-radius:50%;background:rgba(255,255,255,.45);transform:scale(0);animation:rippleAnim .5s linear;pointer-events:none}
 
-.top-header{position:sticky;top:0;z-index:90;background:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 1px 6px rgba(0,0,0,.05)}
-.brand{display:flex;align-items:center;gap:7px;font-size:19px;font-weight:700}
-.hdr-logo{width:28px;height:28px;border-radius:8px;object-fit:cover;box-shadow:0 2px 6px rgba(0,0,0,.15)}
-.brand-badge{background:linear-gradient(90deg,#d90429,#ef233c);color:#fff;font-size:12.5px;padding:2px 8px;border-radius:6px}
-.hdr-r{display:flex;align-items:center;gap:8px}.coin-pill{background:#fff3cd;color:#856404;border:1px solid #ffeeba;padding:4px 10px;border-radius:16px;font-size:12.5px;font-weight:700;animation:pulseGlow 3s infinite}
-.r-search{width:36px;height:36px;border-radius:50%;padding:2.5px;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);display:flex;align-items:center;justify-content:center;cursor:pointer}
-.r-search-in{width:100%;height:100%;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px}
-.live-bar{background:linear-gradient(90deg,#4b39ef,#7c3aed);color:#fff;display:flex;align-items:center;height:34px;overflow:hidden}
-.live-pill{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:700;background:rgba(0,0,0,.22);height:100%;white-space:nowrap}
-.live-dot{width:8px;height:8px;background:#ff3b30;border-radius:50%;animation:dotBlink 1.2s infinite}.marquee-wrap{flex:1;overflow:hidden;white-space:nowrap}
+.top-header{position:sticky;top:0;z-index:90;background:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.brand{display:flex;align-items:center;gap:7px;font-size:18.5px;font-weight:700}
+.hdr-logo{width:30px;height:30px;border-radius:9px;object-fit:cover;box-shadow:0 2px 8px rgba(108,92,231,.25);animation:gentleBob 3s ease-in-out infinite}
+.brand-badge{background:linear-gradient(90deg,#d90429,#ef233c,#ff4d6d);background-size:200% 200%;animation:gradFlow 4s ease infinite;color:#fff;font-size:12px;padding:2px 8px;border-radius:6px}
+.hdr-r{display:flex;align-items:center;gap:8px}.coin-pill{background:#fff3cd;color:#856404;border:1px solid #ffeeba;padding:4px 10px;border-radius:16px;font-size:12.5px;font-weight:700;animation:pulseGlow 2.8s infinite}
+.r-search{width:36px;height:36px;border-radius:50%;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.r-search::before,.float-search::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);animation:spinRing 3.5s linear infinite}
+.r-search-in{position:relative;z-index:2;width:30px;height:30px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px}
+.float-search{position:fixed;bottom:82px;right:14px;z-index:95;width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 18px rgba(0,0,0,.22);cursor:pointer}
+.float-search .r-search-in{width:38px;height:38px;font-size:16px}
+
+.live-bar{background:linear-gradient(90deg,#4b39ef,#7c3aed,#ec4899);background-size:200% 200%;animation:gradFlow 6s ease infinite;color:#fff;display:flex;align-items:center;height:34px;overflow:hidden}
+.live-pill{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:700;background:rgba(0,0,0,.25);height:100%;white-space:nowrap}
+.live-dot{width:8px;height:8px;background:#ff3b30;border-radius:50%;animation:dotBlink 1s infinite}.marquee-wrap{flex:1;overflow:hidden;white-space:nowrap}
 .marquee-txt{display:inline-block;padding-left:100%;font-size:12.5px;animation:scr 18s linear infinite}@keyframes scr{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
 .search-box-wrap{display:none;padding:10px 14px;background:#fff;border-bottom:1px solid #eee}.search-box-wrap.open{display:block;animation:fadeInSlide .22s ease}
 .s-input{width:100%;padding:10px 14px;border-radius:12px;border:1.5px solid #e2e8f0;background:#f8fafc;font-size:14px;outline:none;color:#111}
-.cat-scroll{display:flex;gap:8px;overflow-x:auto;padding:10px 14px 4px 14px;scrollbar-width:none}.cat-scroll::-webkit-scrollbar{display:none}
-.cat-pill{background:#fff;color:#333;padding:7px 15px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.06);border:1px solid #ececec}
-.cat-pill.active{background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff;border-color:transparent;box-shadow:0 4px 12px rgba(221,36,118,.28)}.cat-pill.adult{background:#5e0b2b;color:#fff;border-color:transparent}
-.lang-pill{background:#eef2ff;color:#4338ca;padding:4px 11px;border-radius:14px;font-size:11.5px;font-weight:600;white-space:nowrap;cursor:pointer}.lang-pill.active{background:#4338ca;color:#fff}
-.page{display:none}.page.active{display:block;animation:fadeInSlide .25s ease}
+
+.cat-scroll{display:flex;flex-wrap:nowrap;gap:8px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-x;padding:10px 14px 5px 14px;scrollbar-width:none}
+.cat-scroll::-webkit-scrollbar{display:none}
+.cat-pill{flex:0 0 auto;width:max-content;background:#fff;color:#333;padding:7px 15px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.06);border:1px solid #ececec}
+.cat-pill.active{background:linear-gradient(90deg,#ff512f,#dd2476,#ff512f);background-size:200% 200%;animation:gradFlow 3s ease infinite;color:#fff;border-color:transparent;box-shadow:0 4px 12px rgba(221,36,118,.3)}
+.cat-pill.adult{background:#5e0b2b;color:#fff;border-color:transparent}
+.lang-pill{flex:0 0 auto;width:max-content;background:#eef2ff;color:#4338ca;padding:5px 13px;border-radius:14px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer}
+.lang-pill.active{background:linear-gradient(90deg,#4338ca,#6366f1);color:#fff;box-shadow:0 3px 8px rgba(67,56,202,.25)}
+
+.page{display:none}.page.active{display:block;animation:fadeInSlide .26s ease}
 .sec-head{padding:10px 14px 6px 14px;font-size:15.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-.pin-scroll{display:flex;gap:10px;overflow-x:auto;padding:0 14px 10px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
-.pin-card{min-width:168px;max-width:168px;cursor:pointer;transition:transform .2s ease}.pin-card:active{transform:scale(.95)}
-.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,.08);background:#141624}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block}
-.pin-tag{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;padding:2px 7px;border-radius:10px}.pin-t{font-size:12.5px;font-weight:600;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid #7c6cf6;box-shadow:0 4px 14px rgba(108,92,231,.08);cursor:pointer;transition:transform .22s ease,box-shadow .22s ease;animation:fadeInSlide .28s ease}
-.feed-card:active{transform:scale(.97)}
+.pin-scroll{display:flex;flex-wrap:nowrap;gap:10px;overflow-x:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x;padding:0 14px 10px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
+.pin-card{flex:0 0 auto;min-width:168px;max-width:168px;cursor:pointer;transition:transform .2s ease;animation:fadeInSlide .3s ease}.pin-card:active{transform:scale(.94)}
+.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,.1);background:#141624}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block}
+.pin-tag{position:absolute;top:6px;left:6px;background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.3)}
+.pin-views{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;padding:2px 6px;border-radius:8px}
+.pin-t{font-size:12.5px;font-weight:600;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+.feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid #7c6cf6;box-shadow:0 4px 14px rgba(108,92,231,.1);cursor:pointer;transition:transform .22s ease,box-shadow .22s ease;animation:fadeInSlide .3s ease}
+.feed-card:active{transform:scale(.96)}
 .feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#141624}.feed-img-w img{width:100%;height:100%;object-fit:cover;display:block}
-.b-new{position:absolute;top:10px;left:10px;background:#2979ff;color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px}.b-type{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.75);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px}
+.b-new{position:absolute;top:10px;left:10px;background:linear-gradient(90deg,#2979ff,#00b0ff);color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px}.b-type{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.75);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px}
 .feed-body{padding:10px 12px 12px 12px}.feed-title{font-size:15px;font-weight:700;margin-bottom:3px}.feed-meta{font-size:12px;color:#777;display:flex;justify-content:space-between}
-.car-wrap{display:flex;gap:12px;overflow-x:auto;padding:4px 0 12px 0;scrollbar-width:none}.car-wrap::-webkit-scrollbar{display:none}
-.p-slide{min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.p-slide-b{padding:10px 12px}
-.watch-pill{background:linear-gradient(90deg,#e63946,#d90429);color:#fff;border:none;padding:6px 16px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
+.car-wrap{display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:4px 0 12px 0;scrollbar-width:none}.car-wrap::-webkit-scrollbar{display:none}
+.p-slide{flex:0 0 auto;min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.p-slide-b{padding:10px 12px}
+.watch-pill{background:linear-gradient(90deg,#e63946,#d90429);color:#fff;border:none;padding:7px 17px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
+
 .det-hdr{background:#fff;padding:12px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #eee;position:sticky;top:0;z-index:95}.back-btn{width:34px;height:34px;border-radius:50%;background:#f1f3f5;border:none;font-size:18px;cursor:pointer}
 .det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#141624}.det-img-w img{width:100%;height:100%;object-fit:cover;display:block}.hd-b{position:absolute;top:12px;left:12px;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
 .det-body{background:#fff;padding:14px 16px}.det-title{font-size:19px;font-weight:700;margin:0 0 8px 0}.d-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.d-tag{background:#f1f5f9;color:#475569;padding:3px 10px;border-radius:12px;font-size:11.5px;font-weight:600}
 .stats-r{display:flex;justify-content:space-around;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9;margin-bottom:12px}.stat-i{text-align:center;font-size:12px;color:#64748b}.stat-i b{display:block;font-size:15px;color:#111}
-.shr-c{width:38px;height:38px;border-radius:50%;background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;font-size:16px;cursor:pointer}.tip-ban{background:#fff8eb;border:1px solid #fde68a;color:#92400e;padding:9px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:10px}
-.tut-btn{display:block;margin:0 auto 12px auto;background:linear-gradient(90deg,#1d4ed8,#4f46e5);color:#fff;border:none;padding:9px 20px;border-radius:22px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(29,78,216,.25)}
-.tut-box{display:none;margin:0 auto 14px auto;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.2)}
-.tut-box video{width:100%;max-height:240px;display:block;background:#000}
+.shr-c{width:40px;height:40px;border-radius:50%;background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;font-size:16px;cursor:pointer;animation:pulseGlow 2.8s infinite}.tip-ban{background:#fff8eb;border:1px solid #fde68a;color:#92400e;padding:9px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:10px}
+.tut-btn{display:block;margin:0 auto 12px auto;background:linear-gradient(90deg,#1d4ed8,#4f46e5,#1d4ed8);background-size:200% 200%;animation:gradFlow 3s ease infinite;color:#fff;border:none;padding:9px 20px;border-radius:22px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(29,78,216,.3)}
+.tut-box{display:none;margin:0 auto 14px auto;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.22);position:relative}
+.tut-box video{width:100%;max-height:250px;display:block;background:#000}
+.tut-status{color:#e2e8f0;font-size:12px;text-align:center;padding:6px;background:rgba(15,23,42,.85)}
+
 .act-r{display:flex;gap:10px;margin-bottom:14px}
-.p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-dl{flex:1.2;background:linear-gradient(90deg,#0f172a,#1e293b);border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(15,23,42,.22)}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}
-.sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff;border:none;padding:9px 14px;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 10px rgba(79,70,229,.25)}
-.s-tab{background:#fff;border:1px solid #cbd5e1;color:#334155;padding:7px 13px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}.s-tab.active{background:linear-gradient(90deg,#111827,#334155);color:#fff;border-color:#111;box-shadow:0 3px 10px rgba(0,0,0,.18)}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px;animation:fadeInSlide .2s ease}
+.p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-dl{flex:1.2;background:linear-gradient(90deg,#0f172a,#334155,#0f172a);background-size:200% 200%;animation:gradFlow 4s ease infinite;border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(15,23,42,.25)}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}
+.sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed,#6366f1);background-size:200% 200%;animation:gradFlow 3.5s ease infinite;color:#fff;border:none;padding:9px 14px;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(79,70,229,.28)}
+.s-tab{flex:0 0 auto;width:max-content;background:#fff;border:1px solid #cbd5e1;color:#334155;padding:7px 14px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}.s-tab.active{background:linear-gradient(90deg,#111827,#334155);color:#fff;border-color:#111;box-shadow:0 3px 10px rgba(0,0,0,.2)}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px;animation:fadeInSlide .22s ease}
 .rate-c{background:#fffbeb;border:1px solid #fde68a;border-radius:14px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-size:13px;font-weight:600}.star-b{font-size:20px;color:#cbd5e1;background:none;border:none;cursor:pointer;padding:0 2px}.star-b.lit{color:#f59e0b}
 .cmt-sec{background:#fff;margin-top:10px;padding:14px 16px 80px 16px}.cmt-bar{position:fixed;bottom:0;left:0;width:100%;background:#fff;padding:10px 14px;border-top:1px solid #eee;display:none;gap:10px;z-index:120}.cmt-bar input{flex:1;background:#f1f5f9;border:none;border-radius:22px;padding:10px 16px;outline:none;font-size:14px}.cmt-bar button{width:40px;height:40px;border-radius:50%;background:#111;color:#fff;border:none;font-size:16px;cursor:pointer}
-.card-box{background:#fff;border-radius:16px;padding:16px;margin:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.05);border:1px solid #eee;animation:fadeInSlide .25s ease}.btn-p{width:100%;background:linear-gradient(90deg,#6c5ce7,#4f46e5);color:#fff;border:none;padding:11px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;box-shadow:0 4px 12px rgba(79,70,229,.22)}
+.card-box{background:#fff;border-radius:16px;padding:16px;margin:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.05);border:1px solid #eee;animation:fadeInSlide .25s ease}.btn-p{width:100%;background:linear-gradient(90deg,#6c5ce7,#4f46e5,#7c3aed);background-size:200% 200%;animation:gradFlow 3.5s ease infinite;color:#fff;border:none;padding:11px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;box-shadow:0 4px 12px rgba(79,70,229,.25)}
+
 .tools-hero{text-align:center;padding:12px 14px 4px 14px}.tools-stats{display:flex;gap:10px;padding:10px 14px}.t-stat{flex:1;background:#fff;border-radius:16px;padding:12px 8px;text-align:center;box-shadow:0 3px 10px rgba(0,0,0,.05)}.t-stat b{font-size:20px;display:block}
-.t-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 14px 10px 14px}.t-card{background:#fff;border-radius:18px;padding:14px;position:relative;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.05);cursor:pointer;border:1px solid #f1f5f9;transition:transform .2s ease}
-.t-card:active{transform:scale(.95)}
+.t-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 14px 10px 14px}.t-card{background:#fff;border-radius:18px;padding:14px;position:relative;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.06);cursor:pointer;border:1px solid #f1f5f9;transition:transform .2s ease;animation:fadeInSlide .25s ease}
+.t-card:active{transform:scale(.94)}
 .t-blob{position:absolute;top:-16px;right:-16px;width:62px;height:62px;border-radius:50%;opacity:.55}.t-new{position:absolute;top:8px;right:8px;background:#10b981;color:#fff;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;z-index:2}
 .t-ico{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:21px;margin-bottom:10px}.t-name{font-size:13.5px;font-weight:700;color:#0f172a;margin-bottom:3px}.t-desc{font-size:11px;color:#64748b;line-height:1.35}
 .tool-lbl{display:block;text-align:left;font-size:12px;font-weight:600;color:#475569;margin:6px 0 3px 2px}.tool-res{background:#f1f5f9;border-radius:12px;padding:12px;margin-top:10px;font-size:13.5px;text-align:left;word-break:break-word}
-.float-search{position:fixed;bottom:82px;right:16px;z-index:95;width:44px;height:44px;border-radius:50%;padding:3px;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);box-shadow:0 4px 14px rgba(0,0,0,.2);cursor:pointer;animation:pulseGlow 2.6s infinite}
-.bottom-nav{position:fixed;bottom:8px;left:6px;right:6px;background:rgba(255,255,255,.96);backdrop-filter:blur(12px);border-radius:24px;display:grid;grid-template-columns:repeat(7,1fr);align-items:center;padding:6px 2px;box-shadow:0 6px 24px rgba(0,0,0,.13);z-index:100;border:1px solid rgba(255,255,255,.9)}
-.nav-i{display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9.5px;color:#64748b;cursor:pointer;font-weight:600;padding:3px 1px;letter-spacing:-0.2px;white-space:nowrap}.nav-i.active{color:#d90429;font-weight:700;animation:navPop .3s ease}.nav-i span{font-size:17px;margin-bottom:1px;line-height:1.1}
+
+.bottom-nav{position:fixed;bottom:8px;left:6px;right:6px;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border-radius:24px;display:grid;grid-template-columns:repeat(7,1fr);align-items:center;padding:6px 2px;box-shadow:0 6px 24px rgba(0,0,0,.14);z-index:100;border:1px solid rgba(255,255,255,.95)}
+.nav-i{display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9.5px;color:#64748b;cursor:pointer;font-weight:600;padding:3px 1px;letter-spacing:-0.2px;white-space:nowrap;transition:transform .2s ease,color .2s ease}
+.nav-i.active{color:#d90429;font-weight:700;animation:navPop .35s cubic-bezier(.34,1.56,.64,1)}
+.nav-i.active span{animation:gentleBob 1.8s ease-in-out infinite}
+.nav-i span{font-size:17px;margin-bottom:1px;line-height:1.1}
 .av-badge{width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,#f43f5e,#8b5cf6);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700;margin-bottom:2px}
 .modal-ov{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.65);z-index:9999;justify-content:center;align-items:center;backdrop-filter:blur(4px);padding:14px}
-.modal-card{background:#fff;color:#111;border-radius:22px;padding:22px 18px;width:100%;max-width:390px;text-align:center;box-shadow:0 15px 40px rgba(0,0,0,.25);max-height:88vh;overflow-y:auto;position:relative;animation:popIn .24s cubic-bezier(.34,1.56,.64,1)}
+.modal-card{background:#fff;color:#111;border-radius:22px;padding:22px 18px;width:100%;max-width:390px;text-align:center;box-shadow:0 15px 40px rgba(0,0,0,.25);max-height:88vh;overflow-y:auto;position:relative;animation:popIn .26s cubic-bezier(.34,1.56,.64,1)}
 .age-card{background:#1c1d2b;color:#fff;border-radius:22px;padding:24px 20px;width:100%;max-width:370px;text-align:center;border:1px solid rgba(255,255,255,.1);animation:popIn .24s ease}.age-warn{background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#fca5a5;padding:12px;border-radius:12px;font-size:13px;margin:14px 0}
-.wel-logo-ring{width:88px;height:88px;margin:0 auto 12px auto;border-radius:24px;padding:3px;background:linear-gradient(135deg,#ff4d4d,#7c3aed,#06b6d4);box-shadow:0 8px 24px rgba(124,58,237,.35);animation:floatLogo 2.8s ease-in-out infinite}
+.wel-logo-ring{width:88px;height:88px;margin:0 auto 12px auto;border-radius:24px;padding:3px;background:linear-gradient(135deg,#ff4d4d,#7c3aed,#06b6d4);box-shadow:0 8px 24px rgba(124,58,237,.35);animation:floatLogo 2.5s ease-in-out infinite}
 .wel-logo-ring img{width:100%;height:100%;border-radius:21px;object-fit:cover;display:block;background:#141624}
-.wel-voice-btn{background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;border-radius:16px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:10px;display:inline-flex;align-items:center;gap:5px}
+.wel-voice-btn{background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;border-radius:16px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:10px;display:inline-flex;align-items:center;gap:5px}
 .wel-item{text-align:left;font-size:13.5px;line-height:1.55;margin-bottom:8px;color:#334155}
-.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.12)}
-.clr-hist-btn{background:#fee2e2;color:#dc2626;border:none;padding:4px 11px;border-radius:12px;font-size:11.5px;font-weight:700;cursor:pointer}
+.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+.clr-hist-btn{background:#fee2e2;color:#dc2626;border:none;padding:5px 12px;border-radius:12px;font-size:11.5px;font-weight:700;cursor:pointer}
 </style>
 </head>
 <body>
@@ -2633,7 +2731,7 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 
 <div id="page-home" class="page active">
   <div class="cat-scroll" id="cat-pills"></div><div class="cat-scroll" id="lang-pills" style="padding-top:2px;"></div>
-  <div id="pinned-section"><div class="sec-head" id="home-pinned-head">📌 Pinned for you</div><div class="pin-scroll" id="pinned-list"></div></div>
+  <div id="pinned-section"><div class="sec-head" id="home-pinned-head">🔥 Top Trending</div><div class="pin-scroll" id="pinned-list"></div></div>
   <div class="feed-wrap" id="feed-list"></div>
 </div>
 
@@ -2646,7 +2744,8 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
     <div class="tip-ban">💡 Tap the button below to download easily</div>
     <button class="tut-btn" id="tut-toggle-btn" onclick="toggleInlineTutorial()">❓ Need help? Watch the tutorial</button>
     <div class="tut-box" id="inline-tut-box">
-      <video id="det-tut-vid" controls playsinline preload="metadata"></video>
+      <div class="tut-status" id="tut-status">⏳ টিউটোরিয়াল ভিডিও লোড হচ্ছে...</div>
+      <video id="det-tut-vid" controls playsinline webkit-playsinline preload="auto"><source id="det-tut-src" type="video/mp4"></video>
     </div>
     <div class="act-r"><button class="p-like" id="btn-like" onclick="likeCurrent()">🤍 Like</button><button class="p-dl" onclick="scrollToDownload()">⬇️ Download</button><button class="p-save" id="btn-save" onclick="saveCurrent()">🔖 Save</button></div>
     <div id="det-selector-area"></div>
@@ -2716,6 +2815,16 @@ const initialUserState={{ initial_user_json | safe }};
 
 (function(){const p=siteName.trim().split(/\s+/),e=document.getElementById('brand-title');e.innerHTML=p.length>1?`${p[0]} <span class="brand-badge">${p.slice(1).join(' ')}</span>`:`${siteName} <span class="brand-badge">Bot</span>`;})();
 
+document.addEventListener('click',function(e){
+  const btn=e.target.closest('button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.unlock-opt');
+  if(!btn)return;
+  const r=document.createElement('span'); r.className='ripple-fx';
+  const rect=btn.getBoundingClientRect(), sz=Math.max(rect.width,rect.height);
+  r.style.width=r.style.height=sz+'px';
+  r.style.left=(e.clientX-rect.left-sz/2)+'px'; r.style.top=(e.clientY-rect.top-sz/2)+'px';
+  btn.appendChild(r); setTimeout(()=>r.remove(),520);
+});
+
 let userId=123456789; const urlP=new URLSearchParams(window.location.search);
 if(tg?.initDataUnsafe?.user){const u=tg.initDataUnsafe.user;userId=u.id;localStorage.setItem("tg_user_id",userId);const fn=(u.first_name+" "+(u.last_name||"")).trim();document.getElementById('u-name').innerText=fn;document.getElementById('nav-av').innerText=fn.slice(0,2).toUpperCase();if(u.photo_url)document.getElementById('u-pic').src=u.photo_url;}
 else if(urlP.get('uid')){userId=parseInt(urlP.get('uid'));localStorage.setItem("tg_user_id",userId);}
@@ -2762,7 +2871,14 @@ function closeWelcome(){
 
 let userState=initialUserState||{balance:0,is_premium:false,expiry:null,history:[],favorites:[],unlocked_files:{}};
 let activeCat='All',activeLang='All',activeType='all',pendingCat=null,curFile=null,curSeasonIdx=0,feedLimit=15,lastFilteredLen=0;
-function openTgLink(u){try{if(tg?.initDataUnsafe?.user)tg.openTelegramLink(u);else window.location.href=u;}catch(e){window.location.href=u;}}
+function openTgLink(u){
+  if(!u)return;
+  try{
+    if(tg&&tg.openTelegramLink&&/^https?:\/\/(t\.me|telegram\.me)\//i.test(u)){tg.openTelegramLink(u);return;}
+    if(tg&&tg.openLink){tg.openLink(u);return;}
+  }catch(e){}
+  window.open(u,'_blank')||(window.location.href=u);
+}
 function applyUserStateUI(){
   document.getElementById('hdr-bal').innerText=userState.balance||0;
   document.getElementById('u-bal').innerText=userState.balance||0;
@@ -2801,17 +2917,20 @@ function matchesType(f){
   return true;
 }
 
-function renderPinned(){
-  let base=allFiles.filter(f=>matchesType(f)&&(!(f.category||'').includes('18')||sessionStorage.getItem('age_18_ok')==='1'));
-  let ps=base.filter(f=>f.pinned);
-  if(!ps.length)ps=base.slice(0,6);
-  const sec=document.getElementById('pinned-section');
-  if(!ps.length){sec.style.display='none';return;}
-  sec.style.display='block';
-  document.getElementById('home-pinned-head').innerText=activeType==='movie'?'🎬 Pinned Movies':(activeType==='series'?'📺 Pinned Series':'📌 Pinned for you');
-  document.getElementById('pinned-list').innerHTML=ps.map((f,idx)=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="${idx<3?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">📌 Pinned</div></div><div class="pin-t">${f.title}</div></div>`).join('');
+function topScore(f){
+  return ((f.views||0)*3)+((f.likes||[]).length*5)+((f.ratings||[]).length*2);
 }
-renderPinned();
+
+function renderTopSlider(){
+  let base=allFiles.filter(f=>matchesType(f)&&(!(f.category||'').includes('18')||sessionStorage.getItem('age_18_ok')==='1'));
+  let tops=[...base].sort((a,b)=>topScore(b)-topScore(a)).slice(0,10);
+  const sec=document.getElementById('pinned-section');
+  if(!tops.length){sec.style.display='none';return;}
+  sec.style.display='block';
+  document.getElementById('home-pinned-head').innerText=activeType==='movie'?'🔥 Top Movies':(activeType==='series'?'🔥 Top Series':'🔥 Top Movies & Series');
+  document.getElementById('pinned-list').innerHTML=tops.map((f,idx)=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="${idx<3?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">🔥 Top #${idx+1}</div><div class="pin-views">⬇️ ${f.views||0}</div></div><div class="pin-t">${f.title}</div></div>`).join('');
+}
+renderTopSlider();
 
 function timeAgo(iso){if(!iso)return 'Recently';const s=Math.floor((new Date()-new Date(iso))/1000);if(s<3600)return Math.max(1,Math.floor(s/60))+' min ago';if(s<86400)return Math.floor(s/3600)+' hr ago';return new Date(iso).toLocaleDateString();}
 
@@ -2891,11 +3010,20 @@ function closeDetails(){
 }
 
 function toggleInlineTutorial(){
-  const box=document.getElementById('inline-tut-box'), vid=document.getElementById('det-tut-vid'), btn=document.getElementById('tut-toggle-btn');
+  const box=document.getElementById('inline-tut-box'), vid=document.getElementById('det-tut-vid'), src=document.getElementById('det-tut-src'), st=document.getElementById('tut-status'), btn=document.getElementById('tut-toggle-btn');
   if(!hasTutorial){alert('⚠️ টিউটোরিয়াল ভিডিও এখনো সেট করা হয়নি!');return;}
   if(box.style.display==='none'||!box.style.display){
     box.style.display='block';
-    if(!vid.getAttribute('src')) vid.src='/tutorial_video?v='+tutorialVer;
+    const vUrl='/tutorial_video?v='+tutorialVer;
+    if(!src.getAttribute('src')){
+      st.style.display='block';
+      st.innerText='⏳ টিউটোরিয়াল ভিডিও লোড হচ্ছে...';
+      src.setAttribute('src',vUrl);
+      vid.oncanplay=()=>{st.style.display='none';};
+      vid.onplaying=()=>{st.style.display='none';};
+      vid.onerror=()=>{st.style.display='block';st.innerText='⚠️ ভিডিও লোড হতে সময় নিচ্ছে, অনুগ্রহ করে কয়েক সেকেন্ড পর আবার চেষ্টা করুন।';};
+      vid.load();
+    }
     vid.play().catch(()=>{});
     btn.innerText='🔼 Hide tutorial video';
   } else {
@@ -2923,7 +3051,7 @@ function renderSelectors(){
     if(curSeasonIdx>=ssns.length)curSeasonIdx=0;
     const curS=ssns[curSeasonIdx];
     const sOrig=(curS.orig_idx!==undefined)?curS.orig_idx:curSeasonIdx;
-    let h=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;margin-bottom:8px;">📺 Select Season & Episode</div><div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;">`;
+    let h=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;margin-bottom:8px;">📺 Select Season & Episode</div><div style="display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;">`;
     ssns.forEach((s,si)=>{
       const sLbl=pad2(s.season_no);
       h+=`<button class="s-tab ${si===curSeasonIdx?'active':''}" onclick="curSeasonIdx=${si};renderSelectors()">Season ${sLbl}</button>`;
@@ -3043,7 +3171,11 @@ async function saveCurrent(){
   document.getElementById('btn-save').innerText=d.saved?'✅ Saved':'🔖 Save';
   loadUser();
 }
-function shareCurrent(){openTgLink(`https://t.me/share/url?url=${encodeURIComponent(`https://t.me/${botUsername}?start=ref${userId}file${curFile._id}`)}&text=${encodeURIComponent(curFile.title)}`);}
+function shareCurrent(){
+  const refUrl=`https://t.me/${botUsername}?start=${userId}`;
+  const shareTxt=`🔥 Watch "${curFile.title}" & thousands of Movies/Series on ${siteName}!`;
+  openTgLink(`https://t.me/share/url?url=${encodeURIComponent(refUrl)}&text=${encodeURIComponent(shareTxt)}`);
+}
 function renderRating(){const rs=curFile.ratings||[],avg=rs.length?(rs.reduce((a,b)=>a+b.stars,0)/rs.length).toFixed(1):'0.0';document.getElementById('rate-avg').innerText=`⭐ ${avg} (${rs.length})`;const my=(rs.find(r=>r.uid===userId)||{}).stars||0;document.getElementById('star-row').innerHTML=[1,2,3,4,5].map(n=>`<button class="star-b ${n<=my?'lit':''}" onclick="rateVideo(${n})">★</button>`).join('');}
 async function rateVideo(stars){await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rate',uid:userId,file_id:curFile._id,stars})});if(!curFile.ratings)curFile.ratings=[];curFile.ratings=curFile.ratings.filter(x=>x.uid!==userId);curFile.ratings.push({uid:userId,stars});renderRating();}
 function renderComments(){const cs=curFile.comments||[];document.getElementById('det-cmt-list').innerHTML=cs.map(c=>`<div style="padding:8px 0;border-bottom:1px solid #f1f5f9;font-size:13.5px;"><b>User ${c.uid}</b> <small style="color:#94a3b8;">${c.time}</small><br>${c.text}</div>`).join('')||"<p style='color:#94a3b8;font-size:13px;'>No comments yet.</p>";}
@@ -3057,7 +3189,7 @@ function switchTab(id,el,tp){
   if(id==='home'){
     activeType=tp||'all';
     feedLimit=15;
-    renderPinned();
+    renderTopSlider();
     renderFeed();
     window.scrollTo({top:0,behavior:'smooth'});
   }
@@ -3100,7 +3232,6 @@ function renderTools(){
 
 let tasbihCnt=0;
 function openTool(id){
-  if(id==='mrec'&&recGroupLink){openTgLink(recGroupLink);}
   const t=TOOLS.find(x=>x.id===id); document.getElementById('tool-m-title').innerText=t.ico+' '+t.name;
   const b=document.getElementById('tool-m-body'); document.getElementById('tool-modal').style.display='flex';
   const ui={
@@ -3124,8 +3255,8 @@ function openTool(id){
     color:`<span class="tool-lbl">যেকোনো কালার সিলেক্ট করুন</span><input type="color" id="ti1" value="#6c5ce7" style="width:100%;height:50px;border:none;cursor:pointer;" oninput="pickCol()"><div id="tr" class="tool-res"></div>`,
     short:`<span class="tool-lbl">বড় লিংক দিন (যেমন: https://google.com/search?q=movies)</span><input id="ti1" class="s-input" placeholder="যেমন: https://google.com"><br><br><button class="btn-p" onclick="shortUrl()">Shorten Link (With Ads)</button><div id="tr" class="tool-res"></div>`,
     mrec: recGroupLink
-      ? `<p style="font-size:13.5px;color:#475569;">মুভি রিকোয়েস্ট ও সাজেশন পেতে আমাদের অফিসিয়াল গ্রুপে জয়েন করুন!</p><button class="btn-p" onclick="openTgLink('${recGroupLink}')">👥 Join Movie Recommendation Group</button><br><br><button class="btn-p" style="background:#0f172a;" onclick="recMovie()">🎲 Suggest Random Movie</button><div id="tr" class="tool-res"></div>`
-      : `<button class="btn-p" onclick="recMovie()">🎲 Suggest a Movie/Series</button><div id="tr" class="tool-res"></div>`
+      ? `<p style="font-size:13.5px;color:#475569;margin-bottom:12px;">মুভি রিকোয়েস্ট ও সাজেশন পেতে আমাদের অফিসিয়াল গ্রুপে জয়েন করুন!</p><div class="tool-res" style="margin-bottom:12px;text-align:center;">🔗 <b>${recGroupLink}</b></div><button class="btn-p" onclick="openTgLink('${recGroupLink}')">👥 Join Movie Group</button><br><br><button class="btn-p" style="background:#0f172a;" onclick="navigator.clipboard.writeText('${recGroupLink}');alert('✅ Group Link Copied!')">📋 Copy Group Link</button>`
+      : `<div class="tool-res" style="text-align:center;">⚠️ গ্রুপ লিংক এখনো সেট করা হয়নি!<br><small>অ্যাডমিন বটে <b>/setrecgroup https://t.me/...</b> দিয়ে গ্রুপ লিংক সেট করুন।</small></div>`
   };
   b.innerHTML=ui[id];
   if(id==='blood')showBlood();
@@ -3150,7 +3281,6 @@ function calcWord(){const t=ti1.value;tr.innerHTML=`Words: <b>${t.trim()?t.trim(
 function calcZakat(){const net=Math.max(0,(+ti1.value||0)-(+ti2.value||0));tr.innerHTML=`🕌 Net Wealth: <b>${net}</b><br>Zakat (2.5%): <b>${(net*0.025).toFixed(2)}</b>`;}
 function pickCol(){const h=ti1.value,r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);tr.innerHTML=`HEX: <b>${h}</b><br>RGB: <b>rgb(${r},${g},${b})</b>`;}
 async function shortUrl(){const res=await(await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:ti1.value})})).json();if(res.status==='success'){tr.innerHTML=`🔗 <a href="${res.short_url}" target="_blank">${res.short_url}</a><br><br><button class="btn-p" onclick="navigator.clipboard.writeText('${res.short_url}');alert('✅ Short Link Copied!')">📋 Copy Short Link</button>`;}else{tr.innerHTML=res.msg;}}
-function recMovie(){if(!allFiles.length)return;const f=allFiles[Math.floor(Math.random()*allFiles.length)];tr.innerHTML=`🎬 <b>${f.title}</b><br><br><button class="btn-p" onclick="document.getElementById('tool-modal').style.display='none';openDetails('${f._id}')">Watch Now</button>`;}
 
 async function loadEarn(){
   const r=await fetch('/api/earn_info/'+userId),d=await r.json();
@@ -3392,6 +3522,8 @@ async def main_bot():
     await app.start()
     BOT_USERNAME = app.me.username
     print(f"✅ Bot Started Successfully! (@{BOT_USERNAME})", flush=True)
+    if conf.get("tutorial_vid") and not str(conf["tutorial_vid"]).startswith("http"):
+        threading.Thread(target=ensure_tutorial_cached_sync, args=(conf["tutorial_vid"],), daemon=True).start()
     try:
         commands = [
             BotCommand("start", "বট স্টার্ট করুন"),
