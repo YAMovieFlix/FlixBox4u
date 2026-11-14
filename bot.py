@@ -2024,8 +2024,6 @@ async def legacy_auto_cb(c, q):
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
 
-Part 2 (Part 1-এর ঠিক নিচেই এখান থেকে পেস্ট করুন)
-
 # ==========================================
 # 10. FLASK WEB API & MONGODB POSTER HOSTING + LOGO + WELCOME AUDIO + TUTORIAL + SHORTENER
 # ==========================================
