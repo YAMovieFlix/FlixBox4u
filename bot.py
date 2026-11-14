@@ -72,16 +72,20 @@ sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)["NewBot"]
 POSTER_CACHE = {}
 EXTRA_URI_CACHE = {"uris": None, "ts": 0}
 HOME_DATA_CACHE = {"data": None, "ts": 0}
-WEB_POOL = ThreadPoolExecutor(max_workers=8)
+SHELL_DATA_CACHE = {"data": None, "ts": 0}
+WEB_POOL = ThreadPoolExecutor(max_workers=10)
 TUTORIAL_DL_LOCK = threading.Lock()
+HOME_CACHE_LOCK = threading.Lock()
 
 def invalidate_home_cache():
     HOME_DATA_CACHE["data"] = None
     HOME_DATA_CACHE["ts"] = 0
+    SHELL_DATA_CACHE["data"] = None
+    SHELL_DATA_CACHE["ts"] = 0
 
 def poster_cache_put(pid, raw_bytes, mime="image/jpeg"):
     if not pid or not raw_bytes: return
-    if len(POSTER_CACHE) >= 200:
+    if len(POSTER_CACHE) >= 250:
         try: POSTER_CACHE.pop(next(iter(POSTER_CACHE)))
         except: POSTER_CACHE.clear()
     POSTER_CACHE[pid] = (raw_bytes, mime)
@@ -94,6 +98,15 @@ def get_live_web_url(conf=None):
         if os.environ.get(k, "").strip(): return os.environ[k].strip().rstrip("/")
     if conf and conf.get("auto_web_url"): return conf["auto_web_url"].rstrip("/")
     return WEB_URL
+
+def get_relock_seconds(conf):
+    if not conf:
+        return 60
+    if "vid_relock_sec" in conf and conf["vid_relock_sec"] is not None:
+        return int(conf["vid_relock_sec"])
+    if conf.get("vid_relock_min", 0) > 0:
+        return int(conf["vid_relock_min"]) * 60
+    return 0
 
 @web.before_request
 def capture_live_host():
@@ -152,11 +165,11 @@ async def get_config():
         conf = {
             "_id": "settings", "ref_coin": 10, "ref_on": True, "auto_del_time": 0,
             "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে।", "frotect": False,
-            "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1,
+            "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1, "task_step": 1,
             "start_logo": None, "start_text": "", "payment_admin": DEFAULT_ADMIN_USERNAME,
             "autovid_msg_id": None, "autovid_chat_id": None, "autovid_time_min": 0,
             "autopost_time_hr": 0, "autopost_idx": 0, "site_name": "Moviee Link",
-            "premium_vid_coin": 50, "vid_relock_min": 1440, "spin_coin_min": 10, "spin_coin_max": 50,
+            "premium_vid_coin": 50, "vid_relock_sec": 60, "vid_relock_min": 0, "spin_coin_min": 10, "spin_coin_max": 50,
             "task_coin": 20, "spin_limit": 5, "task_limit": 5, "autopost_channel": None,
             "autopost_minute": 0, "autopost_channel_idx": 0, "tutorial_vid": None,
             "rec_group_link": "",
@@ -299,7 +312,11 @@ async def record_daily_unique_view(tdb, f_id, uid):
         new_dv = {today: today_list + [f_id]}
         await users_col.update_one({"_id": uid}, {"$set": {"daily_viewed": new_dv}}, upsert=True)
         await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
-        invalidate_home_cache()
+        if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+            for it in HOME_DATA_CACHE["data"]["files"]:
+                if it.get("_id") == f_id:
+                    it["views"] = (it.get("views", 0) or 0) + 1
+                    break
         return True
     except Exception as e:
         print("record_daily_unique_view error:", e, flush=True)
@@ -498,6 +515,7 @@ async def background_tasks():
                         if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(app, int(c_id), msg.id, ch["delete_min"] * 60))
                     except: pass
         except Exception as e: print("BG Task Error:", e)
+
 # ==========================================
 # 4. HELPER BUILDERS (100% DYNAMIC MONGODB)
 # ==========================================
@@ -627,13 +645,17 @@ async def cmd_list(c, m):
 
     part2 = """🛠 **সকল কমান্ড ও ব্যবহারের উদাহরণ (পর্ব ২/২):**
 
-💰 **Monetag, Adsterra, Redeem & Premium:**
+💰 **Monetag, Adsterra, Steps, Redeem & Premium:**
 • /addzoonid — Monetag Zone ID এড
   কপি: `/addzoonid 12242829`
 • /deletezoonid — Zone ID ডিলিট
 • /addlink — Adsterra / Direct Ad Link এড
   কপি: `/addlink https://example.com/ad`
 • /delink — Ad Link ডিলিট
+• /prstep — প্রিমিয়াম অ্যাড স্টেপ (কপি: `/prstep 2`)
+• /regstep — রেগুলার অ্যাড স্টেপ (কপি: `/regstep 2`)
+• /taskstep — টাস্ক ও স্পিন অ্যাড স্টেপ (কপি: `/taskstep 2`)
+• /prparadd — প্রিমিয়াম ডাইরেক্ট লিংক ওয়েট সেকেন্ড (কপি: `/prparadd 10`)
 • /addredeem — প্রিমিয়াম বা কয়েন রিডিম কোড তৈরি
   কপি: `/addredeem 1day 10 VIP10` অথবা `/addredeem 50 10 COIN50`
 • /allred — র‍্যান্ডম কয়েন কোড তৈরি
@@ -644,7 +666,7 @@ async def cmd_list(c, m):
 • /addrdiem — নির্দিষ্ট ইউজারকে প্রিমিয়াম দেওয়া
   কপি: `/addrdiem 12345678 30 d`
 
-⚙️ **Site, Earning & Channel Settings:**
+⚙️ **Site, Tasks, Relock (Seconds) & Channel Settings:**
 • /stats — বট স্ট্যাটিস্টিকস
 • /name — সাইটের নাম (কপি: `/name Moviee Link`)
 • /setnotice — লাইভ স্ক্রলিং নোটিশ (কপি: `/setnotice নতুন মুভি পেতে জয়েন করুন`)
@@ -652,11 +674,14 @@ async def cmd_list(c, m):
 • /logo — ছবিতে রিপ্লাই করে স্টার্ট ও মিনি অ্যাপ লোগো সেট
 • /addtex — স্টার্ট এক্সট্রা টেক্সট (কপি: `/addtex স্বাগতম!`) | /deltex
 • /setpremcoin — আনলক কয়েন সেট (কপি: `/setpremcoin 50`)
-• /relocktime — আনলক মেয়াদ মিনিট (কপি: `/relocktime 1440`) | /delrelocktime
+• /relocktime — আনলক মেয়াদ **সেকেন্ড** (কপি: `/relocktime 30`, `0`=প্রতি ক্লিকে অ্যাড) | /delrelocktime
 • /lockall — সবার আনলক ভিডিও রিসেট
 • /spincoin — স্পিন কয়েন (কপি: `/spincoin 10-50`) | কপি: `/spinlimit 5`
 • /taskcoin — টাস্ক কয়েন (কপি: `/taskcoin 20`) | কপি: `/tasklimit 5`
-• /addtask — কাস্টম টাস্ক (কপি: `/addtask Join Channel | https://t.me/ch | 50`) | /deltask
+• /addtask — কাস্টম টাস্ক (অটো Zone/Link) (কপি: `/addtask Join | https://t.me/ch | 50`)
+• /addzonetask — আলাদা Zone ID টাস্ক (কপি: `/addzonetask Monetag Task | 12242829 | 30`)
+• /addlinktask — আলাদা Direct Link টাস্ক (কপি: `/addlinktask Direct Task | https://example.com | 30`)
+• /deltask — কাস্টম টাস্ক ডিলিট
 • /refbonous — রেফার বোনাস (কপি: `/refbonous 20`) | /refbonousoff
 • /usd — USD প্যাকেজ (কপি: `/usd 100 5`) | /bdt (কপি: `/bdt 100 50`)
 • /addcred — কয়েন প্যাকেজ (কপি: `/addcred 500 = 7 d`) | /delcred
@@ -717,12 +742,13 @@ SIMPLE_CONF = {
     "name": ("site_name", "str", "/name Moviee Link"),
     "setnotice": ("marquee_text", "str", "/setnotice নতুন মুভি পেতে চ্যানেলে জয়েন করুন"),
     "setpremcoin": ("premium_vid_coin", "int", "/setpremcoin 50"),
-    "relocktime": ("vid_relock_min", "int", "/relocktime 1440"),
+    "relocktime": ("vid_relock_sec", "int", "/relocktime 30"),
     "taskcoin": ("task_coin", "int", "/taskcoin 20"),
     "spinlimit": ("spin_limit", "int", "/spinlimit 5"),
     "tasklimit": ("task_limit", "int", "/tasklimit 5"),
     "prstep": ("prstep", "int", "/prstep 2"),
-    "regstep": ("regstep", "int", "/regstep 1"),
+    "regstep": ("regstep", "int", "/regstep 2"),
+    "taskstep": ("task_step", "int", "/taskstep 2"),
     "addadmin": ("payment_admin", "admin", "/addadmin Sudo_king"),
     "addtex": ("start_text", "str", "/addtex স্বাগতম আমাদের বটে!"),
     "autvidti": ("autovid_time_min", "int", "/autvidti 30"),
@@ -735,7 +761,7 @@ SIMPLE_CONF = {
 @app.on_message(filters.command(list(SIMPLE_CONF.keys()) + ["delrelocktime", "deltex", "refbonous", "refbonousoff", "frotect"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_simple_config(c, m):
     await get_db(); parts = m.text.split(None, 1); cmd = parts[0].lstrip("/").lower().split("@")[0]; arg = parts[1].strip() if len(parts) > 1 else ""
-    if cmd == "delrelocktime": await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); invalidate_home_cache(); return await m.reply("✅ Relock Time Deleted!")
+    if cmd == "delrelocktime": await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_sec": -1, "vid_relock_min": 0}}); invalidate_home_cache(); return await m.reply("✅ Relock Time Disabled (একবার আনলক করলে আর লক হবে না)!")
     if cmd == "deltex": await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": ""}}); invalidate_home_cache(); return await m.reply("✅ Start Text Deleted!")
     if cmd == "refbonousoff": await config_col.update_one({"_id": "settings"}, {"$set": {"ref_on": False}}); invalidate_home_cache(); return await m.reply("✅ Refer Bonus OFF!")
     if cmd == "refbonous":
@@ -748,7 +774,12 @@ async def cmd_simple_config(c, m):
     if not arg: return await m.reply(f"❌ **সঠিক নিয়ম ও উদাহরণ:**\n`{ex}`")
     try:
         val = int(arg) if tp == "int" else (arg.replace("@", "") if tp == "admin" else arg)
-        await config_col.update_one({"_id": "settings"}, {"$set": {k: val}}); invalidate_home_cache(); await m.reply(f"✅ সেট হয়েছে: **{k}** = `{val}`")
+        if tp == "int" and cmd in ("prstep", "regstep", "taskstep") and val < 1: val = 1
+        await config_col.update_one({"_id": "settings"}, {"$set": {k: val}}); invalidate_home_cache()
+        if cmd == "relocktime":
+            extra = " (প্রতি বাটন ক্লিকে অ্যাড আসবে)" if val == 0 else f" ({val} সেকেন্ড পর আবার লক হবে)"
+            return await m.reply(f"✅ Relock Time সেট হয়েছে: `{val}` সেকেন্ড{extra}")
+        await m.reply(f"✅ সেট হয়েছে: **{k}** = `{val}`")
     except: await m.reply(f"❌ ভুল ইনপুট! উদাহরণ:\n`{ex}`")
 
 @app.on_message(filters.command("setrecgroup", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -801,7 +832,7 @@ async def cmd_settutorial(c, m):
                 os.replace(dl_path, cache_path)
             await status_msg.edit_text("✅ টিউটোরিয়াল ভিডিও সেট ও ক্যাশ হয়েছে! এখন মিনি অ্যাপে সাথে সাথে প্লে হবে।")
         except Exception as e:
-            await status_msg.edit_text(f"✅ টিউটোরিয়াল ভিডিও সেট হয়েছে! (স্ট্রিমিং ব্যাকআপ সক্রিয়)")
+            await status_msg.edit_text("✅ টিউটোরিয়াল ভিডিও সেট হয়েছে! (স্ট্রিমিং ব্যাকআপ সক্রিয়)")
     elif len(parts) > 1 and parts[1].strip().startswith("http"):
         await config_col.update_one({"_id": "settings"}, {"$set": {"tutorial_vid": parts[1].strip()}}, upsert=True)
         invalidate_home_cache()
@@ -1061,7 +1092,8 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
-    # ==========================================
+
+# ==========================================
 # 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
 async def show_mv_poster_prompt(mo, st, edit=True):
@@ -1876,7 +1908,7 @@ async def handle_edsr_qf(c, m):
     st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
 
 # ==========================================
-# 9. LEGACY COMMANDS (WITH EXAMPLES WHEN EMPTY)
+# 9. LEGACY COMMANDS & SEPARATE ZONE / DIRECT LINK TASKS
 # ==========================================
 @app.on_message(filters.command("addfile", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_addfile(c, m): admin_steps[m.from_user.id] = {"step": "name"}; await m.reply("১. ফাইলের নাম/টাইটেল দিন (যেমন: `Pushpa 2`):")
@@ -1920,13 +1952,16 @@ LEGACY_EXAMPLES = {
     "vidtitel": "`/vidtitel নতুন বাংলা নাটক`", "delfile": "`/delfile AbCd1234`",
     "mongo": "`/mongo mongodb+srv://user:pass@cluster.mongodb.net/`",
     "autochannel": "`/autochannel -100123456789 30 60`", "spincoin": "`/spincoin 10-50`",
-    "addtask": "`/addtask Join Channel | https://t.me/mychannel | 50`", "addlink": "`/addlink https://example.com`",
+    "addtask": "`/addtask Join Channel | https://t.me/mychannel | 50` বা Zone: `/addtask Watch Ad | 12242829 | 30 | 2`",
+    "addzonetask": "`/addzonetask Monetag Task | 12242829 | 30` (অপশনাল স্টেপ: `| 2`)",
+    "addlinktask": "`/addlinktask Direct Link Task | https://example.com/ad | 30` (অপশনাল স্টেপ: `| 2`)",
+    "addlink": "`/addlink https://example.com`",
     "addcnl": "`/addcnl Backup Channel https://t.me/mychannel`", "vercnl": "`/vercnl -100123456789 https://t.me/mychannel`",
     "usd": "`/usd 100 5` (100 Coins = 5 USD)", "bdt": "`/bdt 100 50` (100 Coins = 50 BDT)",
     "addcred": "`/addcred 500 = 7 d`", "addrdiem": "`/addrdiem 12345678 30 d`", "allred": "`/allred 100 10-50`"
 }
 
-@app.on_message(filters.command(["vidtitel", "deltitel", "delpromot", "delfile", "delall", "mongo", "delmongo", "mongostats", "lockall", "autochannel", "delautochannel", "spincoin", "addtask", "deltask", "addlink", "delink", "addcnl", "delcnl", "vercnl", "delvrcnl", "logo", "autvid", "usd", "bdt", "addcred", "delcred", "addrdiem", "brodcast", "cnlbdcst", "allred"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+@app.on_message(filters.command(["vidtitel", "deltitel", "delpromot", "delfile", "delall", "mongo", "delmongo", "mongostats", "lockall", "autochannel", "delautochannel", "spincoin", "addtask", "addzonetask", "addlinktask", "deltask", "addlink", "delink", "addcnl", "delcnl", "vercnl", "delvrcnl", "logo", "autvid", "usd", "bdt", "addcred", "delcred", "addrdiem", "brodcast", "cnlbdcst", "allred"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_legacy_router(c, m):
     try:
         await get_db(); parts = m.text.split(); cmd = parts[0].lstrip("/").lower().split("@")[0]; arg = m.text.replace(parts[0], "", 1).strip()
@@ -1969,10 +2004,26 @@ async def cmd_legacy_router(c, m):
         if cmd == "spincoin":
             if "-" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['spincoin']}")
             mn, mx = map(int, parts[1].split("-")); await config_col.update_one({"_id": "settings"}, {"$set": {"spin_coin_min": mn, "spin_coin_max": mx}}); return await m.reply("✅ Spin Coin Set!")
-        if cmd == "addtask":
-            if "|" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addtask']}")
-            t, l, co = [x.strip() for x in arg.split("|")]; await tasks_col.insert_one({"title": t, "link": l, "coin": int(co)}); return await m.reply("✅ Task Added!")
-        if cmd == "deltask": ts = await tasks_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {t['title']}", callback_data=f"deltask_{t['_id']}")] for t in ts])) if ts else await m.reply("❌ কোনো টাস্ক নেই!")
+        if cmd in ("addtask", "addzonetask", "addlinktask"):
+            if "|" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES[cmd]}")
+            segs = [x.strip() for x in arg.split("|")]
+            if len(segs) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES[cmd]}")
+            t, target, co = segs[0], segs[1], int(segs[2])
+            steps = max(1, int(segs[3])) if len(segs) >= 4 and segs[3].isdigit() else 0
+            if cmd == "addzonetask" or (cmd == "addtask" and target.isdigit()):
+                await tasks_col.insert_one({"title": t, "task_type": "zone", "zone_id": target, "link": "", "coin": co, "steps": steps})
+                return await m.reply(f"✅ **Monetag Zone Task Added!**\n🎯 {t}\n🆔 Zone ID: `{target}` | 🪙 `{co}`" + (f" | 🔢 Steps: `{steps}`" if steps else ""))
+            else:
+                await tasks_col.insert_one({"title": t, "task_type": "link", "zone_id": "", "link": target, "coin": co, "steps": steps})
+                return await m.reply(f"✅ **Direct Link Task Added!**\n🎯 {t}\n🔗 Link: `{target}` | 🪙 `{co}`" + (f" | 🔢 Steps: `{steps}`" if steps else ""))
+        if cmd == "deltask":
+            ts = await tasks_col.find().to_list(100)
+            if not ts: return await m.reply("❌ কোনো টাস্ক নেই!")
+            btns = []
+            for t in ts:
+                tag = f"Zone:{t['zone_id']}" if t.get("task_type") == "zone" or t.get("zone_id") else "Link"
+                btns.append([InlineKeyboardButton(f"❌ [{tag}] {t['title'][:22]} (+{t.get('coin',0)})", callback_data=f"deltask_{t['_id']}")])
+            return await m.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
         if cmd == "addlink":
             if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addlink']}")
             await links_col.insert_one({"link": parts[1]}); invalidate_home_cache(); return await m.reply("✅ Ad Link Added!")
@@ -1993,7 +2044,7 @@ async def cmd_legacy_router(c, m):
                 if enc:
                     await save_poster_to_mongo(db, "site_logo", enc, mime)
                 invalidate_home_cache()
-                return await m.reply("✅ লোগো সেট হয়েছে! (বট স্টার্ট ও মিনি অ্যাপ ওয়েলকামে দেখাবে)")
+                return await m.reply("✅ লোগো সেট হয়েছে! (বট স্টার্ট ও মিনি অ্যাপ স্প্ল্যাশ স্ক্রিনে দেখাবে)")
             if arg and arg.startswith("http"):
                 await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": arg}}, upsert=True)
                 poster_cache_del("site_logo")
@@ -2086,7 +2137,8 @@ async def legacy_auto_cb(c, q):
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
-    # ==========================================
+
+# ==========================================
 # 10. FLASK WEB API & MONGODB POSTER HOSTING + LOGO + WELCOME AUDIO + HTTP 206 TUTORIAL + SHORTENER
 # ==========================================
 @web.route('/poster/<poster_id>')
@@ -2152,11 +2204,9 @@ def serve_poster_from_mongo(poster_id):
 
     return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
 
-@web.route('/site_logo')
-def serve_site_logo():
+def warm_site_logo_sync():
     if "site_logo" in POSTER_CACHE:
-        raw, mime = POSTER_CACHE["site_logo"]
-        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=3600"})
+        return POSTER_CACHE["site_logo"]
     try:
         pdoc = sync_db["posters"].find_one({"_id": "site_logo"})
         if pdoc and pdoc.get("data"):
@@ -2164,23 +2214,34 @@ def serve_site_logo():
             final_mime = pdoc.get("mime", mime)
             if raw:
                 poster_cache_put("site_logo", raw, final_mime)
-                return Response(raw, mimetype=final_mime, headers={"Cache-Control": "public, max-age=3600"})
+                return raw, final_mime
     except: pass
     conf = sync_db["config"].find_one({"_id": "settings"}) or {}
     logo = conf.get("start_logo")
-    if logo:
-        if str(logo).startswith("http"):
-            return redirect(logo)
-        if BOT_TOKEN:
-            try:
-                raw = _bot_api_download_sync(logo)
-                if raw:
-                    poster_cache_put("site_logo", raw, "image/jpeg")
-                    try:
-                        sync_db["posters"].update_one({"_id": "site_logo"}, {"$set": {"data": base64.b64encode(raw).decode("utf-8"), "mime": "image/jpeg"}}, upsert=True)
-                    except: pass
-                    return Response(raw, mimetype="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
-            except: pass
+    if logo and not str(logo).startswith("http") and BOT_TOKEN:
+        try:
+            raw = _bot_api_download_sync(logo)
+            if raw:
+                poster_cache_put("site_logo", raw, "image/jpeg")
+                try:
+                    sync_db["posters"].update_one({"_id": "site_logo"}, {"$set": {"data": base64.b64encode(raw).decode("utf-8"), "mime": "image/jpeg"}}, upsert=True)
+                except: pass
+                return raw, "image/jpeg"
+        except: pass
+    return None, None
+
+@web.route('/site_logo')
+def serve_site_logo():
+    if "site_logo" in POSTER_CACHE:
+        raw, mime = POSTER_CACHE["site_logo"]
+        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=86400"})
+    raw, mime = warm_site_logo_sync()
+    if raw:
+        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=86400"})
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    logo = conf.get("start_logo")
+    if logo and str(logo).startswith("http"):
+        return redirect(logo)
     sn = (conf.get("site_name") or "FB").strip()
     initials = "".join([w[0].upper() for w in sn.split()[:2]]) or "FB"
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
@@ -2414,11 +2475,22 @@ def api_rates():
     except: pass
     return jsonify({"USD": 1, "BDT": 120.5, "EUR": 0.92, "GBP": 0.79, "SAR": 3.75, "AED": 3.67, "INR": 84.4, "MYR": 4.45})
 
+def extract_base_file_id(file_key):
+    s = str(file_key or "")
+    if s.startswith(("mfile_", "sfile_")):
+        parts = s.split("_")
+        if len(parts) >= 2:
+            return parts[1]
+    if s.startswith("file_"):
+        return s[5:]
+    return s
+
 @web.route('/api/get_ad/<int:user_id>/<file_id>')
 def get_ad_api(user_id, file_id):
     config = sync_db["config"].find_one({"_id": "settings"}) or {}; user = sync_db["users"].find_one({"_id": user_id}) or {}; fd = None
+    base_fid = extract_base_file_id(file_id)
     for d in get_extra_dbs_sync():
-        fd = d["files"].find_one({"_id": file_id}, {"is_premium": 1})
+        fd = d["files"].find_one({"_id": base_fid}, {"is_premium": 1})
         if fd: break
     if user.get("premium_until") and user["premium_until"] > datetime.now():
         return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
@@ -2428,10 +2500,12 @@ def get_ad_api(user_id, file_id):
                 return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
         except: pass
     zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
-    links = list(sync_db["ad_links"].find())
+    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
     coin_price = config.get("premium_vid_coin", 50)
     is_prem_file = bool(fd and fd.get("is_premium"))
     ads_on = config.get("ads_on", True)
+    steps = max(1, int(config.get("prstep", 1) if is_prem_file else config.get("regstep", 1)))
+    wait_t = int(config.get("prem_vid_wait", 10)) if is_prem_file else random.choice(config.get("direk_wait", [5]))
     if is_prem_file or (ads_on and (links or zones)):
         return jsonify({
             "show_ad": True,
@@ -2440,9 +2514,12 @@ def get_ad_api(user_id, file_id):
             "requires_coin": is_prem_file,
             "coin_price": coin_price,
             "user_balance": user.get("balance", 0),
-            "ad_link": random.choice(links)["link"] if links else None,
+            "steps": steps,
+            "ad_links": links,
+            "zone_ids": zones,
+            "ad_link": random.choice(links) if links else None,
             "zone_id": random.choice(zones) if zones else None,
-            "wait_time": random.choice(config.get("direk_wait", [5]))
+            "wait_time": wait_t
         })
     return jsonify({"show_ad": False, "is_unlocked": True})
 
@@ -2454,10 +2531,17 @@ def unlock_file():
         cost = conf.get("premium_vid_coin", 50)
         if u.get("balance", 0) < cost: return jsonify({"status": "error", "msg": "❌ পর্যাপ্ত কয়েন নেই!"})
         sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": -cost}})
-    rl = conf.get("vid_relock_min", 1440)
-    exp = (datetime.utcnow() + timedelta(minutes=rl if rl > 0 else 52560000)).isoformat() + "Z"
-    sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{fid}": exp}}, upsert=True)
-    return jsonify({"status": "success", "expiry": exp})
+    rl = get_relock_seconds(conf)
+    if rl < 0:
+        exp = (datetime.utcnow() + timedelta(seconds=52560000)).isoformat() + "Z"
+        sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{fid}": exp}}, upsert=True)
+    elif rl == 0:
+        exp = datetime.utcnow().isoformat() + "Z"
+        sync_db["users"].update_one({"_id": uid}, {"$unset": {f"unlocked_files.{fid}": ""}})
+    else:
+        exp = (datetime.utcnow() + timedelta(seconds=rl)).isoformat() + "Z"
+        sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{fid}": exp}}, upsert=True)
+    return jsonify({"status": "success", "expiry": exp, "relock_sec": rl})
 
 @web.route('/api/earn_info/<int:uid>')
 def get_earn_info(uid):
@@ -2466,13 +2550,38 @@ def get_earn_info(uid):
         sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": td, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}}, upsert=True)
         u["spin_count"], u["task_count"], u["custom_tasks_done"] = 0, 0, []
     cts = list(sync_db["custom_tasks"].find())
-    for t in cts: t["_id"] = str(t["_id"])
-    return jsonify({"spins_done": u.get("spin_count", 0), "spin_limit": conf.get("spin_limit", 5), "tasks_done": u.get("task_count", 0), "task_limit": conf.get("task_limit", 5), "custom_tasks": cts, "custom_tasks_done": u.get("custom_tasks_done", [])})
+    for t in cts:
+        t["_id"] = str(t["_id"])
+        if not t.get("task_type"):
+            t["task_type"] = "zone" if t.get("zone_id") else "link"
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+    return jsonify({
+        "spins_done": u.get("spin_count", 0),
+        "spin_limit": conf.get("spin_limit", 5),
+        "tasks_done": u.get("task_count", 0),
+        "task_limit": conf.get("task_limit", 5),
+        "task_step": max(1, int(conf.get("task_step", 1))),
+        "custom_tasks": cts,
+        "custom_tasks_done": u.get("custom_tasks_done", []),
+        "zone_ids": zones,
+        "ad_links": links,
+        "wait_time": random.choice(conf.get("direk_wait", [5]))
+    })
 
 @web.route('/api/get_earn_ad/<ad_type>')
 def get_earn_ad_dynamic(ad_type):
-    links = list(sync_db["ad_links"].find()); zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
-    return jsonify({"ad_link": random.choice(links)["link"] if links else None, "zone_id": random.choice(zones) if zones else None, "wait_time": 10})
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    return jsonify({
+        "ad_link": random.choice(links) if links else None,
+        "zone_id": random.choice(zones) if zones else None,
+        "ad_links": links,
+        "zone_ids": zones,
+        "task_step": max(1, int(conf.get("task_step", 1))),
+        "wait_time": 10
+    })
 
 @web.route('/api/claim_earn', methods=['POST'])
 def claim_earn():
@@ -2537,18 +2646,36 @@ def handle_actions():
         sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"favorites": fid}}, upsert=True); return jsonify({"status": "success", "saved": True})
     elif act == "like":
         for dbx in get_extra_dbs_sync():
-            if dbx["files"].update_one({"_id": fid}, {"$addToSet": {"likes": uid}}).modified_count > 0: invalidate_home_cache(); break
+            if dbx["files"].update_one({"_id": fid}, {"$addToSet": {"likes": uid}}).modified_count > 0:
+                if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+                    for it in HOME_DATA_CACHE["data"]["files"]:
+                        if it.get("_id") == fid:
+                            if uid not in it.setdefault("likes", []): it["likes"].append(uid)
+                            break
+                break
     elif act == "rate":
         st = max(1, min(5, int(d.get("stars", 5))))
         for dbx in get_extra_dbs_sync():
             doc = dbx["files"].find_one({"_id": fid})
             if doc:
                 rs = [r for r in doc.get("ratings", []) if r.get("uid") != uid] + [{"uid": uid, "stars": st}]
-                dbx["files"].update_one({"_id": fid}, {"$set": {"ratings": rs}}); invalidate_home_cache(); return jsonify({"status": "success"})
+                dbx["files"].update_one({"_id": fid}, {"$set": {"ratings": rs}})
+                if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+                    for it in HOME_DATA_CACHE["data"]["files"]:
+                        if it.get("_id") == fid:
+                            it["ratings"] = rs
+                            break
+                return jsonify({"status": "success"})
     elif act == "comment":
         cmt = {"uid": uid, "text": d.get("text"), "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
         for dbx in get_extra_dbs_sync():
-            if dbx["files"].update_one({"_id": fid}, {"$push": {"comments": cmt}}).modified_count > 0: invalidate_home_cache(); break
+            if dbx["files"].update_one({"_id": fid}, {"$push": {"comments": cmt}}).modified_count > 0:
+                if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+                    for it in HOME_DATA_CACHE["data"]["files"]:
+                        if it.get("_id") == fid:
+                            it.setdefault("comments", []).append(cmt)
+                            break
+                break
         return jsonify({"status": "success", "comment": cmt})
     return jsonify({"status": "success"})
 
@@ -2560,7 +2687,18 @@ def build_user_state_dict(user_id):
 @web.route('/api/user/<int:user_id>')
 def get_user(user_id):
     return jsonify(build_user_state_dict(user_id))
-    # ==========================================
+
+@web.route('/api/home_data')
+def api_home_data():
+    p = _fetch_home_payload()
+    uid_arg = request.args.get("uid", "")
+    u_state = None
+    if uid_arg.isdigit():
+        try: u_state = build_user_state_dict(int(uid_arg))
+        except: pass
+    return jsonify({"files": p["files"], "user": u_state})
+
+# ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -2568,13 +2706,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>{{ site_name }}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-{% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" defer></script>{% endfor %}
+<script>try{if(window.Telegram&&Telegram.WebApp){Telegram.WebApp.ready();Telegram.WebApp.expand();}}catch(e){}</script>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',system-ui,-apple-system,sans-serif;margin:0;padding-bottom:94px;min-height:100vh}
+html,body{background:#0b0d17;margin:0;min-height:100vh}
+body{color:#111;font-family:'Hind Siliguri',system-ui,-apple-system,sans-serif;padding-bottom:94px}
+body.ready{background:#f4f5f7}
+#app-splash{position:fixed;inset:0;z-index:999999;background:radial-gradient(circle at top,#1f1638,#0b0d17 70%);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;transition:opacity .28s ease}
+#app-splash.hide{opacity:0;pointer-events:none}
+.spl-ring{width:96px;height:96px;border-radius:26px;padding:3px;background:linear-gradient(135deg,#ff4d4d,#7c3aed,#06b6d4);box-shadow:0 12px 35px rgba(124,58,237,.45);animation:floatLogo 1.8s ease-in-out infinite;margin-bottom:14px}
+.spl-ring img{width:100%;height:100%;border-radius:23px;object-fit:cover;display:block;background:#141624}
+.spl-title{font-size:21px;font-weight:700;letter-spacing:.3px;margin-bottom:12px}
+.spl-bar{width:170px;height:4px;background:rgba(255,255,255,.14);border-radius:10px;overflow:hidden}
+.spl-bar-fill{width:45%;height:100%;background:linear-gradient(90deg,#ff4d4d,#7c3aed,#06b6d4);border-radius:10px;animation:splMove 1.1s ease-in-out infinite}
+@keyframes splMove{0%{transform:translateX(-110%)}100%{transform:translateX(260%)}}
 @keyframes btnShine{0%{left:-120%}100%{left:150%}}
 @keyframes gradFlow{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
 @keyframes fadeInSlide{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
@@ -2684,10 +2830,18 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 .wel-voice-btn{background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;border-radius:16px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:10px;display:inline-flex;align-items:center;gap:5px}
 .wel-item{text-align:left;font-size:13.5px;line-height:1.55;margin-bottom:8px;color:#334155}
 .unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+.step-badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-size:12px;font-weight:700;padding:4px 12px;border-radius:16px;margin-bottom:8px}
 .clr-hist-btn{background:#fee2e2;color:#dc2626;border:none;padding:5px 12px;border-radius:12px;font-size:11.5px;font-weight:700;cursor:pointer}
 </style>
 </head>
 <body>
+
+<div id="app-splash">
+  <div class="spl-ring"><img src="/site_logo?v={{ logo_ver }}" alt="{{ site_name }}" loading="eager" decoding="sync"></div>
+  <div class="spl-title">{{ site_name }}</div>
+  <div class="spl-bar"><div class="spl-bar-fill"></div></div>
+  <div style="font-size:12px;color:#94a3b8;margin-top:8px;">Loading movies &amp; series...</div>
+</div>
 
 <audio id="welcome-audio" preload="auto" playsinline style="display:none;"></audio>
 
@@ -2720,9 +2874,19 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 <div id="unlock-modal" class="modal-ov"><div class="modal-card">
   <button onclick="document.getElementById('unlock-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
   <div style="font-size:38px;margin-bottom:4px;">🔓</div>
+  <div class="step-badge" id="unlock-step-badge">Step 1 / 1</div>
   <h3 style="margin:0 0 6px 0;color:#0f172a;">ফাইল আনলক করুন</h3>
   <p style="font-size:13px;color:#64748b;margin:0 0 14px 0;">আপনার যেটি সহজ মনে হয়, সেটি দিয়ে আনলক করে ডাউনলোড করুন:</p>
   <div id="unlock-options-area"></div>
+</div></div>
+
+<div id="task-ad-modal" class="modal-ov"><div class="modal-card">
+  <button onclick="document.getElementById('task-ad-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
+  <div style="font-size:38px;margin-bottom:4px;">⚡</div>
+  <div class="step-badge" id="task-step-badge">Step 1 / 1</div>
+  <h3 id="task-modal-title" style="margin:0 0 6px 0;color:#0f172a;">টাস্ক ভেরিফিকেশন</h3>
+  <p id="task-modal-desc" style="font-size:13px;color:#64748b;margin:0 0 14px 0;">আপনার পছন্দমতো যেকোনো একটি মাধ্যমে ভেরিফাই করুন:</p>
+  <div id="task-options-area"></div>
 </div></div>
 
 <div id="ad-modal" class="modal-ov"><div class="modal-card"><h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3><p style="font-size:13px;color:#64748b;">সম্পূর্ণ অ্যাড দেখুন</p><h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1><button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button></div></div>
@@ -2805,15 +2969,38 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 </div>
 
 <script>
-const tg=window.Telegram.WebApp; tg.expand();
+const tg=window.Telegram?.WebApp;
 const botUsername="{{ bot_username }}", siteName="{{ site_name }}", recGroupLink={{ rec_group_link_json | safe }};
 const hasTutorial={{ has_tutorial_json | safe }}, tutorialVer={{ tutorial_ver_json | safe }}, siteNameHash={{ site_name_hash_json | safe }};
-const allFiles={{ files_json | safe }}, categories={{ categories_json | safe }}, dbLanguages={{ languages_json | safe }};
+let allFiles={{ files_json | safe }};
+const categories={{ categories_json | safe }}, dbLanguages={{ languages_json | safe }};
 const promotions={{ promotions_json | safe }}, upcomingList={{ upcoming_json | safe }}, zoneIds={{ zone_ids_json | safe }};
 const adConfig={{ ad_config_json | safe }};
 const initialUserState={{ initial_user_json | safe }};
 
 (function(){const p=siteName.trim().split(/\s+/),e=document.getElementById('brand-title');e.innerHTML=p.length>1?`${p[0]} <span class="brand-badge">${p.slice(1).join(' ')}</span>`:`${siteName} <span class="brand-badge">Bot</span>`;})();
+
+function ensureZoneSdk(zid){
+  return new Promise((resolve)=>{
+    if(!zid)return resolve(false);
+    if(typeof window['show_'+zid]==='function')return resolve(true);
+    let s=document.querySelector(`script[data-zone="${zid}"]`);
+    if(!s){
+      s=document.createElement('script');
+      s.src='https://libtl.com/sdk.js';
+      s.setAttribute('data-zone',zid);
+      s.setAttribute('data-sdk','show_'+zid);
+      s.async=true;
+      document.head.appendChild(s);
+    }
+    let tries=0;
+    const iv=setInterval(()=>{
+      tries++;
+      if(typeof window['show_'+zid]==='function'){clearInterval(iv);resolve(true);}
+      else if(tries>=25){clearInterval(iv);resolve(false);}
+    },200);
+  });
+}
 
 document.addEventListener('click',function(e){
   const btn=e.target.closest('button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.unlock-opt');
@@ -2858,10 +3045,12 @@ function playWelcomeVoice(forceReplay){
 function ensureWelcomeVoice(){
   if(!welcomeVoicePlayed)playWelcomeVoice(false);
 }
-if(!sessionStorage.getItem('wel_seen')){
-  document.getElementById('welcome-modal').style.display='flex';
-  setTimeout(()=>playWelcomeVoice(false),250);
-  document.addEventListener('pointerdown',()=>ensureWelcomeVoice(),{once:true});
+function maybeShowWelcome(){
+  if(!sessionStorage.getItem('wel_seen')){
+    document.getElementById('welcome-modal').style.display='flex';
+    setTimeout(()=>playWelcomeVoice(false),250);
+    document.addEventListener('pointerdown',()=>ensureWelcomeVoice(),{once:true});
+  }
 }
 function closeWelcome(){
   ensureWelcomeVoice();
@@ -2892,7 +3081,47 @@ function applyUserStateUI(){
 }
 async function loadUser(){try{const r=await fetch('/api/user/'+userId);userState=await r.json();applyUserStateUI();}catch(e){}}
 applyUserStateUI();
-loadUser();
+
+function hideSplash(){
+  const sp=document.getElementById('app-splash');
+  if(!sp||sp.classList.contains('hide'))return;
+  document.body.classList.add('ready');
+  sp.classList.add('hide');
+  setTimeout(()=>{sp.style.display='none';maybeShowWelcome();},280);
+}
+
+async function hydrateAppFast(){
+  const safety=setTimeout(hideSplash,4500);
+  try{
+    if(allFiles.length>0){
+      renderTopSlider();
+      renderFeed();
+      setTimeout(hideSplash,350);
+    }
+    const r=await fetch('/api/home_data?uid='+userId);
+    const d=await r.json();
+    if(Array.isArray(d.files)){
+      allFiles=d.files;
+      renderTopSlider();
+      renderFeed();
+    }
+    if(d.user){
+      userState=d.user;
+      applyUserStateUI();
+    }
+  }catch(e){}
+  clearTimeout(safety);
+  hideSplash();
+  setTimeout(()=>{
+    try{
+      const l=document.createElement('link');
+      l.rel='stylesheet';
+      l.href='https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap';
+      document.head.appendChild(l);
+      (zoneIds||[]).forEach(z=>ensureZoneSdk(z));
+    }catch(e){}
+  },700);
+}
 
 function toggleSearch(){const d=document.getElementById('search-drawer');d.classList.toggle('open');if(d.classList.contains('open'))document.getElementById('search-inp').focus();}
 
@@ -2930,7 +3159,6 @@ function renderTopSlider(){
   document.getElementById('home-pinned-head').innerText=activeType==='movie'?'🔥 Top Movies':(activeType==='series'?'🔥 Top Series':'🔥 Top Movies & Series');
   document.getElementById('pinned-list').innerHTML=tops.map((f,idx)=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="${idx<3?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">🔥 Top #${idx+1}</div><div class="pin-views">⬇️ ${f.views||0}</div></div><div class="pin-t">${f.title}</div></div>`).join('');
 }
-renderTopSlider();
 
 function timeAgo(iso){if(!iso)return 'Recently';const s=Math.floor((new Date()-new Date(iso))/1000);if(s<3600)return Math.max(1,Math.floor(s/60))+' min ago';if(s<86400)return Math.floor(s/3600)+' hr ago';return new Date(iso).toLocaleDateString();}
 
@@ -2962,7 +3190,6 @@ window.addEventListener('scroll',()=>{
     loadMoreFeed();
   }
 },{passive:true});
-renderFeed();
 
 function renderFavs(){
   const favIds=[...(userState.favorites||[])];
@@ -3074,48 +3301,85 @@ function renderSelectors(){
 }
 function scrollToDownload(){document.getElementById('det-selector-area')?.scrollIntoView({behavior:'smooth'});}
 
-function isFileLocallyUnlocked(fid){
+function isFileLocallyUnlocked(btnKey){
   if(userState.is_premium)return true;
-  const exp=(userState.unlocked_files||{})[fid];
+  if(adConfig.relock_sec===0)return false;
+  const exp=(userState.unlocked_files||{})[btnKey];
   if(!exp)return false;
   try{return new Date(exp)>new Date();}catch(e){return false;}
 }
 
 let pendingUnlockData=null;
+function renderUnlockStepModal(){
+  if(!pendingUnlockData)return;
+  const {currentStep,totalSteps,waitT,adLinks,zList,coinPrice}=pendingUnlockData;
+  document.getElementById('unlock-step-badge').innerText=`Step ${currentStep} / ${totalSteps}`;
+  const randZone=zList.length?zList[Math.floor(Math.random()*zList.length)]:null;
+  const randLink=adLinks.length?adLinks[Math.floor(Math.random()*adLinks.length)]:null;
+  pendingUnlockData.curZone=randZone;
+  pendingUnlockData.curLink=randLink;
+
+  let h=`<button class="unlock-opt" style="background:linear-gradient(90deg,#f59e0b,#d97706);" onclick="unlockWithCoin()"><span>🪙 কয়েন দিয়ে সরাসরি আনলক (${coinPrice} Coins)</span><span>আপনার: ${userState.balance||0}</span></button>`;
+  if(randZone){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="unlockWithMonetag('${randZone}')"><span>📺 Monetag Ad (Step ${currentStep}/${totalSteps})</span><span>Verify ⚡</span></button>`;
+  }
+  if(randLink){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="unlockWithAdsterra()"><span>🔗 Direct Link Ad (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
+  }
+  if(!randZone&&!randLink){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#10b981,#059669);" onclick="completeUnlockStep('direct')"><span>⚡ Verify &amp; Continue (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
+  }
+  document.getElementById('unlock-options-area').innerHTML=h;
+  document.getElementById('unlock-modal').style.display='flex';
+}
+
 function triggerDownload(sp){
   const dl=`https://t.me/${botUsername}?start=${sp}`;
-  if(isFileLocallyUnlocked(curFile._id)){openTgLink(dl);return;}
+  if(isFileLocallyUnlocked(sp)){openTgLink(dl);return;}
   const adLinks=adConfig.ad_links||[];
   const zList=adConfig.zone_ids||zoneIds||[];
   const needsAd=curFile.is_premium||(adConfig.ads_on&&(adLinks.length>0||zList.length>0));
   if(!needsAd){openTgLink(dl);return;}
 
   const waitList=adConfig.wait_times||[5];
-  const waitT=waitList[Math.floor(Math.random()*waitList.length)]||5;
-  const randLink=adLinks.length?adLinks[Math.floor(Math.random()*adLinks.length)]:null;
-  const randZone=zList.length?zList[Math.floor(Math.random()*zList.length)]:null;
+  const waitT=curFile.is_premium?(adConfig.prem_wait_time||10):(waitList[Math.floor(Math.random()*waitList.length)]||5);
+  const totalSteps=Math.max(1,curFile.is_premium?(adConfig.prstep||1):(adConfig.regstep||1));
   const coinPrice=adConfig.coin_price||50;
 
-  pendingUnlockData={dl,ad:{ad_link:randLink,zone_id:randZone,wait_time:waitT,coin_price:coinPrice},fileId:curFile._id};
-  let h=`<button class="unlock-opt" style="background:linear-gradient(90deg,#f59e0b,#d97706);" onclick="unlockWithCoin()"><span>🪙 কয়েন দিয়ে আনলক (${coinPrice} Coins)</span><span>আপনার: ${userState.balance||0}</span></button>`;
-  if(randZone){
-    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="unlockWithMonetag('${randZone}')"><span>📺 Monetag Zone Ad দিয়ে আনলক</span><span>Easy ⚡</span></button>`;
+  pendingUnlockData={sp,dl,totalSteps,currentStep:1,waitT,adLinks,zList,coinPrice,fileId:sp};
+  renderUnlockStepModal();
+}
+
+async function completeUnlockStep(method){
+  if(!pendingUnlockData)return;
+  if(pendingUnlockData.currentStep<pendingUnlockData.totalSteps){
+    pendingUnlockData.currentStep++;
+    renderUnlockStepModal();
+    return;
   }
-  if(randLink){
-    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="unlockWithAdsterra()"><span>🔗 Adsterra / Link Ad দিয়ে আনলক</span><span>${waitT}s ⏳</span></button>`;
+  const {dl,sp}=pendingUnlockData;
+  pendingUnlockData=null;
+  document.getElementById('unlock-modal').style.display='none';
+  const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:sp,method})});
+  const d=await r.json();
+  if(d.expiry&&adConfig.relock_sec!==0){
+    if(!userState.unlocked_files)userState.unlocked_files={};
+    userState.unlocked_files[sp]=d.expiry;
   }
-  document.getElementById('unlock-options-area').innerHTML=h;
-  document.getElementById('unlock-modal').style.display='flex';
+  openTgLink(dl);
 }
 
 async function unlockWithCoin(){
   if(!pendingUnlockData)return;
-  const {dl,fileId}=pendingUnlockData;
-  const r2=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'coin'})});
+  const {dl,sp}=pendingUnlockData;
+  const r2=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:sp,method:'coin'})});
   const d2=await r2.json();
   if(d2.status==='success'){
-    if(!userState.unlocked_files)userState.unlocked_files={};
-    userState.unlocked_files[fileId]=d2.expiry;
+    if(d2.expiry&&adConfig.relock_sec!==0){
+      if(!userState.unlocked_files)userState.unlocked_files={};
+      userState.unlocked_files[sp]=d2.expiry;
+    }
+    pendingUnlockData=null;
     document.getElementById('unlock-modal').style.display='none';
     loadUser();
     openTgLink(dl);
@@ -3124,37 +3388,31 @@ async function unlockWithCoin(){
 
 async function unlockWithMonetag(zid){
   if(!pendingUnlockData)return;
-  const {dl,fileId}=pendingUnlockData;
   document.getElementById('unlock-modal').style.display='none';
-  if(zid&&typeof window['show_'+zid]==='function'){
+  const ok=await ensureZoneSdk(zid);
+  if(ok&&typeof window['show_'+zid]==='function'){
     try{
       await window['show_'+zid]();
-      const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'monetag'})});
-      const d=await r.json();
-      if(d.expiry){if(!userState.unlocked_files)userState.unlocked_files={};userState.unlocked_files[fileId]=d.expiry;}
-      openTgLink(dl);
+      await completeUnlockStep('monetag');
       return;
     }catch(e){}
   }
-  alert('⚠️ Monetag অ্যাড লোড হয়নি, অন্য মাধ্যম বা কয়েক সেকেন্ড পর আবার চেষ্টা করুন।');
+  alert('⚠️ Monetag অ্যাড লোড হয়নি, অন্য মাধ্যম (Direct Link) দিয়ে চেষ্টা করুন অথবা কয়েক সেকেন্ড পর আবার ক্লিক করুন।');
+  if(pendingUnlockData)renderUnlockStepModal();
 }
 
 function unlockWithAdsterra(){
   if(!pendingUnlockData)return;
-  const {dl,ad,fileId}=pendingUnlockData;
+  const link=pendingUnlockData.curLink;
+  const wt=pendingUnlockData.waitT||5;
   document.getElementById('unlock-modal').style.display='none';
-  runAdTimer(ad.ad_link,ad.wait_time||5,async()=>{
-    const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'adsterra'})});
-    const d=await r.json();
-    if(d.expiry){if(!userState.unlocked_files)userState.unlocked_files={};userState.unlocked_files[fileId]=d.expiry;}
-    openTgLink(dl);
-  });
+  runAdTimer(link,wt,async()=>{await completeUnlockStep('adsterra');});
 }
 
 function runAdTimer(link,sec,onDone){
   const ov=document.getElementById('ad-modal'),tm=document.getElementById('ad-timer'),btn=document.getElementById('ad-action-btn');
   ov.style.display='flex';btn.style.display='none';tm.innerText=sec;
-  try{if(tg?.openLink)tg.openLink(link);else window.open(link,'_blank');}catch(e){}
+  if(link){try{if(tg?.openLink)tg.openLink(link);else window.open(link,'_blank');}catch(e){}}
   let t=sec,iv=setInterval(()=>{t--;tm.innerText=Math.max(0,t);if(t<=0){clearInterval(iv);btn.style.display='block';btn.onclick=()=>{ov.style.display='none';onDone();};}},1000);
 }
 
@@ -3282,43 +3540,146 @@ function calcZakat(){const net=Math.max(0,(+ti1.value||0)-(+ti2.value||0));tr.in
 function pickCol(){const h=ti1.value,r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);tr.innerHTML=`HEX: <b>${h}</b><br>RGB: <b>rgb(${r},${g},${b})</b>`;}
 async function shortUrl(){const res=await(await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:ti1.value})})).json();if(res.status==='success'){tr.innerHTML=`🔗 <a href="${res.short_url}" target="_blank">${res.short_url}</a><br><br><button class="btn-p" onclick="navigator.clipboard.writeText('${res.short_url}');alert('✅ Short Link Copied!')">📋 Copy Short Link</button>`;}else{tr.innerHTML=res.msg;}}
 
+let earnState=null, pendingTaskData=null;
 async function loadEarn(){
   const r=await fetch('/api/earn_info/'+userId),d=await r.json();
-  let h=`<div class="card-box"><b>🎡 Daily Spin (${d.spins_done}/${d.spin_limit})</b><br><br><button class="btn-p" onclick="doEarn('spin')" ${d.spins_done>=d.spin_limit?'disabled':''}>Spin & Earn</button></div>`;
-  h+=`<div class="card-box"><b>📱 Daily Task (${d.tasks_done}/${d.task_limit})</b><br><br><button class="btn-p" onclick="doEarn('task')" ${d.tasks_done>=d.task_limit?'disabled':''}>Complete Task</button></div>`;
-  (d.custom_tasks||[]).forEach(t=>{const dn=(d.custom_tasks_done||[]).includes(t._id);h+=`<div class="card-box"><b>💎 ${t.title} (+${t.coin}C)</b><br><br><button class="btn-p" onclick="doCustomEarn('${t._id}','${t.link}')" ${dn?'disabled':''}>${dn?'Completed':'Complete'}</button></div>`;});
+  earnState=d;
+  let h=`<div class="card-box"><b>🎡 Daily Spin (${d.spins_done}/${d.spin_limit})</b> <small style="color:#64748b;">(${d.task_step||1} Step)</small><br><br><button class="btn-p" onclick="doEarn('spin')" ${d.spins_done>=d.spin_limit?'disabled':''}>Spin &amp; Earn</button></div>`;
+  h+=`<div class="card-box"><b>📱 Daily Task (${d.tasks_done}/${d.task_limit})</b> <small style="color:#64748b;">(${d.task_step||1} Step)</small><br><br><button class="btn-p" onclick="doEarn('task')" ${d.tasks_done>=d.task_limit?'disabled':''}>Complete Task</button></div>`;
+  (d.custom_tasks||[]).forEach((t,idx)=>{
+    const dn=(d.custom_tasks_done||[]).includes(t._id);
+    const isZ=(t.task_type==='zone'||!!t.zone_id);
+    const badge=isZ?`📺 Monetag Zone (${t.zone_id})`:`🔗 Direct Link`;
+    const stp=t.steps>0?t.steps:(d.task_step||1);
+    h+=`<div class="card-box"><b>💎 ${t.title} (+${t.coin}C)</b><div style="font-size:11.5px;color:#64748b;margin:4px 0 10px 0;">${badge} • ${stp} Step</div><button class="btn-p" onclick="doCustomEarnIdx(${idx})" ${dn?'disabled':''}>${dn?'Completed':'Complete'}</button></div>`;
+  });
   document.getElementById('earn-area').innerHTML=h;
 }
+
+function renderTaskStepModal(){
+  if(!pendingTaskData)return;
+  const {title,currentStep,totalSteps,mode,zoneList,linkList,fixedZone,fixedLink,waitT}=pendingTaskData;
+  document.getElementById('task-step-badge').innerText=`Step ${currentStep} / ${totalSteps}`;
+  document.getElementById('task-modal-title').innerText=title||'টাস্ক ভেরিফিকেশন';
+
+  let h='';
+  if(mode==='zone'){
+    document.getElementById('task-modal-desc').innerText=`Monetag Zone (${fixedZone}) অ্যাড দেখে স্টেপ সম্পন্ন করুন:`;
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="runTaskMonetag('${fixedZone}')"><span>📺 Monetag Ad (Step ${currentStep}/${totalSteps})</span><span>Zone ${fixedZone} ⚡</span></button>`;
+  } else if(mode==='link'){
+    document.getElementById('task-modal-desc').innerText=`ডিরেক্ট লিংক ভিজিট করে স্টেপ সম্পন্ন করুন:`;
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="runTaskLink('${encodeURIComponent(fixedLink)}')"><span>🔗 Direct Link Ad (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
+  } else {
+    document.getElementById('task-modal-desc').innerText='আপনার পছন্দমতো যেকোনো একটি মাধ্যমে ভেরিফাই করুন:';
+    const rz=zoneList.length?zoneList[Math.floor(Math.random()*zoneList.length)]:null;
+    const rl=linkList.length?linkList[Math.floor(Math.random()*linkList.length)]:null;
+    if(rz){
+      h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="runTaskMonetag('${rz}')"><span>📺 Monetag Ad দিয়ে Complete করুন</span><span>Step ${currentStep}/${totalSteps} ⚡</span></button>`;
+    }
+    if(rl){
+      h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="runTaskLink('${encodeURIComponent(rl)}')"><span>🔗 Direct Link দিয়ে Complete করুন</span><span>${waitT}s ⏳</span></button>`;
+    }
+  }
+  document.getElementById('task-options-area').innerHTML=h;
+  document.getElementById('task-ad-modal').style.display='flex';
+}
+
+async function completeTaskStep(){
+  if(!pendingTaskData)return;
+  if(pendingTaskData.currentStep<pendingTaskData.totalSteps){
+    pendingTaskData.currentStep++;
+    renderTaskStepModal();
+    return;
+  }
+  const tp=pendingTaskData.claimType;
+  pendingTaskData=null;
+  document.getElementById('task-ad-modal').style.display='none';
+  await claimEarn(tp);
+}
+
+async function runTaskMonetag(zid){
+  document.getElementById('task-ad-modal').style.display='none';
+  const ok=await ensureZoneSdk(zid);
+  if(ok&&typeof window['show_'+zid]==='function'){
+    try{
+      await window['show_'+zid]();
+      await completeTaskStep();
+      return;
+    }catch(e){}
+  }
+  alert('⚠️ Monetag অ্যাড লোড হয়নি, অনুগ্রহ করে Direct Link ব্যবহার করুন বা কয়েক সেকেন্ড পর আবার চেষ্টা করুন।');
+  if(pendingTaskData)renderTaskStepModal();
+}
+
+function runTaskLink(encLink){
+  const link=decodeURIComponent(encLink||'');
+  const wt=(pendingTaskData&&pendingTaskData.waitT)||10;
+  document.getElementById('task-ad-modal').style.display='none';
+  runAdTimer(link,wt,async()=>{await completeTaskStep();});
+}
+
 async function doEarn(tp){
   const ad=await(await fetch('/api/get_earn_ad/'+tp)).json();
-  if(ad.zone_id&&typeof window['show_'+ad.zone_id]==='function'){try{await window['show_'+ad.zone_id]();return claimEarn(tp);}catch(e){}}
-  if(ad.ad_link)runAdTimer(ad.ad_link,ad.wait_time||10,()=>claimEarn(tp)); else claimEarn(tp);
+  const zList=ad.zone_ids||zoneIds||[];
+  const lList=ad.ad_links||[];
+  const steps=Math.max(1,ad.task_step||(earnState&&earnState.task_step)||1);
+  if(!zList.length&&!lList.length){
+    return claimEarn(tp);
+  }
+  pendingTaskData={
+    claimType:tp,
+    title:tp==='spin'?'🎡 Daily Spin Verification':'📱 Daily Task Verification',
+    mode:'popup',
+    totalSteps:steps,
+    currentStep:1,
+    zoneList:zList,
+    linkList:lList,
+    waitT:ad.wait_time||10
+  };
+  renderTaskStepModal();
 }
+
+function doCustomEarnIdx(idx){
+  if(!earnState||!earnState.custom_tasks)return;
+  const t=earnState.custom_tasks[idx];
+  if(!t)return;
+  const steps=t.steps>0?t.steps:(earnState.task_step||1);
+  const isZ=(t.task_type==='zone'||!!t.zone_id);
+  pendingTaskData={
+    claimType:'custom_'+t._id,
+    title:'💎 '+t.title,
+    mode:isZ?'zone':'link',
+    totalSteps:Math.max(1,steps),
+    currentStep:1,
+    fixedZone:t.zone_id||'',
+    fixedLink:t.link||'',
+    zoneList:[],
+    linkList:[],
+    waitT:10
+  };
+  renderTaskStepModal();
+}
+
 function doCustomEarn(id,lk){runAdTimer(lk,10,()=>claimEarn('custom_'+id));}
 async function claimEarn(tp){const d=await(await fetch('/api/claim_earn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,type:tp})})).json();alert(d.msg);loadUser();loadEarn();}
 async function redeemCoupon(){const c=document.getElementById('coupon-inp').value.trim();if(!c)return;const d=await(await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,code:c})})).json();alert(d.msg);if(d.status==='success'){document.getElementById('coupon-inp').value='';loadUser();}}
 async function sendMovieRequest(){const n=document.getElementById('req-inp').value.trim();if(!n)return;const d=await(await fetch('/api/request_movie',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,movie_name:n})})).json();alert(d.msg);document.getElementById('req-inp').value='';}
 async function buyWithCoin(pid,cost){if(!confirm(`${cost} কয়েন দিয়ে কিনবেন?`))return;const d=await(await fetch('/api/buy_with_coin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,pkg_id:pid})})).json();alert(d.msg);loadUser();}
 function copyRef(){const i=document.getElementById('ref-inp');i.select();navigator.clipboard.writeText(i.value);alert('✅ Link Copied!');}
+
+hydrateAppFast();
 </script>
 </body>
 </html>"""
 
-def _fetch_home_payload():
+def _fetch_shell_payload():
     now = time.time()
-    if HOME_DATA_CACHE["data"] is not None and (now - HOME_DATA_CACHE["ts"]) < 6:
-        return HOME_DATA_CACHE["data"]
+    if SHELL_DATA_CACHE["data"] is not None and (now - SHELL_DATA_CACHE["ts"]) < 60:
+        return SHELL_DATA_CACHE["data"]
 
     def q_config():
         try: return sync_db["config"].find_one({"_id": "settings"}) or {}
         except: return {}
-
-    def q_files():
-        res = []
-        for d in get_extra_dbs_sync():
-            try: res.extend(list(d["files"].find().sort("_id", -1)))
-            except: pass
-        return res
 
     def q_cats():
         try: return [c["name"] for c in sync_db["categories"].find()]
@@ -3349,7 +3710,6 @@ def _fetch_home_payload():
         except: return []
 
     f_cfg = WEB_POOL.submit(q_config)
-    f_files = WEB_POOL.submit(q_files)
     f_cats = WEB_POOL.submit(q_cats)
     f_langs = WEB_POOL.submit(q_langs)
     f_promos = WEB_POOL.submit(q_promos)
@@ -3359,7 +3719,6 @@ def _fetch_home_payload():
     f_links = WEB_POOL.submit(q_ad_links)
 
     config = f_cfg.result()
-    raw_files = f_files.result()
     cats = f_cats.result()
     langs = f_langs.result()
     promos = f_promos.result()
@@ -3372,57 +3731,6 @@ def _fetch_home_payload():
         zone_ids = [DEFAULT_ZONE_ID]
 
     live_url = get_live_web_url(config)
-    files = []
-    for doc in raw_files:
-        fid = str(doc["_id"])
-        tu = doc.get("thumb_url") or ""
-        if "/poster/" in tu:
-            tu = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
-        elif tu.startswith("data:image"):
-            tu = f"{live_url}/poster/{fid}"
-        elif not tu or "placehold.co" in tu:
-            tu = f"{live_url}/poster/default"
-
-        indexed_seasons = []
-        for si, s in enumerate(doc.get("seasons", [])):
-            indexed_eps = []
-            for ei, e in enumerate(s.get("episodes", [])):
-                ep_lbl = clean_ep_no(e.get("ep_no", "1"))
-                indexed_eps.append({
-                    "ep_no": ep_lbl,
-                    "orig_idx": ei,
-                    "qualities": [{"name": q.get("name", "HD")} for q in e.get("qualities", [])]
-                })
-            indexed_eps.sort(key=lambda x: natural_sort_key(x["ep_no"]))
-            ssn_lbl = clean_season_no(s.get("season_no", "1"))
-            indexed_seasons.append({
-                "season_no": ssn_lbl,
-                "orig_idx": si,
-                "episodes": indexed_eps
-            })
-        indexed_seasons.sort(key=lambda x: natural_sort_key(x["season_no"]))
-
-        clean_doc = {
-            "_id": fid,
-            "type": doc.get("type", "movie"),
-            "title": doc.get("title", ""),
-            "name": doc.get("name", ""),
-            "year": doc.get("year", ""),
-            "category": doc.get("category", "All"),
-            "language": doc.get("language", ""),
-            "is_premium": bool(doc.get("is_premium", False)),
-            "thumb_url": tu,
-            "pinned": bool(doc.get("pinned", False)),
-            "ratings": doc.get("ratings", []),
-            "created_at": doc.get("created_at", ""),
-            "views": doc.get("views", 0),
-            "likes": doc.get("likes", []),
-            "comments": doc.get("comments", []),
-            "qualities": [{"name": q.get("name", "HD")} for q in doc.get("qualities", [])],
-            "seasons": indexed_seasons
-        }
-        files.append(clean_doc)
-
     for p in promos:
         p["_id"] = str(p["_id"])
         img = p.get("image") or ""
@@ -3441,7 +3749,6 @@ def _fetch_home_payload():
 
     payload = {
         "config": config,
-        "files": files,
         "cats": cats,
         "langs": langs,
         "promos": promos,
@@ -3450,13 +3757,99 @@ def _fetch_home_payload():
         "zone_ids": zone_ids,
         "ad_links": ad_links
     }
-    HOME_DATA_CACHE["data"] = payload
-    HOME_DATA_CACHE["ts"] = time.time()
+    SHELL_DATA_CACHE["data"] = payload
+    SHELL_DATA_CACHE["ts"] = time.time()
     return payload
+
+def _fetch_home_payload():
+    now = time.time()
+    if HOME_DATA_CACHE["data"] is not None and (now - HOME_DATA_CACHE["ts"]) < 120:
+        return HOME_DATA_CACHE["data"]
+
+    with HOME_CACHE_LOCK:
+        now = time.time()
+        if HOME_DATA_CACHE["data"] is not None and (now - HOME_DATA_CACHE["ts"]) < 120:
+            return HOME_DATA_CACHE["data"]
+
+        shell = _fetch_shell_payload()
+        config = shell["config"]
+        live_url = get_live_web_url(config)
+
+        raw_files = []
+        for d in get_extra_dbs_sync():
+            try: raw_files.extend(list(d["files"].find().sort("_id", -1)))
+            except: pass
+
+        files = []
+        for doc in raw_files:
+            fid = str(doc["_id"])
+            tu = doc.get("thumb_url") or ""
+            if "/poster/" in tu:
+                tu = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
+            elif tu.startswith("data:image"):
+                tu = f"{live_url}/poster/{fid}"
+            elif not tu or "placehold.co" in tu:
+                tu = f"{live_url}/poster/default"
+
+            indexed_seasons = []
+            for si, s in enumerate(doc.get("seasons", [])):
+                indexed_eps = []
+                for ei, e in enumerate(s.get("episodes", [])):
+                    ep_lbl = clean_ep_no(e.get("ep_no", "1"))
+                    indexed_eps.append({
+                        "ep_no": ep_lbl,
+                        "orig_idx": ei,
+                        "qualities": [{"name": q.get("name", "HD")} for q in e.get("qualities", [])]
+                    })
+                indexed_eps.sort(key=lambda x: natural_sort_key(x["ep_no"]))
+                ssn_lbl = clean_season_no(s.get("season_no", "1"))
+                indexed_seasons.append({
+                    "season_no": ssn_lbl,
+                    "orig_idx": si,
+                    "episodes": indexed_eps
+                })
+            indexed_seasons.sort(key=lambda x: natural_sort_key(x["season_no"]))
+
+            clean_doc = {
+                "_id": fid,
+                "type": doc.get("type", "movie"),
+                "title": doc.get("title", ""),
+                "name": doc.get("name", ""),
+                "year": doc.get("year", ""),
+                "category": doc.get("category", "All"),
+                "language": doc.get("language", ""),
+                "is_premium": bool(doc.get("is_premium", False)),
+                "thumb_url": tu,
+                "pinned": bool(doc.get("pinned", False)),
+                "ratings": doc.get("ratings", []),
+                "created_at": doc.get("created_at", ""),
+                "views": doc.get("views", 0),
+                "likes": doc.get("likes", []),
+                "comments": doc.get("comments", []),
+                "qualities": [{"name": q.get("name", "HD")} for q in doc.get("qualities", [])],
+                "seasons": indexed_seasons
+            }
+            files.append(clean_doc)
+
+        payload = {
+            **shell,
+            "files": files
+        }
+        HOME_DATA_CACHE["data"] = payload
+        HOME_DATA_CACHE["ts"] = time.time()
+        return payload
+
+def warm_caches_loop():
+    while True:
+        try:
+            warm_site_logo_sync()
+            _fetch_home_payload()
+        except: pass
+        time.sleep(45)
 
 @web.route('/')
 def home():
-    p = _fetch_home_payload()
+    p = _fetch_shell_payload()
     config = p["config"]
     tut_vid = config.get("tutorial_vid") or ""
     tut_ver = hashlib.md5(str(tut_vid).encode()).hexdigest()[:8] if tut_vid else "0"
@@ -3471,9 +3864,17 @@ def home():
         try: initial_user = build_user_state_dict(int(uid_arg))
         except: pass
 
+    initial_files = []
+    if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+        initial_files = HOME_DATA_CACHE["data"]["files"][:15]
+
     ad_config = {
         "ads_on": config.get("ads_on", True),
         "coin_price": config.get("premium_vid_coin", 50),
+        "prstep": max(1, int(config.get("prstep", 1))),
+        "regstep": max(1, int(config.get("regstep", 1))),
+        "relock_sec": get_relock_seconds(config),
+        "prem_wait_time": int(config.get("prem_vid_wait", 10)),
         "ad_links": p["ad_links"],
         "zone_ids": p["zone_ids"],
         "wait_times": config.get("direk_wait", [5])
@@ -3481,7 +3882,7 @@ def home():
 
     return render_template_string(
         HTML_TEMPLATE,
-        files_json=json.dumps(p["files"], default=str),
+        files_json=json.dumps(initial_files, default=str),
         categories_json=json.dumps(p["cats"]),
         languages_json=json.dumps(p["langs"]),
         promotions_json=json.dumps(p["promos"], default=str),
@@ -3545,6 +3946,12 @@ async def main_bot():
             BotCommand("delrecgroup", "Recommendation গ্রুপ রিমুভ (Admin)"),
             BotCommand("addzoonid", "Monetag Zone ID এড (Admin)"),
             BotCommand("deletezoonid", "Zone ID ডিলিট (Admin)"),
+            BotCommand("prstep", "প্রিমিয়াম অ্যাড স্টেপ (Admin)"),
+            BotCommand("regstep", "রেগুলার অ্যাড স্টেপ (Admin)"),
+            BotCommand("taskstep", "টাস্ক ও স্পিন অ্যাড স্টেপ (Admin)"),
+            BotCommand("relocktime", "রিলক টাইম সেকেন্ডে সেট (Admin)"),
+            BotCommand("addzonetask", "আলাদা Zone ID টাস্ক এড (Admin)"),
+            BotCommand("addlinktask", "আলাদা Direct Link টাস্ক এড (Admin)"),
             BotCommand("addredeem", "রিডিম কোড তৈরি (Admin)"),
             BotCommand("premiumuserlist", "প্রিমিয়াম ইউজার লিস্ট (Admin)"),
             BotCommand("deletepremium", "প্রিমিয়াম রিমুভ (Admin)"),
@@ -3573,6 +3980,7 @@ if __name__ == "__main__":
         try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
         except: pass
 
+    threading.Thread(target=warm_caches_loop, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=run_flask, daemon=True).start()
     while True:
