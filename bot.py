@@ -1,4 +1,5 @@
 import os, sys, re, asyncio, threading, random, string, time, requests, json, base64, socket, io, traceback, gzip, hashlib
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from datetime import datetime, timedelta
 
@@ -70,6 +71,12 @@ sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)["NewBot"]
 
 POSTER_CACHE = {}
 EXTRA_URI_CACHE = {"uris": None, "ts": 0}
+HOME_DATA_CACHE = {"data": None, "ts": 0}
+WEB_POOL = ThreadPoolExecutor(max_workers=8)
+
+def invalidate_home_cache():
+    HOME_DATA_CACHE["data"] = None
+    HOME_DATA_CACHE["ts"] = 0
 
 def poster_cache_put(pid, raw_bytes, mime="image/jpeg"):
     if not pid or not raw_bytes: return
@@ -90,7 +97,7 @@ def get_live_web_url(conf=None):
 @web.before_request
 def capture_live_host():
     try:
-        if request.path.startswith("/poster/") or request.path == "/tutorial_video":
+        if request.path.startswith("/poster/") or request.path in ("/tutorial_video", "/site_logo", "/api/welcome_audio"):
             return
         host = request.headers.get("X-Forwarded-Host") or request.host
         if host and "127.0.0.1" not in host and "localhost" not in host:
@@ -299,6 +306,7 @@ async def save_poster_to_mongo(target_db, poster_id, b64_data, mime="image/jpeg"
         raw, _ = decode_b64_to_bytes(b64_data)
         if raw: poster_cache_put(poster_id, raw, mime)
     except: pass
+    invalidate_home_cache()
     base = (live_url or get_live_web_url()).rstrip("/")
     return f"{base}/poster/{poster_id}"
 
@@ -441,6 +449,23 @@ async def background_tasks():
 # ==========================================
 QUALITIES = ["360p", "480p", "720p", "1080p", "4K", "HDRip"]
 
+def clean_season_no(val):
+    s = str(val or "1").strip()
+    s = re.sub(r"^(?:season|s)\s*[-_:]?\s*", "", s, flags=re.IGNORECASE).strip()
+    return s or "1"
+
+def clean_ep_no(val):
+    s = str(val or "1").strip()
+    s = re.sub(r"^(?:episode|ep|e)\s*[-_:]?\s*", "", s, flags=re.IGNORECASE).strip()
+    return s or "1"
+
+def natural_sort_key(val):
+    s = str(val or "").strip()
+    m = re.search(r"\d+", s)
+    if m:
+        return (0, int(m.group(0)), s.lower())
+    return (1, 0, s.lower())
+
 async def get_categories_list():
     await get_db(); return [c["name"] for c in await cats_col.find().to_list(100)]
 
@@ -458,25 +483,27 @@ def parse_name_year(raw_text, cmd_prefix):
     m = re.match(r"^(.*?)\s+(\d{4})$", txt)
     return (m.group(1).strip(), m.group(2).strip()) if m else (txt, "")
 
-async def get_cat_markup(prefix, skip_cb):
+async def get_cat_markup(prefix, skip_cb, back_cb=None):
     cats = await get_categories_list(); btns, row = [], []
     for i, cn in enumerate(cats):
         row.append(InlineKeyboardButton(f"📂 {cn}", callback_data=f"{prefix}_{i}"))
         if len(row) == 2: btns.append(row); row = []
     if row: btns.append(row)
     btns.append([InlineKeyboardButton("⏭ Skip Category", callback_data=skip_cb)])
+    if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns), cats
 
-async def get_lang_markup(prefix, skip_cb):
+async def get_lang_markup(prefix, skip_cb, back_cb=None):
     langs = await get_languages_list(); btns, row = [], []
     for i, ln in enumerate(langs):
         row.append(InlineKeyboardButton(f"🌐 {ln}", callback_data=f"{prefix}_{i}"))
         if len(row) == 2: btns.append(row); row = []
     if row: btns.append(row)
     btns.append([InlineKeyboardButton("⏭ Skip Language", callback_data=skip_cb)])
+    if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns), langs
 
-def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish"):
+def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None):
     btns, row = [], []
     for q in QUALITIES:
         row.append(InlineKeyboardButton(f"🎬 {q}", callback_data=f"{prefix}_{q}"))
@@ -484,6 +511,7 @@ def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish"):
     if row: btns.append(row)
     btns.append([InlineKeyboardButton("➕ Custom Quality", callback_data=f"{prefix}_custom")])
     btns.append([InlineKeyboardButton(finish_label, callback_data=skip_cb)])
+    if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns)
 
 def is_in_step(step_name):
@@ -567,7 +595,7 @@ async def cmd_list(c, m):
 • /name — সাইটের নাম (কপি: `/name Moviee Link`)
 • /setnotice — লাইভ স্ক্রলিং নোটিশ (কপি: `/setnotice নতুন মুভি পেতে জয়েন করুন`)
 • /settutorial — ভিডিওতে রিপ্লাই করে টিউটোরিয়াল সেট
-• /logo — ছবিতে রিপ্লাই করে স্টার্ট লোগো সেট
+• /logo — ছবিতে রিপ্লাই করে স্টার্ট ও মিনি অ্যাপ লোগো সেট
 • /addtex — স্টার্ট এক্সট্রা টেক্সট (কপি: `/addtex স্বাগতম!`) | /deltex
 • /setpremcoin — আনলক কয়েন সেট (কপি: `/setpremcoin 50`)
 • /relocktime — আনলক মেয়াদ মিনিট (কপি: `/relocktime 1440`) | /delrelocktime
@@ -653,20 +681,20 @@ SIMPLE_CONF = {
 @app.on_message(filters.command(list(SIMPLE_CONF.keys()) + ["delrelocktime", "deltex", "refbonous", "refbonousoff", "frotect"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_simple_config(c, m):
     await get_db(); parts = m.text.split(None, 1); cmd = parts[0].lstrip("/").lower().split("@")[0]; arg = parts[1].strip() if len(parts) > 1 else ""
-    if cmd == "delrelocktime": await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); return await m.reply("✅ Relock Time Deleted!")
-    if cmd == "deltex": await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": ""}}); return await m.reply("✅ Start Text Deleted!")
-    if cmd == "refbonousoff": await config_col.update_one({"_id": "settings"}, {"$set": {"ref_on": False}}); return await m.reply("✅ Refer Bonus OFF!")
+    if cmd == "delrelocktime": await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_min": 0}}); invalidate_home_cache(); return await m.reply("✅ Relock Time Deleted!")
+    if cmd == "deltex": await config_col.update_one({"_id": "settings"}, {"$set": {"start_text": ""}}); invalidate_home_cache(); return await m.reply("✅ Start Text Deleted!")
+    if cmd == "refbonousoff": await config_col.update_one({"_id": "settings"}, {"$set": {"ref_on": False}}); invalidate_home_cache(); return await m.reply("✅ Refer Bonus OFF!")
     if cmd == "refbonous":
         if not arg or not arg.isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/refbonous 20`")
-        await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": int(arg), "ref_on": True}}); return await m.reply(f"✅ Refer Bonus Set: `{arg}` Coins")
+        await config_col.update_one({"_id": "settings"}, {"$set": {"ref_coin": int(arg), "ref_on": True}}); invalidate_home_cache(); return await m.reply(f"✅ Refer Bonus Set: `{arg}` Coins")
     if cmd == "frotect":
         if arg.lower() not in ["on", "off"]: return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/frotect on` অথবা `/frotect off`")
-        await config_col.update_one({"_id": "settings"}, {"$set": {"frotect": arg.lower() == "on"}}); return await m.reply(f"✅ Protect Content: `{arg.upper()}`")
+        await config_col.update_one({"_id": "settings"}, {"$set": {"frotect": arg.lower() == "on"}}); invalidate_home_cache(); return await m.reply(f"✅ Protect Content: `{arg.upper()}`")
     k, tp, ex = SIMPLE_CONF[cmd]
     if not arg: return await m.reply(f"❌ **সঠিক নিয়ম ও উদাহরণ:**\n`{ex}`")
     try:
         val = int(arg) if tp == "int" else (arg.replace("@", "") if tp == "admin" else arg)
-        await config_col.update_one({"_id": "settings"}, {"$set": {k: val}}); await m.reply(f"✅ সেট হয়েছে: **{k}** = `{val}`")
+        await config_col.update_one({"_id": "settings"}, {"$set": {k: val}}); invalidate_home_cache(); await m.reply(f"✅ সেট হয়েছে: **{k}** = `{val}`")
     except: await m.reply(f"❌ ভুল ইনপুট! উদাহরণ:\n`{ex}`")
 
 @app.on_message(filters.command("setrecgroup", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -680,6 +708,7 @@ async def cmd_setrecgroup(c, m):
         link = "https://t.me/" + link.lstrip("@")
     await get_db()
     await config_col.update_one({"_id": "settings"}, {"$set": {"rec_group_link": link}}, upsert=True)
+    invalidate_home_cache()
     await m.reply(f"✅ Movie Recommendation গ্রুপ লিংক সেট হয়েছে:\n🔗 `{link}`")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("set_rec_group_wait") & ~filters.regex(r"^/") & unique_msg)
@@ -690,12 +719,14 @@ async def handle_set_rec_group_text(c, m):
     await get_db()
     await config_col.update_one({"_id": "settings"}, {"$set": {"rec_group_link": link}}, upsert=True)
     admin_steps.pop(m.from_user.id, None)
+    invalidate_home_cache()
     await m.reply(f"✅ Movie Recommendation গ্রুপ লিংক সেট হয়েছে:\n🔗 `{link}`")
 
 @app.on_message(filters.command("delrecgroup", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_delrecgroup(c, m):
     await get_db()
     await config_col.update_one({"_id": "settings"}, {"$set": {"rec_group_link": ""}}, upsert=True)
+    invalidate_home_cache()
     await m.reply("✅ Movie Recommendation গ্রুপ লিংক রিমুভ করা হয়েছে!")
 
 @app.on_message(filters.command("settutorial", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -705,9 +736,11 @@ async def cmd_settutorial(c, m):
     if m.reply_to_message and (m.reply_to_message.video or m.reply_to_message.animation):
         vid_id = (m.reply_to_message.video or m.reply_to_message.animation).file_id
         await config_col.update_one({"_id": "settings"}, {"$set": {"tutorial_vid": vid_id}}, upsert=True)
+        invalidate_home_cache()
         await m.reply("✅ টিউটোরিয়াল ভিডিও সেট হয়েছে! এখন প্রতিটি ভিডিওর Detail পেজেও সরাসরি চলবে।")
     elif len(parts) > 1 and parts[1].strip().startswith("http"):
         await config_col.update_one({"_id": "settings"}, {"$set": {"tutorial_vid": parts[1].strip()}}, upsert=True)
+        invalidate_home_cache()
         await m.reply("✅ টিউটোরিয়াল ভিডিও লিংক সেট হয়েছে!")
     else:
         await m.reply("❌ **সঠিক নিয়ম:** কোনো ভিডিওতে রিপ্লাই (Reply) করে `/settutorial` লিখুন অথবা `/settutorial https://...mp4` দিন।")
@@ -761,7 +794,7 @@ async def start_cmd(client, message):
                     await tdb["files"].update_one({"_id": f_id}, {"$inc": {"views": 1}})
                     try:
                         ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
-                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{ssn['season_no']} E{ep['ep_no']} [{qo['name']}]", config)
+                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}]", config)
                     except: pass
                 return await message.reply("❌ এপিসোড ফাইল পাওয়া যায়নি!")
             else:
@@ -816,11 +849,11 @@ async def check_join_cb(c, q):
 async def cmd_setcategory(c, m):
     parts = m.text.split(None, 1)
     if len(parts) < 2: admin_steps[m.from_user.id] = {"step": "add_cat_wait"}; return await m.reply("📂 নতুন ক্যাটাগরির নাম লিখুন:\nউদাহরণ: `18+` অথবা `Action` অথবা `Bachelor Point`")
-    cat = parts[1].strip(); await get_db(); await cats_col.update_one({"name": cat}, {"$set": {"name": cat}}, upsert=True); await m.reply(f"✅ ক্যাটাগরি অ্যাড হয়েছে: **{cat}**")
+    cat = parts[1].strip(); await get_db(); await cats_col.update_one({"name": cat}, {"$set": {"name": cat}}, upsert=True); invalidate_home_cache(); await m.reply(f"✅ ক্যাটাগরি অ্যাড হয়েছে: **{cat}**")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("add_cat_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_add_cat_text(c, m):
-    cat = m.text.strip(); await get_db(); await cats_col.update_one({"name": cat}, {"$set": {"name": cat}}, upsert=True); admin_steps.pop(m.from_user.id, None); await m.reply(f"✅ ক্যাটাগরি অ্যাড হয়েছে: **{cat}**")
+    cat = m.text.strip(); await get_db(); await cats_col.update_one({"name": cat}, {"$set": {"name": cat}}, upsert=True); admin_steps.pop(m.from_user.id, None); invalidate_home_cache(); await m.reply(f"✅ ক্যাটাগরি অ্যাড হয়েছে: **{cat}**")
 
 @app.on_message(filters.command("deletecategory", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_deletecategory(c, m):
@@ -829,17 +862,17 @@ async def cmd_deletecategory(c, m):
     await m.reply("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {cat['name']}", callback_data=f"delcat_{cat['_id']}")] for cat in cats]))
 
 @app.on_callback_query(filters.regex(r"^delcat_") & filters.user(ADMIN_ID) & unique_cb)
-async def delcat_cb(c, q): await get_db(); await cats_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ ক্যাটাগরি ডিলিট হয়েছে!")
+async def delcat_cb(c, q): await get_db(); await cats_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); invalidate_home_cache(); await q.message.edit_text("✅ ক্যাটাগরি ডিলিট হয়েছে!")
 
 @app.on_message(filters.command("setlanguage", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_setlanguage(c, m):
     parts = m.text.split(None, 1)
     if len(parts) < 2: admin_steps[m.from_user.id] = {"step": "add_lang_wait"}; return await m.reply("🌐 নতুন ভাষার নাম লিখুন:\nউদাহরণ: `Bangla` অথবা `Hindi Dubbed`")
-    lang = parts[1].strip(); await get_db(); await langs_col.update_one({"name": lang}, {"$set": {"name": lang}}, upsert=True); await m.reply(f"✅ ভাষা অ্যাড হয়েছে: **{lang}**")
+    lang = parts[1].strip(); await get_db(); await langs_col.update_one({"name": lang}, {"$set": {"name": lang}}, upsert=True); invalidate_home_cache(); await m.reply(f"✅ ভাষা অ্যাড হয়েছে: **{lang}**")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("add_lang_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_add_lang_text(c, m):
-    lang = m.text.strip(); await get_db(); await langs_col.update_one({"name": lang}, {"$set": {"name": lang}}, upsert=True); admin_steps.pop(m.from_user.id, None); await m.reply(f"✅ ভাষা অ্যাড হয়েছে: **{lang}**")
+    lang = m.text.strip(); await get_db(); await langs_col.update_one({"name": lang}, {"$set": {"name": lang}}, upsert=True); admin_steps.pop(m.from_user.id, None); invalidate_home_cache(); await m.reply(f"✅ ভাষা অ্যাড হয়েছে: **{lang}**")
 
 @app.on_message(filters.command("deletelanguage", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_deletelanguage(c, m):
@@ -848,7 +881,7 @@ async def cmd_deletelanguage(c, m):
     await m.reply("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {l['name']}", callback_data=f"dellang_{l['_id']}")] for l in ls]))
 
 @app.on_callback_query(filters.regex(r"^dellang_") & filters.user(ADMIN_ID) & unique_cb)
-async def dellang_cb(c, q): await get_db(); await langs_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ ভাষা ডিলিট হয়েছে!")
+async def dellang_cb(c, q): await get_db(); await langs_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); invalidate_home_cache(); await q.message.edit_text("✅ ভাষা ডিলিট হয়েছে!")
 
 @app.on_message(filters.command("addupcoming", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_addupcoming(c, m):
@@ -862,6 +895,7 @@ async def cmd_addupcoming(c, m):
         enc, mime, _, err = await extract_image_from_message(c, m.reply_to_message)
         if enc: thumb = await save_poster_to_mongo(db, pid, enc, mime, live_url)
     await upcoming_col.insert_one({"title": title, "release_time": rtime, "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
+    invalidate_home_cache()
     await m.reply(f"✅ আপকামিং অ্যাড হয়েছে!\n🎬 **{title}** | 🕒 {rtime}")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("upc_title_time") & ~filters.regex(r"^/") & unique_msg)
@@ -881,6 +915,7 @@ async def handle_upc_photo(c, m):
         pid = "upc_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         thumb = await save_poster_to_mongo(db, pid, enc, mime, live_url)
         await upcoming_col.insert_one({"title": st["title"], "release_time": st["release_time"], "thumb_url": thumb, "created_at": datetime.utcnow().isoformat() + "Z"})
+        invalidate_home_cache()
         await msg.edit_text(f"✅ আপকামিং ও পোস্টার MongoDB-তে সেভ হয়েছে: **{st['title']}**")
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
@@ -892,17 +927,17 @@ async def cmd_delupcoming(c, m):
     await m.reply("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {i['title'][:25]}", callback_data=f"delupc_{i['_id']}")] for i in items]))
 
 @app.on_callback_query(filters.regex(r"^delupc_") & filters.user(ADMIN_ID) & unique_cb)
-async def delupc_cb(c, q): await get_db(); await upcoming_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ ডিলিট হয়েছে!")
+async def delupc_cb(c, q): await get_db(); await upcoming_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); invalidate_home_cache(); await q.message.edit_text("✅ ডিলিট হয়েছে!")
 
 @app.on_message(filters.command("addzoonid", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_addzoonid(c, m):
     parts = m.text.split(None, 1)
     if len(parts) < 2: admin_steps[m.from_user.id] = {"step": "add_zone_wait"}; return await m.reply("🆔 আপনার Monetag Zone ID দিন:\nউদাহরণ: `12242829`")
-    zid = parts[1].strip(); await get_db(); await zone_ids_col.update_one({"zone_id": zid}, {"$set": {"zone_id": zid}}, upsert=True); await m.reply(f"✅ Zone ID অ্যাড হয়েছে: `{zid}`")
+    zid = parts[1].strip(); await get_db(); await zone_ids_col.update_one({"zone_id": zid}, {"$set": {"zone_id": zid}}, upsert=True); invalidate_home_cache(); await m.reply(f"✅ Zone ID অ্যাড হয়েছে: `{zid}`")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("add_zone_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_add_zone_text(c, m):
-    zid = m.text.strip(); await get_db(); await zone_ids_col.update_one({"zone_id": zid}, {"$set": {"zone_id": zid}}, upsert=True); admin_steps.pop(m.from_user.id, None); await m.reply(f"✅ Zone ID অ্যাড হয়েছে: `{zid}`")
+    zid = m.text.strip(); await get_db(); await zone_ids_col.update_one({"zone_id": zid}, {"$set": {"zone_id": zid}}, upsert=True); admin_steps.pop(m.from_user.id, None); invalidate_home_cache(); await m.reply(f"✅ Zone ID অ্যাড হয়েছে: `{zid}`")
 
 @app.on_message(filters.command("deletezoonid", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_deletezoonid(c, m):
@@ -911,7 +946,7 @@ async def cmd_deletezoonid(c, m):
     await m.reply("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {z['zone_id']}", callback_data=f"delzone_{z['_id']}")] for z in zids]))
 
 @app.on_callback_query(filters.regex(r"^delzone_") & filters.user(ADMIN_ID) & unique_cb)
-async def delzone_cb(c, q): await get_db(); await zone_ids_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); await q.message.edit_text("✅ ডিলিট হয়েছে!")
+async def delzone_cb(c, q): await get_db(); await zone_ids_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); invalidate_home_cache(); await q.message.edit_text("✅ ডিলিট হয়েছে!")
 
 def parse_duration_seconds(dur_str):
     m = re.match(r"^(\d+)\s*([a-zA-Z]+)$", dur_str.strip().lower())
@@ -964,8 +999,15 @@ async def cmd_deletepremium(c, m):
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
 
 # ==========================================
-# 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT)
+# 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
+async def show_mv_poster_prompt(mo, st, edit=True):
+    st["step"] = "mv_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    txt = f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⬅️ Back to Language", callback_data="mvback_lang")]])
+    if edit: await mo.edit_text(txt, reply_markup=kb)
+    else: await mo.reply(txt, reply_markup=kb)
+
 @app.on_message(filters.command("movies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_movies(c, m):
     name, year = parse_name_year(m.text, "/movies")
@@ -979,6 +1021,24 @@ async def handle_mv_name_year(c, m):
     admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None}
     mk, _ = await get_cat_markup("mvcat", "mvcat_skip"); await m.reply(f"🎬 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
+@app.on_callback_query(filters.regex(r"^mvback_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvback_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    target = q.data.split("_", 1)[1]
+    if target == "cat":
+        st["step"] = "mv_cat"; mk, _ = await get_cat_markup("mvcat", "mvcat_skip")
+        return await q.message.edit_text(f"🎬 **{st['name']} {st.get('year','')}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+    elif target == "lang":
+        st["step"] = "mv_lang"; lm, _ = await get_lang_markup("mvlang", "mvlang_skip", "mvback_cat")
+        return await q.message.edit_text(f"✅ Category: **{st.get('category','All')}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
+    elif target == "poster":
+        return await show_mv_poster_prompt(q.message, st, edit=True)
+    elif target == "qual":
+        st["step"] = "mv_qual_wait"
+        qs = ", ".join([x["name"] for x in st.get("qualities", [])]) or "None"
+        return await q.message.edit_text(f"🎞 অ্যাড করা কোয়ালিটি: `{qs}`\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
+
 @app.on_callback_query(filters.regex(r"^mvcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def mvcat_cb(c, q):
     st = admin_steps.get(q.from_user.id)
@@ -986,7 +1046,7 @@ async def mvcat_cb(c, q):
     val = q.data.split("_")[1]
     if val == "skip": st["category"] = "All"
     else: cats = await get_categories_list(); st["category"] = cats[int(val)] if int(val) < len(cats) else "All"
-    st["step"] = "mv_lang"; lm, _ = await get_lang_markup("mvlang", "mvlang_skip")
+    st["step"] = "mv_lang"; lm, _ = await get_lang_markup("mvlang", "mvlang_skip", "mvback_cat")
     await q.message.edit_text(f"✅ Category: **{st['category']}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
 
 @app.on_callback_query(filters.regex(r"^mvlang_") & filters.user(ADMIN_ID) & unique_cb)
@@ -996,21 +1056,14 @@ async def mvlang_cb(c, q):
     val = q.data.split("_")[1]
     if val == "skip": st["language"] = ""
     else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
-    st["step"] = "mv_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
-    await q.message.edit_text(
-        f"✅ Language: **{st['language'] or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="mvprem_toggle")]])
-    )
+    await show_mv_poster_prompt(q.message, st, edit=True)
 
 @app.on_callback_query(filters.regex(r"^mvprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
 async def mvprem_toggle_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if st:
-        st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
-        await q.message.edit_text(
-            f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="mvprem_toggle")]])
-        )
+        st["is_premium"] = not st.get("is_premium", False)
+        await show_mv_poster_prompt(q.message, st, edit=True)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & unique_msg)
 async def handle_mv_poster(c, m):
@@ -1022,7 +1075,7 @@ async def handle_mv_poster(c, m):
         st = admin_steps.get(m.from_user.id)
         if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/movies` দিন।")
         st["poster_b64"] = enc; st["poster_mime"] = mime; st["tg_thumb_id"] = tg_fid; st["step"] = "mv_qual_wait"
-        await msg.edit_text("✅ **পোস্টার রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন (শেষে **Save Movie** বাটনে ক্লিক করুন):", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now"))
+        await msg.edit_text("✅ **পোস্টার রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন (শেষে **Save Movie** বাটনে ক্লিক করুন):", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
     except Exception as e:
         await msg.edit_text(f"❌ পোস্টার এরর: `{e}`")
 
@@ -1046,7 +1099,7 @@ async def handle_mv_poster_url(c, m):
         except:
             st["thumb_url"] = url
         st["step"] = "mv_qual_wait"
-        await msg.edit_text("✅ **পোস্টার লিংক রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now"))
+        await msg.edit_text("✅ **পোস্টার লিংক রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
 
@@ -1055,19 +1108,22 @@ async def mvqual_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     val = q.data.split("_", 1)[1]
-    if val == "custom": st["step"] = "mv_custom_qname"; return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:\nউদাহরণ: `1080p HEVC`")
-    st["current_quality"] = val; st["step"] = "mv_qual_file"; await q.message.edit_text(f"📤 এবার **{val}** ফাইল পাঠান:")
+    if val == "custom":
+        st["step"] = "mv_custom_qname"
+        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:\nউদাহরণ: `1080p HEVC`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
+    st["current_quality"] = val; st["step"] = "mv_qual_file"
+    await q.message.edit_text(f"📤 এবার **{val}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_custom_qname") & ~filters.regex(r"^/") & unique_msg)
 async def handle_mv_custom_qname(c, m):
     st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "mv_qual_file"
-    await m.reply(f"📤 এবার **{st['current_quality']}** ফাইল পাঠান:")
+    await m.reply(f"📤 এবার **{st['current_quality']}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_qual_file") & unique_msg)
 async def handle_mv_qual_file(c, m):
     st = admin_steps[m.from_user.id]; f_id = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
     q_name = st.get("current_quality", "HD"); st["qualities"].append({"name": q_name, "file_id": f_id}); st["step"] = "mv_qual_wait"
-    await m.reply(f"✅ **{q_name}** অ্যাড হয়েছে! (`{', '.join([q['name'] for q in st['qualities']])}`)\nআরও কোয়ালিটি যোগ করুন অথবা সেভ করুন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now"))
+    await m.reply(f"✅ **{q_name}** অ্যাড হয়েছে! (`{', '.join([q['name'] for q in st['qualities']])}`)\nআরও কোয়ালিটি যোগ করুন অথবা সেভ করুন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
 
 async def finalize_save_movie(c, uid, msg_obj):
     st = admin_steps.pop(uid, None)
@@ -1089,7 +1145,7 @@ async def finalize_save_movie(c, uid, msg_obj):
             thumb_url = st["thumb_url"]
         ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
         nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": st["qualities"][0]["file_id"] if st.get("qualities") else None, "qualities": st.get("qualities", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-        await target_db["files"].insert_one(nm); await notify_new_post(c, nm, conf)
+        await target_db["files"].insert_one(nm); invalidate_home_cache(); await notify_new_post(c, nm, conf)
         await msg_obj.edit_text(f"✅ **মুভি ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
     except Exception as e:
         traceback.print_exc()
@@ -1124,6 +1180,7 @@ async def delmv_cb(c, q):
         await tdb["files"].delete_one({"_id": f_id})
         await tdb["posters"].delete_one({"_id": f_id})
         poster_cache_del(f_id)
+        invalidate_home_cache()
         await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
     await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(pg), edit=True)
 
@@ -1169,19 +1226,21 @@ async def show_edit_movie_panel(mq, f_id, edit=True):
 async def edmv_cb(c, q):
     _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
-    if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); return await show_edit_movie_panel(q, f_id, edit=True)
-    elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_movie_panel(q, f_id, edit=True)
-    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
-    elif act == "name": admin_steps[q.from_user.id] = {"step": "edmv_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন (যেমন: `RRR 2024`):")
-    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক পাঠান:")
+    if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
+    elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
+    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    elif act == "name": admin_steps[q.from_user.id] = {"step": "edmv_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন (যেমন: `RRR 2024`):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]))
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]))
     elif act == "cat":
         cats = await get_categories_list()
         if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
-        return await q.message.edit_text("📂 Category সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📂 {cn}", callback_data=f"edmvcat_{f_id}_{i}")] for i, cn in enumerate(cats)]))
+        btns = [[InlineKeyboardButton(f"📂 {cn}", callback_data=f"edmvcat_{f_id}_{i}")] for i, cn in enumerate(cats)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
+        return await q.message.edit_text("📂 Category সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
     elif act == "lang":
         ls = await get_languages_list()
         if not ls: return await q.answer("❌ আগে /setlanguage দিয়ে ভাষা অ্যাড করুন!", show_alert=True)
-        return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edmvlang_{f_id}_{i}")] for i, ln in enumerate(ls)]))
+        btns = [[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edmvlang_{f_id}_{i}")] for i, ln in enumerate(ls)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
+        return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
     elif act == "addq": admin_steps[q.from_user.id] = {"step": "edmv_addq_pick", "f_id": f_id}; return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
     elif act == "delq":
         qs = doc.get("qualities", [])
@@ -1192,13 +1251,13 @@ async def edmv_cb(c, q):
 @app.on_callback_query(filters.regex(r"^edmvcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvcat_cb(c, q):
     _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvlang_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvlang_cb(c, q):
     _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqdel_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1207,18 +1266,24 @@ async def edmvqdel_cb(c, q):
     if doc is not None and tdb is not None:
         qs = doc.get("qualities", [])
         if 0 <= idx < len(qs): qs.pop(idx)
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"qualities": qs}})
+        await tdb["files"].update_one({"_id": f_id}, {"$set": {"qualities": qs}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqadd_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvqadd_cb(c, q):
     val = q.data.split("_", 1)[1]; st = admin_steps.get(q.from_user.id)
     if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
-    if val == "custom": st["step"] = "edmv_custom_qname"; return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:")
-    st["current_quality"] = val; st["step"] = "edmv_addq_file"; await q.message.edit_text(f"📤 এবার **{val}** ফাইল পাঠান:")
+    f_id = st["f_id"]
+    if val == "custom":
+        st["step"] = "edmv_custom_qname"
+        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{f_id}")]]))
+    st["current_quality"] = val; st["step"] = "edmv_addq_file"
+    await q.message.edit_text(f"📤 এবার **{val}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{f_id}")]]))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_custom_qname") & ~filters.regex(r"^/") & unique_msg)
-async def handle_edmv_cq(c, m): admin_steps[m.from_user.id]["current_quality"] = m.text.strip(); admin_steps[m.from_user.id]["step"] = "edmv_addq_file"; await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:")
+async def handle_edmv_cq(c, m):
+    st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "edmv_addq_file"
+    await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{st['f_id']}")]]))
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_addq_file") & unique_msg)
 async def handle_edmv_qf(c, m):
@@ -1227,12 +1292,13 @@ async def handle_edmv_qf(c, m):
     if doc is not None and tdb is not None:
         await tdb["files"].update_one({"_id": f_id}, {"$push": {"qualities": {"name": qn, "file_id": fid}}})
         if not doc.get("file_id"): await tdb["files"].update_one({"_id": f_id}, {"$set": {"file_id": fid}})
+        invalidate_home_cache()
     st["step"] = "edmv_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_name(c, m):
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
     await show_edit_movie_panel(m, f_id, edit=False)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & unique_msg)
@@ -1249,6 +1315,7 @@ async def handle_edmv_poster(c, m):
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        invalidate_home_cache()
         admin_steps.pop(m.from_user.id, None)
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
@@ -1273,13 +1340,21 @@ async def handle_edmv_poster_url(c, m):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
+        invalidate_home_cache()
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
 
 # ==========================================
-# 8. SERIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT)
+# 8. SERIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
+async def show_sr_poster_prompt(mo, st, edit=True):
+    st["step"] = "sr_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    txt = f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⬅️ Back to Language", callback_data="srback_lang")]])
+    if edit: await mo.edit_text(txt, reply_markup=kb)
+    else: await mo.reply(txt, reply_markup=kb)
+
 @app.on_message(filters.command("addseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_addseries(c, m):
     name, year = parse_name_year(m.text, "/addseries")
@@ -1300,7 +1375,7 @@ async def srcat_cb(c, q):
     val = q.data.split("_")[1]
     if val == "skip": st["category"] = "All"
     else: cats = await get_categories_list(); st["category"] = cats[int(val)] if int(val) < len(cats) else "All"
-    st["step"] = "sr_lang"; lm, _ = await get_lang_markup("srlang", "srlang_skip")
+    st["step"] = "sr_lang"; lm, _ = await get_lang_markup("srlang", "srlang_skip", "srback_cat")
     await q.message.edit_text(f"✅ Category: **{st['category']}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
 
 @app.on_callback_query(filters.regex(r"^srlang_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1310,21 +1385,14 @@ async def srlang_cb(c, q):
     val = q.data.split("_")[1]
     if val == "skip": st["language"] = ""
     else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
-    st["step"] = "sr_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
-    await q.message.edit_text(
-        f"✅ Language: **{st['language'] or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="srprem_toggle")]])
-    )
+    await show_sr_poster_prompt(q.message, st, edit=True)
 
 @app.on_callback_query(filters.regex(r"^srprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
 async def srprem_toggle_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if st:
-        st["is_premium"] = not st.get("is_premium", False); ps = "💎 Premium" if st["is_premium"] else "👤 Regular"
-        await q.message.edit_text(
-            f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="srprem_toggle")]])
-        )
+        st["is_premium"] = not st.get("is_premium", False)
+        await show_sr_poster_prompt(q.message, st, edit=True)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & unique_msg)
 async def handle_sr_poster(c, m):
@@ -1365,28 +1433,65 @@ async def handle_sr_poster_url(c, m):
 
 async def prompt_series_season(mo, st, edit=True):
     st["step"] = "sr_season_no"; ns = len(st["seasons"]) + 1
-    btns = [[InlineKeyboardButton(f"📺 Season {ns}", callback_data=f"srssn_{ns}")], [InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
+    btns = [[InlineKeyboardButton(f"📺 Season {ns}", callback_data=f"srssn_{ns}")]]
+    for idx, s in enumerate(st["seasons"]):
+        btns.append([InlineKeyboardButton(f"📂 Edit Season {s['season_no']} ({len(s.get('episodes', []))} Eps)", callback_data=f"srssn_{s['season_no']}")])
+    btns.append([InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")])
+    btns.append([InlineKeyboardButton("⬅️ Back to Poster", callback_data="srback_poster")])
     txt = f"✅ পোস্টার রেডি!\n\n৪. **Season নম্বর দিন** (যেমন: `1` বা `5`):"
     if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
 def get_or_create_season(st, sno):
+    sno = clean_season_no(sno)
     for i, s in enumerate(st["seasons"]):
-        if str(s["season_no"]).lower() == str(sno).lower(): return i
-    st["seasons"].append({"season_no": str(sno), "episodes": []}); return len(st["seasons"]) - 1
+        if clean_season_no(s["season_no"]).lower() == sno.lower(): return i
+    st["seasons"].append({"season_no": sno, "episodes": []}); return len(st["seasons"]) - 1
 
 def get_or_create_episode(st, si, eno):
+    eno = clean_ep_no(eno)
     eps = st["seasons"][si]["episodes"]
     for i, e in enumerate(eps):
-        if str(e["ep_no"]).lower() == str(eno).lower(): return i
-    eps.append({"ep_no": str(eno), "qualities": []}); return len(eps) - 1
+        if clean_ep_no(e["ep_no"]).lower() == eno.lower(): return i
+    eps.append({"ep_no": eno, "qualities": []}); return len(eps) - 1
 
 async def prompt_series_episode(mo, st, edit=True):
     st["step"] = "sr_ep_no"; ssn = st["seasons"][st["cur_s_idx"]]; ne = len(ssn["episodes"]) + 1
-    btns = [[InlineKeyboardButton(f"🎬 Episode {ne}", callback_data=f"srep_{ne}")], [InlineKeyboardButton("➕ Add Another Season", callback_data="srssn_new")], [InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
+    btns = [[InlineKeyboardButton(f"🎬 Episode {ne}", callback_data=f"srep_{ne}")]]
+    btns.append([InlineKeyboardButton("➕ Add Another Season", callback_data="srssn_new"), InlineKeyboardButton("⬅️ Back to Season", callback_data="srback_season")])
+    btns.append([InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")])
     txt = f"📺 **Season {ssn['season_no']}**\nএবার **Episode নম্বর দিন** (যেমন: `1` বা `134`):"
     if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+async def show_sr_quality_prompt(mo, st, edit=True):
+    st["step"] = "sr_qual_wait"
+    ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
+    added = ", ".join([q["name"] for q in ep.get("qualities", [])]) or "None"
+    btns = get_quality_markup("srqual", "srep_next", "⏭ Next Episode", "srback_ep").inline_keyboard + [[InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
+    txt = f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\n🎞 Added: `{added}`\n\nআনলিমিটেড **Quality** অ্যাড করুন:"
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^srback_") & filters.user(ADMIN_ID) & unique_cb)
+async def srback_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    target = q.data.split("_", 1)[1]
+    if target == "cat":
+        st["step"] = "sr_cat"; mk, _ = await get_cat_markup("srcat", "srcat_skip")
+        return await q.message.edit_text(f"📺 **{st['name']} {st.get('year','')}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+    elif target == "lang":
+        st["step"] = "sr_lang"; lm, _ = await get_lang_markup("srlang", "srlang_skip", "srback_cat")
+        return await q.message.edit_text(f"✅ Category: **{st.get('category','All')}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
+    elif target == "poster":
+        return await show_sr_poster_prompt(q.message, st, edit=True)
+    elif target == "season":
+        return await prompt_series_season(q.message, st, edit=True)
+    elif target == "ep":
+        return await prompt_series_episode(q.message, st, edit=True)
+    elif target == "qual":
+        return await show_sr_quality_prompt(q.message, st, edit=True)
 
 @app.on_callback_query(filters.regex(r"^srssn_") & filters.user(ADMIN_ID) & unique_cb)
 async def srssn_cb(c, q):
@@ -1405,33 +1510,38 @@ async def srep_cb(c, q):
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     v = q.data.split("_", 1)[1]
     if v == "next": return await prompt_series_episode(q.message, st, edit=True)
-    st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], v); st["step"] = "sr_qual_wait"
-    ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
-    await q.message.edit_text(f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\nআনলিমিটেড **Quality** অ্যাড করুন:", reply_markup=get_quality_markup("srqual", "srep_next", "⏭ Next Episode"))
+    st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], v)
+    await show_sr_quality_prompt(q.message, st, edit=True)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_ep_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_sr_eno(c, m):
-    st = admin_steps[m.from_user.id]; st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], m.text.strip()); st["step"] = "sr_qual_wait"
-    ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
-    await m.reply(f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\nআনলিমিটেড **Quality** অ্যাড করুন:", reply_markup=get_quality_markup("srqual", "srep_next", "⏭ Next Episode"))
+    st = admin_steps[m.from_user.id]; st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], m.text.strip())
+    await show_sr_quality_prompt(m, st, edit=False)
 
 @app.on_callback_query(filters.regex(r"^srqual_") & filters.user(ADMIN_ID) & unique_cb)
 async def srqual_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     v = q.data.split("_", 1)[1]
-    if v == "custom": st["step"] = "sr_custom_qname"; return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:")
-    st["current_quality"] = v; st["step"] = "sr_qual_file"; await q.message.edit_text(f"📤 এবার **{v}** এপিসোড ফাইল পাঠান:")
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton("✅ Save Series", callback_data="srsave_final")]])
+    if v == "custom":
+        st["step"] = "sr_custom_qname"
+        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=back_kb)
+    st["current_quality"] = v; st["step"] = "sr_qual_file"
+    await q.message.edit_text(f"📤 এবার **{v}** এপিসোড ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_custom_qname") & ~filters.regex(r"^/") & unique_msg)
-async def handle_sr_cq(c, m): st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "sr_qual_file"; await m.reply(f"📤 এবার **{st['current_quality']}** ফাইল পাঠান:")
+async def handle_sr_cq(c, m):
+    st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "sr_qual_file"
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton("✅ Save Series", callback_data="srsave_final")]])
+    await m.reply(f"📤 এবার **{st['current_quality']}** ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_qual_file") & unique_msg)
 async def handle_sr_qf(c, m):
     st = admin_steps[m.from_user.id]; fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
     qn = st.get("current_quality", "HD"); ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
     ep["qualities"].append({"name": qn, "file_id": fid}); st["step"] = "sr_qual_wait"
-    btns = get_quality_markup("srqual", "srep_next", "⏭ Next Episode").inline_keyboard + [[InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
+    btns = get_quality_markup("srqual", "srep_next", "⏭ Next Episode", "srback_ep").inline_keyboard + [[InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
     await m.reply(f"✅ S{ssn['season_no']} E{ep['ep_no']} - **{qn}** অ্যাড হয়েছে!", reply_markup=InlineKeyboardMarkup(btns))
 
 async def finalize_save_series(c, uid, mo):
@@ -1453,7 +1563,7 @@ async def finalize_save_series(c, uid, mo):
             thumb_url = st["thumb_url"]
         ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
         ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": None, "seasons": st.get("seasons", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-        await tdb["files"].insert_one(ns); await notify_new_post(c, ns, conf)
+        await tdb["files"].insert_one(ns); invalidate_home_cache(); await notify_new_post(c, ns, conf)
         await mo.edit_text(f"✅ **সিরিজ ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
     except Exception as e:
         traceback.print_exc()
@@ -1475,6 +1585,7 @@ async def delsr_cb(c, q):
         await tdb["files"].delete_one({"_id": f_id})
         await tdb["posters"].delete_one({"_id": f_id})
         poster_cache_del(f_id)
+        invalidate_home_cache()
         await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
     await send_del_page(q, {"type": "series"}, "delsr", int(pg), edit=True)
 
@@ -1520,42 +1631,44 @@ async def show_edit_series_panel(mq, f_id, edit=True):
 async def edsr_cb(c, q):
     _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
-    if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); return await show_edit_series_panel(q, f_id, edit=True)
-    elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); return await show_edit_series_panel(q, f_id, edit=True)
-    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
-    elif act == "name": admin_steps[q.from_user.id] = {"step": "edsr_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন:")
-    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক দিন:")
+    if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
+    elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
+    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    elif act == "name": admin_steps[q.from_user.id] = {"step": "edsr_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক দিন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
     elif act == "cat":
         cats = await get_categories_list()
         if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
-        return await q.message.edit_text("📂 Category সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📂 {cn}", callback_data=f"edsrcat_{f_id}_{i}")] for i, cn in enumerate(cats)]))
+        btns = [[InlineKeyboardButton(f"📂 {cn}", callback_data=f"edsrcat_{f_id}_{i}")] for i, cn in enumerate(cats)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]
+        return await q.message.edit_text("📂 Category সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
     elif act == "lang":
         ls = await get_languages_list()
         if not ls: return await q.answer("❌ আগে /setlanguage দিয়ে ভাষা অ্যাড করুন!", show_alert=True)
-        return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edsrlang_{f_id}_{i}")] for i, ln in enumerate(ls)]))
-    elif act == "addssn": admin_steps[q.from_user.id] = {"step": "edsr_addssn_no", "f_id": f_id}; return await q.message.edit_text("📺 নতুন Season নম্বর লিখুন:")
+        btns = [[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edsrlang_{f_id}_{i}")] for i, ln in enumerate(ls)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]
+        return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
+    elif act == "addssn": admin_steps[q.from_user.id] = {"step": "edsr_addssn_no", "f_id": f_id}; return await q.message.edit_text("📺 নতুন Season নম্বর লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
     elif act == "mng":
         ssns = doc.get("seasons", [])
         if not ssns: return await q.answer("❌ কোনো সিজন নেই!", show_alert=True)
-        btns = [[InlineKeyboardButton(f"📺 Season {s['season_no']} ({len(s.get('episodes', []))} Eps)", callback_data=f"edsrs_{f_id}_{i}")] for i, s in enumerate(ssns)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]
+        btns = [[InlineKeyboardButton(f"📺 Season {clean_season_no(s['season_no'])} ({len(s.get('episodes', []))} Eps)", callback_data=f"edsrs_{f_id}_{i}")] for i, s in enumerate(ssns)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]
         return await q.message.edit_text("📚 সিজন সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex(r"^edsrcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrcat_cb(c, q):
     _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
     await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrlang_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrlang_cb(c, q):
     _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
     await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_name(c, m):
     f_id = admin_steps.pop(m.from_user.id)["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}})
+    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
     await show_edit_series_panel(m, f_id, edit=False)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & unique_msg)
@@ -1572,6 +1685,7 @@ async def handle_edsr_poster(c, m):
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        invalidate_home_cache()
         admin_steps.pop(m.from_user.id, None)
         await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
     except Exception as e:
@@ -1596,25 +1710,26 @@ async def handle_edsr_poster_url(c, m):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
         await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
+        invalidate_home_cache()
         await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addssn_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addssn(c, m):
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; sno = m.text.strip(); doc, tdb = await find_file_in_all_dbs(f_id)
+    f_id = admin_steps.pop(m.from_user.id)["f_id"]; sno = clean_season_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
-        ssns = doc.get("seasons", []); si = next((i for i, s in enumerate(ssns) if str(s["season_no"]).lower() == sno.lower()), None)
-        if si is None: ssns.append({"season_no": sno, "episodes": []}); si = len(ssns) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+        ssns = doc.get("seasons", []); si = next((i for i, s in enumerate(ssns) if clean_season_no(s["season_no"]).lower() == sno.lower()), None)
+        if si is None: ssns.append({"season_no": sno, "episodes": []}); si = len(ssns) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         await show_edit_season_panel(m, f_id, si, edit=False)
 
 async def show_edit_season_panel(mq, f_id, si, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
     if doc is None or si >= len(doc.get("seasons", [])): return
     ssn = doc["seasons"][si]
-    btns = [[InlineKeyboardButton(f"🎬 Ep {e['ep_no']} ({len(e.get('qualities', []))} Q)", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")] for ei, e in enumerate(ssn.get("episodes", []))]
+    btns = [[InlineKeyboardButton(f"🎬 Ep {clean_ep_no(e['ep_no'])} ({len(e.get('qualities', []))} Q)", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")] for ei, e in enumerate(ssn.get("episodes", []))]
     btns += [[InlineKeyboardButton("➕ Add Episode", callback_data=f"edsrep_add_{f_id}_{si}")], [InlineKeyboardButton("🗑 Delete Season", callback_data=f"edsrep_delssn_{f_id}_{si}")], [InlineKeyboardButton("⬅️ Back", callback_data=f"edsr_mng_{f_id}")]]
-    txt = f"📺 **{doc['title']} — Season {ssn['season_no']}**"
+    txt = f"📺 **{doc['title']} — Season {clean_season_no(ssn['season_no'])}**"
     if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
@@ -1625,20 +1740,20 @@ async def edsrs_cb(c, q): _, f_id, si = q.data.split("_"); await show_edit_seaso
 async def edsrep_cb(c, q):
     ps = q.data.split("_"); act = ps[1]
     if act == "view": return await show_edit_ep_panel(q, ps[2], int(ps[3]), int(ps[4]), edit=True)
-    elif act == "add": admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": ps[2], "s_idx": int(ps[3])}; return await q.message.edit_text("🎬 নতুন Episode নম্বর লিখুন:")
+    elif act == "add": admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": ps[2], "s_idx": int(ps[3])}; return await q.message.edit_text("🎬 নতুন Episode নম্বর লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{ps[2]}_{ps[3]}")]]))
     elif act == "delssn":
         f_id, si = ps[2], int(ps[3]); doc, tdb = await find_file_in_all_dbs(f_id)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns): ssns.pop(si)
-            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "delep":
         f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); doc, tdb = await find_file_in_all_dbs(f_id)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]): ssns[si]["episodes"].pop(ei)
-            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         return await show_edit_season_panel(q, f_id, si, edit=True)
     elif act == "addq":
         f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); admin_steps[q.from_user.id] = {"step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "e_idx": ei}
@@ -1652,7 +1767,7 @@ async def edsrep_cb(c, q):
 async def show_edit_ep_panel(mq, f_id, si, ei, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id); ssn = doc["seasons"][si]; ep = ssn["episodes"][ei]
     q_str = ", ".join([x["name"] for x in ep.get("qualities", [])]) or "None"
-    txt = f"🎬 **{doc['title']}** | S{ssn['season_no']} E{ep['ep_no']}\n🎞 Qualities: `{q_str}`"
+    txt = f"🎬 **{doc['title']}** | S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])}\n🎞 Qualities: `{q_str}`"
     btns = [[InlineKeyboardButton("➕ Add Quality", callback_data=f"edsrep_addq_{f_id}_{si}_{ei}"), InlineKeyboardButton("🗑 Delete Quality", callback_data=f"edsrep_delqmenu_{f_id}_{si}_{ei}")],
             [InlineKeyboardButton("🗑 Delete Episode", callback_data=f"edsrep_delep_{f_id}_{si}_{ei}")], [InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{f_id}_{si}")]]
     if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
@@ -1660,10 +1775,10 @@ async def show_edit_ep_panel(mq, f_id, si, ei, edit=True):
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addep_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addep(c, m):
-    st = admin_steps.pop(m.from_user.id); f_id, si, eno = st["f_id"], st["s_idx"], m.text.strip(); doc, tdb = await find_file_in_all_dbs(f_id)
+    st = admin_steps.pop(m.from_user.id); f_id, si, eno = st["f_id"], st["s_idx"], clean_ep_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
-        ssns = doc.get("seasons", []); eps = ssns[si]["episodes"]; ei = next((i for i, e in enumerate(eps) if str(e["ep_no"]).lower() == eno.lower()), None)
-        if ei is None: eps.append({"ep_no": eno, "qualities": []}); ei = len(eps) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+        ssns = doc.get("seasons", []); eps = ssns[si]["episodes"]; ei = next((i for i, e in enumerate(eps) if clean_ep_no(e["ep_no"]).lower() == eno.lower()), None)
+        if ei is None: eps.append({"ep_no": eno, "qualities": []}); ei = len(eps) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         await show_edit_ep_panel(m, f_id, si, ei, edit=False)
 
 @app.on_callback_query(filters.regex(r"^edsrqdel_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1672,24 +1787,29 @@ async def edsrqdel_cb(c, q):
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); qs = ssns[si]["episodes"][ei]["qualities"]
         if 0 <= qi < len(qs): qs.pop(qi)
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+        await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
     await show_edit_ep_panel(q, f_id, si, ei, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrqadd_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrqadd_cb(c, q):
     v = q.data.split("_", 1)[1]; st = admin_steps.get(q.from_user.id)
     if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
-    if v == "custom": st["step"] = "edsr_custom_qname"; return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:")
-    st["current_quality"] = v; st["step"] = "edsr_addq_file"; await q.message.edit_text(f"📤 এবার **{v}** ফাইল পাঠান:")
+    f_id, si, ei = st["f_id"], st["s_idx"], st["e_idx"]
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edsrep_addq_{f_id}_{si}_{ei}")]])
+    if v == "custom": st["step"] = "edsr_custom_qname"; return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=back_kb)
+    st["current_quality"] = v; st["step"] = "edsr_addq_file"; await q.message.edit_text(f"📤 এবার **{v}** ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_custom_qname") & ~filters.regex(r"^/") & unique_msg)
-async def handle_edsr_cq(c, m): admin_steps[m.from_user.id]["current_quality"] = m.text.strip(); admin_steps[m.from_user.id]["step"] = "edsr_addq_file"; await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:")
+async def handle_edsr_cq(c, m):
+    st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "edsr_addq_file"
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edsrep_addq_{st['f_id']}_{st['s_idx']}_{st['e_idx']}")]])
+    await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addq_file") & unique_msg)
 async def handle_edsr_qf(c, m):
     st = admin_steps.get(m.from_user.id); f_id, si, ei, qn = st["f_id"], st["s_idx"], st["e_idx"], st["current_quality"]
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}})
+    if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
     st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
 
 # ==========================================
@@ -1731,7 +1851,7 @@ async def handle_admin_file(c, m):
     if st_data.get("poster_b64"):
         thumb_url = await save_poster_to_mongo(tdb, sid, st_data["poster_b64"], st_data.get("poster_mime", "image/jpeg"), live_url)
     nf = {"_id": sid, "title": st_data["title"], "category": "All", "is_premium": st_data.get("is_premium", False), "file_id": fid, "thumb_url": thumb_url, "tg_thumb_id": st_data.get("tg_thumb_id"), "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-    await tdb["files"].insert_one(nf); del admin_steps[m.from_user.id]; await notify_new_post(c, nf, conf); await msg.edit_text(f"✅ ফাইল ও পোস্টার MongoDB-তে অ্যাড হয়েছে! ID: `{sid}`")
+    await tdb["files"].insert_one(nf); del admin_steps[m.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, conf); await msg.edit_text(f"✅ ফাইল ও পোস্টার MongoDB-তে অ্যাড হয়েছে! ID: `{sid}`")
 
 LEGACY_EXAMPLES = {
     "vidtitel": "`/vidtitel নতুন বাংলা নাটক`", "delfile": "`/delfile AbCd1234`",
@@ -1758,6 +1878,7 @@ async def cmd_legacy_router(c, m):
                 if (await d["files"].delete_one({"_id": parts[1]})).deleted_count > 0:
                     await d["posters"].delete_one({"_id": parts[1]})
                     poster_cache_del(parts[1])
+                    invalidate_home_cache()
                     return await m.reply("✅ ফাইল ডিলিট হয়েছে!")
             return await m.reply("❌ ফাইল পাওয়া যায়নি!")
         if cmd == "delall":
@@ -1765,10 +1886,11 @@ async def cmd_legacy_router(c, m):
                 await d["files"].delete_many({})
                 await d["posters"].delete_many({})
             POSTER_CACHE.clear()
+            invalidate_home_cache()
             return await m.reply("✅ সব ফাইল ডিলিট হয়েছে!")
         if cmd == "mongo":
             if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['mongo']}")
-            await AsyncIOMotorClient(parts[1], serverSelectionTimeoutMS=3000).server_info(); await mongos_col.insert_one({"uri": parts[1]}); EXTRA_URI_CACHE["uris"] = None; return await m.reply("✅ MongoDB যুক্ত হয়েছে!")
+            await AsyncIOMotorClient(parts[1], serverSelectionTimeoutMS=3000).server_info(); await mongos_col.insert_one({"uri": parts[1]}); EXTRA_URI_CACHE["uris"] = None; invalidate_home_cache(); return await m.reply("✅ MongoDB যুক্ত হয়েছে!")
         if cmd == "delmongo": dbs = await mongos_col.find().to_list(None); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {d['uri'][:25]}", callback_data=f"delmongo_{d['_id']}")] for d in dbs])) if dbs else await m.reply("❌ কোনো এক্সট্রা MongoDB নেই!")
         if cmd == "mongostats":
             dbs = await get_extra_dbs_async(); txt = "📊 **MongoDB Stats:**\n\n"
@@ -1790,7 +1912,7 @@ async def cmd_legacy_router(c, m):
         if cmd == "deltask": ts = await tasks_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {t['title']}", callback_data=f"deltask_{t['_id']}")] for t in ts])) if ts else await m.reply("❌ কোনো টাস্ক নেই!")
         if cmd == "addlink":
             if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addlink']}")
-            await links_col.insert_one({"link": parts[1]}); return await m.reply("✅ Ad Link Added!")
+            await links_col.insert_one({"link": parts[1]}); invalidate_home_cache(); return await m.reply("✅ Ad Link Added!")
         if cmd == "delink": ls = await links_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {l['link'][:20]}", callback_data=f"dellink_{l['_id']}")] for l in ls])) if ls else await m.reply("❌ কোনো লিংক নেই!")
         if cmd == "addcnl":
             if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addcnl']}")
@@ -1801,20 +1923,32 @@ async def cmd_legacy_router(c, m):
             await channels_col.insert_one({"type": "must_join", "chat_id": int(parts[1]), "link": parts[2]}); return await m.reply("✅ Must Join Added!")
         if cmd == "delvrcnl": chs = await channels_col.find({"type": "must_join"}).to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {ch['chat_id']}", callback_data=f"delch_{ch['_id']}")] for ch in chs])) if chs else await m.reply("❌ কোনো Must Join চ্যানেল নেই!")
         if cmd == "logo":
-            if m.reply_to_message and m.reply_to_message.photo: await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": m.reply_to_message.photo.file_id}}); return await m.reply("✅ Logo Set!")
-            return await m.reply("❌ **নিয়ম:** কোনো ছবিতে রিপ্লাই করে `/logo` লিখুন।")
+            if m.reply_to_message and (m.reply_to_message.photo or m.reply_to_message.document):
+                enc, mime, tg_fid, err = await extract_image_from_message(c, m.reply_to_message)
+                logo_fid = tg_fid or (m.reply_to_message.photo.file_id if m.reply_to_message.photo else m.reply_to_message.document.file_id)
+                await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": logo_fid}}, upsert=True)
+                if enc:
+                    await save_poster_to_mongo(db, "site_logo", enc, mime)
+                invalidate_home_cache()
+                return await m.reply("✅ লোগো সেট হয়েছে! (বট স্টার্ট ও মিনি অ্যাপ ওয়েলকামে দেখাবে)")
+            if arg and arg.startswith("http"):
+                await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": arg}}, upsert=True)
+                poster_cache_del("site_logo")
+                invalidate_home_cache()
+                return await m.reply("✅ লোগো লিংক সেট হয়েছে!")
+            return await m.reply("❌ **নিয়ম:** কোনো ছবিতে রিপ্লাই করে `/logo` লিখুন অথবা `/logo https://...` দিন।")
         if cmd == "autvid":
             if m.reply_to_message: await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_msg_id": m.reply_to_message.id, "autovid_chat_id": m.chat.id}}); return await m.reply("✅ Auto Video Set!")
             return await m.reply("❌ **নিয়ম:** কোনো ভিডিওতে রিপ্লাই করে `/autvid` লিখুন।")
         if cmd == "usd":
             if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['usd']}")
-            await pkgs_col.insert_one({"type": "usd", "coins": int(parts[1]), "details": f"{parts[1]} Coins={parts[2]} USD"}); return await m.reply("✅ USD Package Added!")
+            await pkgs_col.insert_one({"type": "usd", "coins": int(parts[1]), "details": f"{parts[1]} Coins={parts[2]} USD"}); invalidate_home_cache(); return await m.reply("✅ USD Package Added!")
         if cmd == "bdt":
             if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['bdt']}")
-            await pkgs_col.insert_one({"type": "bkash", "coins": int(parts[1]), "details": f"{parts[1]} Coins={parts[2]} BDT"}); return await m.reply("✅ BDT Package Added!")
+            await pkgs_col.insert_one({"type": "bkash", "coins": int(parts[1]), "details": f"{parts[1]} Coins={parts[2]} BDT"}); invalidate_home_cache(); return await m.reply("✅ BDT Package Added!")
         if cmd == "addcred":
             if len(parts) < 5: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addcred']}")
-            await pkgs_col.insert_one({"type": "coin", "coins": int(parts[1]), "amount": int(parts[3]), "unit": parts[4], "details": f"{parts[1]} Coins={parts[3]} {parts[4]}"}); return await m.reply("✅ Coin Package Added!")
+            await pkgs_col.insert_one({"type": "coin", "coins": int(parts[1]), "amount": int(parts[3]), "unit": parts[4], "details": f"{parts[1]} Coins={parts[3]} {parts[4]}"}); invalidate_home_cache(); return await m.reply("✅ Coin Package Added!")
         if cmd == "delcred": ps = await pkgs_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {p['details']}", callback_data=f"delpkg_{p['_id']}")] for p in ps])) if ps else await m.reply("❌ কোনো প্যাকেজ নেই!")
         if cmd == "addrdiem":
             if len(parts) < 4: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addrdiem']}")
@@ -1850,6 +1984,7 @@ async def legacy_del_cb(c, q):
     col_map = {"delttl": titles_col, "delpromo": promotions_col, "delmongo": mongos_col, "delautoch": auto_channels_col, "deltask": tasks_col, "dellink": links_col, "delch": channels_col, "delpkg": pkgs_col}
     await col_map[pfx].delete_one({"_id": ObjectId(oid)})
     if pfx == "delmongo": EXTRA_URI_CACHE["uris"] = None
+    invalidate_home_cache()
     await q.message.edit_text("✅ ডিলিট করা হয়েছে!")
 
 @app.on_message(filters.command(["auto", "auto2", "promot"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -1865,7 +2000,7 @@ async def cmd_auto_promo(c, m):
         await get_db(); conf = await get_config(); live_url = get_live_web_url(conf)
         pid = "promo_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         purl = await save_poster_to_mongo(db, pid, enc, mime, live_url)
-        await promotions_col.insert_one({"title": t, "link": l, "image": purl}); return await m.reply(f"✅ প্রোমোট ও পোস্টার MongoDB-তে অ্যাড হয়েছে: **{t}**")
+        await promotions_col.insert_one({"title": t, "link": l, "image": purl}); invalidate_home_cache(); return await m.reply(f"✅ প্রোমোট ও পোস্টার MongoDB-তে অ্যাড হয়েছে: **{t}**")
     if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document): return await m.reply("❌ ভিডিওতে রিপ্লাই করুন।")
     fid = (m.reply_to_message.video or m.reply_to_message.document).file_id
     if cmd == "auto":
@@ -1887,10 +2022,12 @@ async def legacy_auto_cb(c, q):
         return await q.message.edit_text(f"✅ **{td['title']}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="auto_prem")], [InlineKeyboardButton("👤 Regular", callback_data="auto_reg")]]))
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
-    await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
+    await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
+
+Part 2 (Part 1-এর ঠিক নিচেই এখান থেকে পেস্ট করুন)
 
 # ==========================================
-# 10. FLASK WEB API & MONGODB POSTER HOSTING + TUTORIAL VIDEO + SHORTENER
+# 10. FLASK WEB API & MONGODB POSTER HOSTING + LOGO + WELCOME AUDIO + TUTORIAL + SHORTENER
 # ==========================================
 @web.route('/poster/<poster_id>')
 def serve_poster_from_mongo(poster_id):
@@ -1954,6 +2091,69 @@ def serve_poster_from_mongo(poster_id):
         except: pass
 
     return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+
+@web.route('/site_logo')
+def serve_site_logo():
+    if "site_logo" in POSTER_CACHE:
+        raw, mime = POSTER_CACHE["site_logo"]
+        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=3600"})
+    try:
+        pdoc = sync_db["posters"].find_one({"_id": "site_logo"})
+        if pdoc and pdoc.get("data"):
+            raw, mime = decode_b64_to_bytes(pdoc["data"])
+            final_mime = pdoc.get("mime", mime)
+            if raw:
+                poster_cache_put("site_logo", raw, final_mime)
+                return Response(raw, mimetype=final_mime, headers={"Cache-Control": "public, max-age=3600"})
+    except: pass
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    logo = conf.get("start_logo")
+    if logo:
+        if str(logo).startswith("http"):
+            return redirect(logo)
+        if BOT_TOKEN:
+            try:
+                raw = _bot_api_download_sync(logo)
+                if raw:
+                    poster_cache_put("site_logo", raw, "image/jpeg")
+                    try:
+                        sync_db["posters"].update_one({"_id": "site_logo"}, {"$set": {"data": base64.b64encode(raw).decode("utf-8"), "mime": "image/jpeg"}}, upsert=True)
+                    except: pass
+                    return Response(raw, mimetype="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+            except: pass
+    sn = (conf.get("site_name") or "FB").strip()
+    initials = "".join([w[0].upper() for w in sn.split()[:2]]) or "FB"
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ff4d4d"/><stop offset="50%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs>
+  <rect width="200" height="200" rx="46" fill="url(#lg)"/>
+  <text x="100" y="118" font-family="sans-serif" font-weight="800" font-size="72" fill="#fff" text-anchor="middle">{initials}</text>
+</svg>"""
+    return Response(svg.encode("utf-8"), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=600"})
+
+@web.route('/api/welcome_audio')
+def serve_welcome_audio():
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    sn = (conf.get("site_name") or "Moviee Link").strip()
+    clean_name = re.sub(r"\bbot\b", "", sn, flags=re.IGNORECASE).strip() or sn
+    phrase = f"Welcome to our {clean_name} Bot"
+    h = hashlib.md5(phrase.encode("utf-8")).hexdigest()[:12]
+    mp3_path = f"/tmp/welcome_{h}.mp3"
+    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 300:
+        try:
+            r = requests.get(
+                "https://translate.google.com/translate_tts",
+                params={"ie": "UTF-8", "q": phrase, "tl": "en", "client": "tw-ob"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=8
+            )
+            if r.status_code == 200 and len(r.content) > 300:
+                with open(mp3_path, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            print("Welcome TTS error:", e, flush=True)
+    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 300:
+        return send_file(mp3_path, mimetype="audio/mpeg")
+    return "", 204
 
 @web.route('/tutorial_video')
 def serve_tutorial_video():
@@ -2036,7 +2236,8 @@ body{margin:0;min-height:100vh;background:linear-gradient(135deg,#0f172a,#1e1b4b
 .badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-weight:700;font-size:12px;padding:4px 12px;border-radius:20px;margin-bottom:10px}
 h2{margin:0 0 8px 0;font-size:21px}
 p{margin:0 0 18px 0;font-size:13.5px;color:#64748b}
-.btn{width:100%;border:none;padding:13px 16px;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn{width:100%;border:none;padding:13px 16px;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px;transition:transform .2s}
+.btn:active{transform:scale(.95)}
 .btn-monetag{background:linear-gradient(90deg,#6c5ce7,#4f46e5);color:#fff}
 .btn-link{background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff}
 .btn-go{background:linear-gradient(90deg,#10b981,#059669);color:#fff;display:none;text-decoration:none}
@@ -2143,7 +2344,7 @@ def api_rates():
 def get_ad_api(user_id, file_id):
     config = sync_db["config"].find_one({"_id": "settings"}) or {}; user = sync_db["users"].find_one({"_id": user_id}) or {}; fd = None
     for d in get_extra_dbs_sync():
-        fd = d["files"].find_one({"_id": file_id})
+        fd = d["files"].find_one({"_id": file_id}, {"is_premium": 1})
         if fd: break
     if user.get("premium_until") and user["premium_until"] > datetime.now():
         return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
@@ -2255,35 +2456,39 @@ def request_movie():
 def handle_actions():
     d = request.json; act, uid, fid = d.get('action'), d.get('uid'), d.get('file_id')
     if act == "history": sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"history": fid}}, upsert=True)
+    elif act == "clear_history": sync_db["users"].update_one({"_id": uid}, {"$set": {"history": []}}, upsert=True); return jsonify({"status": "success"})
     elif act == "favorite":
         u = sync_db["users"].find_one({"_id": uid}) or {}
         if fid in u.get("favorites", []): sync_db["users"].update_one({"_id": uid}, {"$pull": {"favorites": fid}}); return jsonify({"status": "success", "saved": False})
         sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"favorites": fid}}, upsert=True); return jsonify({"status": "success", "saved": True})
     elif act == "like":
         for dbx in get_extra_dbs_sync():
-            if dbx["files"].update_one({"_id": fid}, {"$addToSet": {"likes": uid}}).modified_count > 0: break
+            if dbx["files"].update_one({"_id": fid}, {"$addToSet": {"likes": uid}}).modified_count > 0: invalidate_home_cache(); break
     elif act == "rate":
         st = max(1, min(5, int(d.get("stars", 5))))
         for dbx in get_extra_dbs_sync():
             doc = dbx["files"].find_one({"_id": fid})
             if doc:
                 rs = [r for r in doc.get("ratings", []) if r.get("uid") != uid] + [{"uid": uid, "stars": st}]
-                dbx["files"].update_one({"_id": fid}, {"$set": {"ratings": rs}}); return jsonify({"status": "success"})
+                dbx["files"].update_one({"_id": fid}, {"$set": {"ratings": rs}}); invalidate_home_cache(); return jsonify({"status": "success"})
     elif act == "comment":
         cmt = {"uid": uid, "text": d.get("text"), "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
         for dbx in get_extra_dbs_sync():
-            if dbx["files"].update_one({"_id": fid}, {"$push": {"comments": cmt}}).modified_count > 0: break
+            if dbx["files"].update_one({"_id": fid}, {"$push": {"comments": cmt}}).modified_count > 0: invalidate_home_cache(); break
         return jsonify({"status": "success", "comment": cmt})
     return jsonify({"status": "success"})
 
-@web.route('/api/user/<int:user_id>')
-def get_user(user_id):
+def build_user_state_dict(user_id):
     u = sync_db["users"].find_one({"_id": user_id}); is_p, exp = False, None
     if u and u.get("premium_until") and u["premium_until"] > datetime.now(): is_p, exp = True, get_expiry_str(u["premium_until"])
-    return jsonify({"balance": u.get("balance", 0) if u else 0, "is_premium": is_p, "expiry": exp, "history": u.get("history", []) if u else [], "favorites": u.get("favorites", []) if u else [], "unlocked_files": u.get("unlocked_files", {}) if u else {}})
+    return {"balance": u.get("balance", 0) if u else 0, "is_premium": is_p, "expiry": exp, "history": u.get("history", []) if u else [], "favorites": u.get("favorites", []) if u else [], "unlocked_files": u.get("unlocked_files", {}) if u else {}}
+
+@web.route('/api/user/<int:user_id>')
+def get_user(user_id):
+    return jsonify(build_user_state_dict(user_id))
 
 # ==========================================
-# 11. HTML MINI APP UI
+# 11. HTML MINI APP UI (ANIMATED + FAST LOAD + PROFILE + MOVIE/SERIES + LOGO VOICE)
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html>
@@ -2291,86 +2496,121 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>{{ site_name }}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-{% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" async></script>{% endfor %}
+{% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" defer></script>{% endfor %}
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin:0;padding-bottom:90px;min-height:100vh}
+body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',system-ui,-apple-system,sans-serif;margin:0;padding-bottom:92px;min-height:100vh}
+@keyframes btnShine{0%{left:-120%}100%{left:140%}}
+@keyframes fadeInSlide{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes popIn{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
+@keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(108,92,231,.45)}50%{box-shadow:0 0 0 8px rgba(108,92,231,0)}}
+@keyframes floatLogo{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-4px) scale(1.03)}}
+@keyframes spinRing{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes dotBlink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
+@keyframes navPop{0%{transform:scale(1)}50%{transform:scale(1.18)}100%{transform:scale(1.05)}}
+
+button,.cat-pill,.lang-pill,.nav-i,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c,.r-search,.float-search{
+  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .2s ease,opacity .2s ease,background .25s ease;
+  position:relative;overflow:hidden;
+}
+button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active,.r-search:active,.float-search:active{
+  transform:scale(.93)!important;
+}
+.btn-p::after,.q-btn::after,.p-dl::after,.unlock-opt::after,.watch-pill::after,.tut-btn::after,.cat-pill.active::after{
+  content:"";position:absolute;top:0;left:-120%;width:60%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.32),transparent);
+  transform:skewX(-20deg);animation:btnShine 3.2s infinite ease-in-out;pointer-events:none;
+}
+
 .top-header{position:sticky;top:0;z-index:90;background:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 1px 6px rgba(0,0,0,.05)}
-.brand{display:flex;align-items:center;gap:6px;font-size:20px;font-weight:700}.brand-badge{background:#d90429;color:#fff;font-size:13px;padding:2px 8px;border-radius:6px}
-.hdr-r{display:flex;align-items:center;gap:8px}.coin-pill{background:#fff3cd;color:#856404;border:1px solid #ffeeba;padding:4px 10px;border-radius:16px;font-size:12.5px;font-weight:700}
+.brand{display:flex;align-items:center;gap:7px;font-size:19px;font-weight:700}
+.hdr-logo{width:28px;height:28px;border-radius:8px;object-fit:cover;box-shadow:0 2px 6px rgba(0,0,0,.15)}
+.brand-badge{background:linear-gradient(90deg,#d90429,#ef233c);color:#fff;font-size:12.5px;padding:2px 8px;border-radius:6px}
+.hdr-r{display:flex;align-items:center;gap:8px}.coin-pill{background:#fff3cd;color:#856404;border:1px solid #ffeeba;padding:4px 10px;border-radius:16px;font-size:12.5px;font-weight:700;animation:pulseGlow 3s infinite}
 .r-search{width:36px;height:36px;border-radius:50%;padding:2.5px;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);display:flex;align-items:center;justify-content:center;cursor:pointer}
 .r-search-in{width:100%;height:100%;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px}
 .live-bar{background:linear-gradient(90deg,#4b39ef,#7c3aed);color:#fff;display:flex;align-items:center;height:34px;overflow:hidden}
 .live-pill{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:700;background:rgba(0,0,0,.22);height:100%;white-space:nowrap}
-.live-dot{width:8px;height:8px;background:#ff3b30;border-radius:50%}.marquee-wrap{flex:1;overflow:hidden;white-space:nowrap}
+.live-dot{width:8px;height:8px;background:#ff3b30;border-radius:50%;animation:dotBlink 1.2s infinite}.marquee-wrap{flex:1;overflow:hidden;white-space:nowrap}
 .marquee-txt{display:inline-block;padding-left:100%;font-size:12.5px;animation:scr 18s linear infinite}@keyframes scr{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
-.search-box-wrap{display:none;padding:10px 14px;background:#fff;border-bottom:1px solid #eee}.search-box-wrap.open{display:block}
+.search-box-wrap{display:none;padding:10px 14px;background:#fff;border-bottom:1px solid #eee}.search-box-wrap.open{display:block;animation:fadeInSlide .22s ease}
 .s-input{width:100%;padding:10px 14px;border-radius:12px;border:1.5px solid #e2e8f0;background:#f8fafc;font-size:14px;outline:none;color:#111}
 .cat-scroll{display:flex;gap:8px;overflow-x:auto;padding:10px 14px 4px 14px;scrollbar-width:none}.cat-scroll::-webkit-scrollbar{display:none}
 .cat-pill{background:#fff;color:#333;padding:7px 15px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.06);border:1px solid #ececec}
-.cat-pill.active{background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff;border-color:transparent}.cat-pill.adult{background:#5e0b2b;color:#fff;border-color:transparent}
+.cat-pill.active{background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff;border-color:transparent;box-shadow:0 4px 12px rgba(221,36,118,.28)}.cat-pill.adult{background:#5e0b2b;color:#fff;border-color:transparent}
 .lang-pill{background:#eef2ff;color:#4338ca;padding:4px 11px;border-radius:14px;font-size:11.5px;font-weight:600;white-space:nowrap;cursor:pointer}.lang-pill.active{background:#4338ca;color:#fff}
-.page{display:none}.page.active{display:block}
+.page{display:none}.page.active{display:block;animation:fadeInSlide .25s ease}
 .sec-head{padding:10px 14px 6px 14px;font-size:15.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
 .pin-scroll{display:flex;gap:10px;overflow-x:auto;padding:0 14px 10px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
-.pin-card{min-width:168px;max-width:168px;cursor:pointer}.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,.08);background:#141624}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block}
+.pin-card{min-width:168px;max-width:168px;cursor:pointer;transition:transform .2s ease}.pin-card:active{transform:scale(.95)}
+.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 3px 10px rgba(0,0,0,.08);background:#141624}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block}
 .pin-tag{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;padding:2px 7px;border-radius:10px}.pin-t{font-size:12.5px;font-weight:600;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid #7c6cf6;box-shadow:0 4px 14px rgba(108,92,231,.08);cursor:pointer}
+.feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid #7c6cf6;box-shadow:0 4px 14px rgba(108,92,231,.08);cursor:pointer;transition:transform .22s ease,box-shadow .22s ease;animation:fadeInSlide .28s ease}
+.feed-card:active{transform:scale(.97)}
 .feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#141624}.feed-img-w img{width:100%;height:100%;object-fit:cover;display:block}
 .b-new{position:absolute;top:10px;left:10px;background:#2979ff;color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px}.b-type{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.75);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px}
 .feed-body{padding:10px 12px 12px 12px}.feed-title{font-size:15px;font-weight:700;margin-bottom:3px}.feed-meta{font-size:12px;color:#777;display:flex;justify-content:space-between}
 .car-wrap{display:flex;gap:12px;overflow-x:auto;padding:4px 0 12px 0;scrollbar-width:none}.car-wrap::-webkit-scrollbar{display:none}
 .p-slide{min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.p-slide-b{padding:10px 12px}
-.watch-pill{background:#e63946;color:#fff;border:none;padding:6px 16px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
+.watch-pill{background:linear-gradient(90deg,#e63946,#d90429);color:#fff;border:none;padding:6px 16px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
 .det-hdr{background:#fff;padding:12px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #eee;position:sticky;top:0;z-index:95}.back-btn{width:34px;height:34px;border-radius:50%;background:#f1f3f5;border:none;font-size:18px;cursor:pointer}
 .det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#141624}.det-img-w img{width:100%;height:100%;object-fit:cover;display:block}.hd-b{position:absolute;top:12px;left:12px;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
 .det-body{background:#fff;padding:14px 16px}.det-title{font-size:19px;font-weight:700;margin:0 0 8px 0}.d-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.d-tag{background:#f1f5f9;color:#475569;padding:3px 10px;border-radius:12px;font-size:11.5px;font-weight:600}
 .stats-r{display:flex;justify-content:space-around;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9;margin-bottom:12px}.stat-i{text-align:center;font-size:12px;color:#64748b}.stat-i b{display:block;font-size:15px;color:#111}
 .shr-c{width:38px;height:38px;border-radius:50%;background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;font-size:16px;cursor:pointer}.tip-ban{background:#fff8eb;border:1px solid #fde68a;color:#92400e;padding:9px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:10px}
-.tut-btn{display:block;margin:0 auto 12px auto;background:#1d4ed8;color:#fff;border:none;padding:8px 18px;border-radius:22px;font-size:13px;font-weight:600;cursor:pointer}
+.tut-btn{display:block;margin:0 auto 12px auto;background:linear-gradient(90deg,#1d4ed8,#4f46e5);color:#fff;border:none;padding:9px 20px;border-radius:22px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(29,78,216,.25)}
 .tut-box{display:none;margin:0 auto 14px auto;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.2)}
 .tut-box video{width:100%;max-height:240px;display:block;background:#000}
 .act-r{display:flex;gap:10px;margin-bottom:14px}
-.p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-dl{flex:1.2;background:#0f172a;border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}
-.sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff;border:none;padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer}
-.s-tab{background:#fff;border:1px solid #cbd5e1;color:#334155;padding:6px 12px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer}.s-tab.active{background:#111;color:#fff;border-color:#111}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px}
+.p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-dl{flex:1.2;background:linear-gradient(90deg,#0f172a,#1e293b);border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(15,23,42,.22)}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}
+.sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff;border:none;padding:9px 14px;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 10px rgba(79,70,229,.25)}
+.s-tab{background:#fff;border:1px solid #cbd5e1;color:#334155;padding:7px 13px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}.s-tab.active{background:linear-gradient(90deg,#111827,#334155);color:#fff;border-color:#111;box-shadow:0 3px 10px rgba(0,0,0,.18)}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px;animation:fadeInSlide .2s ease}
 .rate-c{background:#fffbeb;border:1px solid #fde68a;border-radius:14px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-size:13px;font-weight:600}.star-b{font-size:20px;color:#cbd5e1;background:none;border:none;cursor:pointer;padding:0 2px}.star-b.lit{color:#f59e0b}
 .cmt-sec{background:#fff;margin-top:10px;padding:14px 16px 80px 16px}.cmt-bar{position:fixed;bottom:0;left:0;width:100%;background:#fff;padding:10px 14px;border-top:1px solid #eee;display:none;gap:10px;z-index:120}.cmt-bar input{flex:1;background:#f1f5f9;border:none;border-radius:22px;padding:10px 16px;outline:none;font-size:14px}.cmt-bar button{width:40px;height:40px;border-radius:50%;background:#111;color:#fff;border:none;font-size:16px;cursor:pointer}
-.card-box{background:#fff;border-radius:16px;padding:16px;margin:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.05);border:1px solid #eee}.btn-p{width:100%;background:linear-gradient(90deg,#6c5ce7,#4f46e5);color:#fff;border:none;padding:11px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer}
+.card-box{background:#fff;border-radius:16px;padding:16px;margin:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.05);border:1px solid #eee;animation:fadeInSlide .25s ease}.btn-p{width:100%;background:linear-gradient(90deg,#6c5ce7,#4f46e5);color:#fff;border:none;padding:11px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;box-shadow:0 4px 12px rgba(79,70,229,.22)}
 .tools-hero{text-align:center;padding:12px 14px 4px 14px}.tools-stats{display:flex;gap:10px;padding:10px 14px}.t-stat{flex:1;background:#fff;border-radius:16px;padding:12px 8px;text-align:center;box-shadow:0 3px 10px rgba(0,0,0,.05)}.t-stat b{font-size:20px;display:block}
-.t-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 14px 10px 14px}.t-card{background:#fff;border-radius:18px;padding:14px;position:relative;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.05);cursor:pointer;border:1px solid #f1f5f9}
+.t-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 14px 10px 14px}.t-card{background:#fff;border-radius:18px;padding:14px;position:relative;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.05);cursor:pointer;border:1px solid #f1f5f9;transition:transform .2s ease}
+.t-card:active{transform:scale(.95)}
 .t-blob{position:absolute;top:-16px;right:-16px;width:62px;height:62px;border-radius:50%;opacity:.55}.t-new{position:absolute;top:8px;right:8px;background:#10b981;color:#fff;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;z-index:2}
 .t-ico{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:21px;margin-bottom:10px}.t-name{font-size:13.5px;font-weight:700;color:#0f172a;margin-bottom:3px}.t-desc{font-size:11px;color:#64748b;line-height:1.35}
 .tool-lbl{display:block;text-align:left;font-size:12px;font-weight:600;color:#475569;margin:6px 0 3px 2px}.tool-res{background:#f1f5f9;border-radius:12px;padding:12px;margin-top:10px;font-size:13.5px;text-align:left;word-break:break-word}
-.float-search{position:fixed;bottom:82px;right:16px;z-index:95;width:44px;height:44px;border-radius:50%;padding:3px;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);box-shadow:0 4px 14px rgba(0,0,0,.2);cursor:pointer}
-.bottom-nav{position:fixed;bottom:10px;left:8px;right:8px;background:rgba(255,255,255,.95);backdrop-filter:blur(12px);border-radius:26px;display:flex;justify-content:space-around;padding:7px 4px;box-shadow:0 6px 24px rgba(0,0,0,.12);z-index:100;border:1px solid rgba(255,255,255,.85)}
-.nav-i{display:flex;flex-direction:column;align-items:center;font-size:10px;color:#64748b;cursor:pointer;font-weight:600;padding:2px 4px}.nav-i.active{color:#d90429}.nav-i span{font-size:18px;margin-bottom:1px}
-.av-badge{width:21px;height:21px;border-radius:50%;background:linear-gradient(135deg,#f43f5e,#8b5cf6);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700;margin-bottom:2px}
+.float-search{position:fixed;bottom:82px;right:16px;z-index:95;width:44px;height:44px;border-radius:50%;padding:3px;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);box-shadow:0 4px 14px rgba(0,0,0,.2);cursor:pointer;animation:pulseGlow 2.6s infinite}
+.bottom-nav{position:fixed;bottom:8px;left:6px;right:6px;background:rgba(255,255,255,.96);backdrop-filter:blur(12px);border-radius:24px;display:grid;grid-template-columns:repeat(7,1fr);align-items:center;padding:6px 2px;box-shadow:0 6px 24px rgba(0,0,0,.13);z-index:100;border:1px solid rgba(255,255,255,.9)}
+.nav-i{display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9.5px;color:#64748b;cursor:pointer;font-weight:600;padding:3px 1px;letter-spacing:-0.2px;white-space:nowrap}.nav-i.active{color:#d90429;font-weight:700;animation:navPop .3s ease}.nav-i span{font-size:17px;margin-bottom:1px;line-height:1.1}
+.av-badge{width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,#f43f5e,#8b5cf6);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700;margin-bottom:2px}
 .modal-ov{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.65);z-index:9999;justify-content:center;align-items:center;backdrop-filter:blur(4px);padding:14px}
-.modal-card{background:#fff;color:#111;border-radius:22px;padding:22px 18px;width:100%;max-width:390px;text-align:center;box-shadow:0 15px 40px rgba(0,0,0,.25);max-height:88vh;overflow-y:auto;position:relative}
-.age-card{background:#1c1d2b;color:#fff;border-radius:22px;padding:24px 20px;width:100%;max-width:370px;text-align:center;border:1px solid rgba(255,255,255,.1)}.age-warn{background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#fca5a5;padding:12px;border-radius:12px;font-size:13px;margin:14px 0}
-.wel-item{text-align:left;font-size:13.5px;line-height:1.55;margin-bottom:10px;color:#334155}
-.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff}
+.modal-card{background:#fff;color:#111;border-radius:22px;padding:22px 18px;width:100%;max-width:390px;text-align:center;box-shadow:0 15px 40px rgba(0,0,0,.25);max-height:88vh;overflow-y:auto;position:relative;animation:popIn .24s cubic-bezier(.34,1.56,.64,1)}
+.age-card{background:#1c1d2b;color:#fff;border-radius:22px;padding:24px 20px;width:100%;max-width:370px;text-align:center;border:1px solid rgba(255,255,255,.1);animation:popIn .24s ease}.age-warn{background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#fca5a5;padding:12px;border-radius:12px;font-size:13px;margin:14px 0}
+.wel-logo-ring{width:88px;height:88px;margin:0 auto 12px auto;border-radius:24px;padding:3px;background:linear-gradient(135deg,#ff4d4d,#7c3aed,#06b6d4);box-shadow:0 8px 24px rgba(124,58,237,.35);animation:floatLogo 2.8s ease-in-out infinite}
+.wel-logo-ring img{width:100%;height:100%;border-radius:21px;object-fit:cover;display:block;background:#141624}
+.wel-voice-btn{background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;border-radius:16px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:10px;display:inline-flex;align-items:center;gap:5px}
+.wel-item{text-align:left;font-size:13.5px;line-height:1.55;margin-bottom:8px;color:#334155}
+.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.12)}
+.clr-hist-btn{background:#fee2e2;color:#dc2626;border:none;padding:4px 11px;border-radius:12px;font-size:11.5px;font-weight:700;cursor:pointer}
 </style>
 </head>
 <body>
 
+<audio id="welcome-audio" preload="auto" playsinline style="display:none;"></audio>
+
 <div id="main-chrome">
-  <div class="top-header"><div class="brand" id="brand-title"></div><div class="hdr-r"><div class="coin-pill">🪙 <span id="hdr-bal">0</span></div><div class="r-search" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div></div></div>
+  <div class="top-header"><div class="brand"><img class="hdr-logo" src="/site_logo?v={{ logo_ver }}" alt="Logo"><span id="brand-title"></span></div><div class="hdr-r"><div class="coin-pill">🪙 <span id="hdr-bal">0</span></div><div class="r-search" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div></div></div>
   <div class="live-bar"><div class="live-pill"><span class="live-dot"></span> LIVE</div><div class="marquee-wrap"><div class="marquee-txt">{{ marquee_text }}</div></div></div>
   <div class="search-box-wrap" id="search-drawer"><input type="text" id="search-inp" class="s-input" placeholder="🔍 মুভি বা সিরিজ খুঁজুন..." onkeyup="feedLimit=15;renderFeed()"></div>
 </div>
 
-<div id="welcome-modal" class="modal-ov"><div class="modal-card">
-  <h2 style="margin:0 0 12px 0;font-size:21px;">👋 Welcome to<br>{{ site_name }} Bot!</h2>
+<div id="welcome-modal" class="modal-ov" onclick="ensureWelcomeVoice()"><div class="modal-card">
+  <div class="wel-logo-ring"><img id="wel-logo-img" src="/site_logo?v={{ logo_ver }}" alt="{{ site_name }}"></div>
+  <h2 style="margin:0 0 8px 0;font-size:20px;">👋 Welcome to<br>{{ site_name }} Bot!</h2>
+  <button class="wel-voice-btn" onclick="event.stopPropagation();playWelcomeVoice(true)">🔊 Play Welcome Voice</button>
   <div class="wel-item">🎬 এখানে আপনি হাজারো Movie, Web Series, Drama ও Anime দেখতে পারবেন।</div>
   <div class="wel-item">🔍 আপনার পছন্দের Movie খুঁজতে Search ব্যবহার করুন।</div>
   <div class="wel-item">🎵 ভিডিওতে সাউন্ড সমস্যা হলে VLC Player অথবা MX Player দিয়ে প্লে করুন।</div>
-  <div class="wel-item">📥 কোনো Movie খুঁজে না পেলে Earn ট্যাব থেকে Movie Request পাঠান।</div>
+  <div class="wel-item">📥 কোনো Movie খুঁজে না পেলে <b>Profile</b> ট্যাব থেকে Movie Request পাঠান।</div>
   <div class="wel-item">🍿 Happy Watching! ❤️</div>
-  <button class="btn-p" style="margin-top:8px;" onclick="closeWelcome()">OK ✅</button>
+  <button class="btn-p" style="margin-top:8px;" onclick="event.stopPropagation();closeWelcome()">OK ✅</button>
 </div></div>
 
 <div id="age-modal" class="modal-ov"><div class="age-card">
@@ -2395,7 +2635,7 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 
 <div id="page-home" class="page active">
   <div class="cat-scroll" id="cat-pills"></div><div class="cat-scroll" id="lang-pills" style="padding-top:2px;"></div>
-  <div id="pinned-section"><div class="sec-head">📌 Pinned for you</div><div class="pin-scroll" id="pinned-list"></div></div>
+  <div id="pinned-section"><div class="sec-head" id="home-pinned-head">📌 Pinned for you</div><div class="pin-scroll" id="pinned-list"></div></div>
   <div class="feed-wrap" id="feed-list"></div>
 </div>
 
@@ -2418,7 +2658,12 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 </div>
 <div class="cmt-bar" id="cmt-bar"><input type="text" id="cmt-inp" placeholder="Add a public comment..."><button onclick="sendComment()">➤</button></div>
 
-<div id="page-favorite" class="page"><div class="sec-head">🔖 Saved Favorites & Watch History</div><div class="feed-wrap" id="fav-list"></div></div>
+<div id="page-favorite" class="page">
+  <div class="sec-head">🔖 Saved Favorites</div>
+  <div class="feed-wrap" id="fav-list"></div>
+  <div class="sec-head"><span>🕒 Watch History</span><button class="clr-hist-btn" onclick="clearHistory()">🗑 Clear</button></div>
+  <div class="feed-wrap" id="hist-list"></div>
+</div>
 
 <div id="page-tools" class="page">
   <div class="tools-hero"><div style="font-size:20px;font-weight:700;color:#6366f1;">🛠️ Smart Tools</div><div style="font-size:12px;color:#64748b;margin-bottom:10px;">All the essential tools in one place ✨</div><input type="text" id="tool-search" class="s-input" placeholder="🔍 Search tools (যেমন: Age, BMI, QR)..." onkeyup="renderTools()"></div>
@@ -2428,7 +2673,14 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
 
 <div id="page-upcoming" class="page"><div class="sec-head">📅 Upcoming Upload Schedule</div><div class="feed-wrap" id="upcoming-list"></div><div class="sec-head">⭐ Featured Promotions</div><div class="feed-wrap" id="promo-full-list"></div></div>
 
-<div id="page-earn" class="page">
+<div id="page-profile" class="page">
+  <div class="card-box" style="text-align:center;">
+    <img id="u-pic" src="/poster/default" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #6c5ce7;">
+    <h3 id="u-name" style="margin:8px 0 2px 0;">User</h3><div style="font-size:12px;color:#64748b;">ID: <span id="u-id"></span></div>
+    <div id="u-prem-status" style="display:inline-block;margin-top:8px;padding:4px 12px;border-radius:14px;font-size:12px;font-weight:700;background:#f1f5f9;">👤 Regular Member</div>
+    <div id="u-prem-exp" style="font-size:11.5px;color:#d97706;margin-top:4px;"></div><h2 style="margin:12px 0 0 0;color:#4f46e5;">🪙 <span id="u-bal">0</span> Coins</h2>
+  </div>
+  <div class="card-box"><h4 style="margin:0 0 8px 0;">🎁 Refer & Earn ({{ ref_coin }} Coins)</h4><div style="display:flex;gap:8px;"><input type="text" id="ref-inp" class="s-input" readonly><button class="btn-p" style="width:auto;padding:0 16px;" onclick="copyRef()">Copy</button></div></div>
   <div class="card-box"><h3 style="margin:0 0 8px 0;">📥 Movie / Series Request</h3><div style="display:flex;gap:8px;"><input type="text" id="req-inp" class="s-input" placeholder="যেমন: Pushpa 2 (2024)"><button class="btn-p" style="width:auto;padding:0 16px;" onclick="sendMovieRequest()">Send</button></div></div>
   <div class="card-box"><h3 style="margin:0 0 8px 0;">🎟 Redeem Code</h3><div style="display:flex;gap:8px;"><input type="text" id="coupon-inp" class="s-input" placeholder="যেমন: VIP10 বা RND123"><button class="btn-p" style="width:auto;padding:0 16px;" onclick="redeemCoupon()">Redeem</button></div></div>
   <div id="earn-area"></div>
@@ -2443,33 +2695,26 @@ body{background:#f4f5f7;color:#111;font-family:'Hind Siliguri',sans-serif;margin
   </div>
 </div>
 
-<div id="page-setting" class="page">
-  <div class="card-box" style="text-align:center;">
-    <img id="u-pic" src="/poster/default" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #6c5ce7;">
-    <h3 id="u-name" style="margin:8px 0 2px 0;">User</h3><div style="font-size:12px;color:#64748b;">ID: <span id="u-id"></span></div>
-    <div id="u-prem-status" style="display:inline-block;margin-top:8px;padding:4px 12px;border-radius:14px;font-size:12px;font-weight:700;background:#f1f5f9;">👤 Regular Member</div>
-    <div id="u-prem-exp" style="font-size:11.5px;color:#d97706;margin-top:4px;"></div><h2 style="margin:12px 0 0 0;color:#4f46e5;">🪙 <span id="u-bal">0</span> Coins</h2>
-  </div>
-  <div class="card-box"><h4 style="margin:0 0 8px 0;">🎁 Refer & Earn ({{ ref_coin }} Coins)</h4><div style="display:flex;gap:8px;"><input type="text" id="ref-inp" class="s-input" readonly><button class="btn-p" style="width:auto;padding:0 16px;" onclick="copyRef()">Copy</button></div></div>
-</div>
-
 <div class="float-search" id="float-search-btn" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div>
 
 <div class="bottom-nav" id="bottom-nav">
-  <div class="nav-i active" onclick="switchTab('home', this)"><span>🏠</span>Home</div>
-  <div class="nav-i" onclick="switchTab('favorite', this)"><span>🔖</span>Fav</div>
-  <div class="nav-i" onclick="switchTab('tools', this)"><span>🛠️</span>Tools</div>
-  <div class="nav-i" onclick="switchTab('upcoming', this)"><span>📅</span>Upcoming</div>
-  <div class="nav-i" onclick="switchTab('earn', this)"><span>🪙</span>Earn</div>
-  <div class="nav-i" onclick="switchTab('setting', this)"><div class="av-badge" id="nav-av">U</div>Setting</div>
+  <div class="nav-i active" data-tab="home" onclick="switchTab('home', this, 'all')"><span>🏠</span>Home</div>
+  <div class="nav-i" data-tab="movie" onclick="switchTab('home', this, 'movie')"><span>🎬</span>Movie</div>
+  <div class="nav-i" data-tab="series" onclick="switchTab('home', this, 'series')"><span>📺</span>Series</div>
+  <div class="nav-i" data-tab="favorite" onclick="switchTab('favorite', this)"><span>🔖</span>Fav</div>
+  <div class="nav-i" data-tab="tools" onclick="switchTab('tools', this)"><span>🛠️</span>Tools</div>
+  <div class="nav-i" data-tab="upcoming" onclick="switchTab('upcoming', this)"><span>📅</span>Upcoming</div>
+  <div class="nav-i" data-tab="profile" onclick="switchTab('profile', this)"><div class="av-badge" id="nav-av">U</div>Profile</div>
 </div>
 
 <script>
 const tg=window.Telegram.WebApp; tg.expand();
 const botUsername="{{ bot_username }}", siteName="{{ site_name }}", recGroupLink={{ rec_group_link_json | safe }};
-const hasTutorial={{ has_tutorial_json | safe }}, tutorialVer={{ tutorial_ver_json | safe }};
+const hasTutorial={{ has_tutorial_json | safe }}, tutorialVer={{ tutorial_ver_json | safe }}, siteNameHash={{ site_name_hash_json | safe }};
 const allFiles={{ files_json | safe }}, categories={{ categories_json | safe }}, dbLanguages={{ languages_json | safe }};
 const promotions={{ promotions_json | safe }}, upcomingList={{ upcoming_json | safe }}, zoneIds={{ zone_ids_json | safe }};
+const adConfig={{ ad_config_json | safe }};
+const initialUserState={{ initial_user_json | safe }};
 
 (function(){const p=siteName.trim().split(/\s+/),e=document.getElementById('brand-title');e.innerHTML=p.length>1?`${p[0]} <span class="brand-badge">${p.slice(1).join(' ')}</span>`:`${siteName} <span class="brand-badge">Bot</span>`;})();
 
@@ -2478,12 +2723,61 @@ if(tg?.initDataUnsafe?.user){const u=tg.initDataUnsafe.user;userId=u.id;localSto
 else if(urlP.get('uid')){userId=parseInt(urlP.get('uid'));localStorage.setItem("tg_user_id",userId);}
 else if(localStorage.getItem("tg_user_id"))userId=parseInt(localStorage.getItem("tg_user_id"));
 document.getElementById('u-id').innerText=userId; document.getElementById('ref-inp').value=`https://t.me/${botUsername}?start=${userId}`;
-if(!sessionStorage.getItem('wel_seen'))document.getElementById('welcome-modal').style.display='flex';
-function closeWelcome(){sessionStorage.setItem('wel_seen','1');document.getElementById('welcome-modal').style.display='none';}
 
-let userState={balance:0,is_premium:false,expiry:null,history:[],favorites:[],unlocked_files:{}},activeCat='All',activeLang='All',pendingCat=null,curFile=null,curSeasonIdx=0,feedLimit=15,lastFilteredLen=0;
+let welcomeVoicePlayed=false;
+function getWelcomePhrase(){
+  let cn=siteName.replace(/\bbot\b/gi,'').trim()||siteName;
+  return `Welcome to our ${cn} Bot`;
+}
+function playWelcomeVoice(forceReplay){
+  if(welcomeVoicePlayed&&!forceReplay)return;
+  welcomeVoicePlayed=true;
+  const aud=document.getElementById('welcome-audio');
+  if(!aud.getAttribute('src'))aud.src=`/api/welcome_audio?v=${siteNameHash}`;
+  aud.currentTime=0;
+  aud.play().catch(()=>{
+    welcomeVoicePlayed=false;
+    try{
+      if('speechSynthesis' in window){
+        window.speechSynthesis.cancel();
+        const u=new SpeechSynthesisUtterance(getWelcomePhrase());
+        u.lang='en-US'; u.rate=0.96;
+        window.speechSynthesis.speak(u);
+        welcomeVoicePlayed=true;
+      }
+    }catch(e){}
+  });
+}
+function ensureWelcomeVoice(){
+  if(!welcomeVoicePlayed)playWelcomeVoice(false);
+}
+if(!sessionStorage.getItem('wel_seen')){
+  document.getElementById('welcome-modal').style.display='flex';
+  setTimeout(()=>playWelcomeVoice(false),250);
+  document.addEventListener('pointerdown',()=>ensureWelcomeVoice(),{once:true});
+}
+function closeWelcome(){
+  ensureWelcomeVoice();
+  sessionStorage.setItem('wel_seen','1');
+  document.getElementById('welcome-modal').style.display='none';
+}
+
+let userState=initialUserState||{balance:0,is_premium:false,expiry:null,history:[],favorites:[],unlocked_files:{}};
+let activeCat='All',activeLang='All',activeType='all',pendingCat=null,curFile=null,curSeasonIdx=0,feedLimit=15,lastFilteredLen=0;
 function openTgLink(u){try{if(tg?.initDataUnsafe?.user)tg.openTelegramLink(u);else window.location.href=u;}catch(e){window.location.href=u;}}
-async function loadUser(){try{const r=await fetch('/api/user/'+userId);userState=await r.json();document.getElementById('hdr-bal').innerText=userState.balance;document.getElementById('u-bal').innerText=userState.balance;if(userState.is_premium){document.getElementById('u-prem-status').innerHTML='💎 Premium Member';document.getElementById('u-prem-status').style.background='#ede9fe';document.getElementById('u-prem-status').style.color='#5b21b6';document.getElementById('u-prem-exp').innerText='Expiry: '+(userState.expiry||'');}renderFavs();}catch(e){}}
+function applyUserStateUI(){
+  document.getElementById('hdr-bal').innerText=userState.balance||0;
+  document.getElementById('u-bal').innerText=userState.balance||0;
+  if(userState.is_premium){
+    document.getElementById('u-prem-status').innerHTML='💎 Premium Member';
+    document.getElementById('u-prem-status').style.background='#ede9fe';
+    document.getElementById('u-prem-status').style.color='#5b21b6';
+    document.getElementById('u-prem-exp').innerText='Expiry: '+(userState.expiry||'');
+  }
+  renderFavs();
+}
+async function loadUser(){try{const r=await fetch('/api/user/'+userId);userState=await r.json();applyUserStateUI();}catch(e){}}
+applyUserStateUI();
 loadUser();
 
 function toggleSearch(){const d=document.getElementById('search-drawer');d.classList.toggle('open');if(d.classList.contains('open'))document.getElementById('search-inp').focus();}
@@ -2503,7 +2797,22 @@ function deny18(){pendingCat=null;document.getElementById('age-modal').style.dis
 function setLang(l){activeLang=l;feedLimit=15;renderFilters();renderFeed();}
 renderFilters();
 
-function renderPinned(){let ps=allFiles.filter(f=>f.pinned);if(!ps.length)ps=allFiles.slice(0,6);document.getElementById('pinned-list').innerHTML=ps.map(f=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="lazy" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">📌 Pinned</div></div><div class="pin-t">${f.title}</div></div>`).join('');}
+function matchesType(f){
+  if(activeType==='movie')return f.type!=='series';
+  if(activeType==='series')return f.type==='series';
+  return true;
+}
+
+function renderPinned(){
+  let base=allFiles.filter(f=>matchesType(f)&&(!(f.category||'').includes('18')||sessionStorage.getItem('age_18_ok')==='1'));
+  let ps=base.filter(f=>f.pinned);
+  if(!ps.length)ps=base.slice(0,6);
+  const sec=document.getElementById('pinned-section');
+  if(!ps.length){sec.style.display='none';return;}
+  sec.style.display='block';
+  document.getElementById('home-pinned-head').innerText=activeType==='movie'?'🎬 Pinned Movies':(activeType==='series'?'📺 Pinned Series':'📌 Pinned for you');
+  document.getElementById('pinned-list').innerHTML=ps.map((f,idx)=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="${idx<3?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">📌 Pinned</div></div><div class="pin-t">${f.title}</div></div>`).join('');
+}
 renderPinned();
 
 function timeAgo(iso){if(!iso)return 'Recently';const s=Math.floor((new Date()-new Date(iso))/1000);if(s<3600)return Math.max(1,Math.floor(s/60))+' min ago';if(s<86400)return Math.floor(s/3600)+' hr ago';return new Date(iso).toLocaleDateString();}
@@ -2511,6 +2820,7 @@ function timeAgo(iso){if(!iso)return 'Recently';const s=Math.floor((new Date()-n
 function renderFeed(){
   const q=(document.getElementById('search-inp').value||'').toLowerCase();
   const list=allFiles.filter(f=>{
+    if(!matchesType(f))return false;
     if((f.category||'').includes('18')&&activeCat==='All'&&sessionStorage.getItem('age_18_ok')!=='1')return false;
     if(activeCat!=='All'&&(f.category||'All')!==activeCat)return false;
     if(activeLang!=='All'&&(f.language||'')!==activeLang)return false;
@@ -2521,7 +2831,7 @@ function renderFeed(){
   let h='';
   shown.forEach((f,i)=>{
     const tl=f.type==='series'?'📺 Series':(f.is_premium?'💎 VIP':'🎬 Movie');
-    h+=`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new">🆕 New</div><div class="b-type">${tl}</div></div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
+    h+=`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="${i<2?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new">🆕 New</div><div class="b-type">${tl}</div></div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
     if((i+1)%3===0&&promotions.length>0)h+=`<div class="car-wrap">`+promotions.map(p=>`<div class="p-slide" onclick="openTgLink('${p.link}')"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="p-slide-b"><div style="font-size:14px;font-weight:700;margin-bottom:6px;">${p.title}</div><button class="watch-pill">Watch Now</button></div></div>`).join('')+`</div>`;
   });
   if(list.length>feedLimit){
@@ -2537,7 +2847,21 @@ window.addEventListener('scroll',()=>{
 },{passive:true});
 renderFeed();
 
-function renderFavs(){const ids=[...new Set([...(userState.favorites||[]),...(userState.history||[])])];const its=allFiles.filter(f=>ids.includes(f._id));document.getElementById('fav-list').innerHTML=its.map(f=>`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new">🔖 Saved</div></div><div class="feed-body"><div class="feed-title">${f.title}</div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:30px;'>কোনো সেভ করা ভিডিও নেই!</p>";}
+function renderFavs(){
+  const favIds=[...(userState.favorites||[])];
+  const favIts=allFiles.filter(f=>favIds.includes(f._id));
+  document.getElementById('fav-list').innerHTML=favIts.map(f=>`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new">🔖 Saved</div></div><div class="feed-body"><div class="feed-title">${f.title}</div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো ফেভারিট ভিডিও সেভ করা নেই!</p>";
+
+  const histIds=(userState.history||[]).filter(id=>!favIds.includes(id));
+  const histIts=allFiles.filter(f=>histIds.includes(f._id));
+  document.getElementById('hist-list').innerHTML=histIts.map(f=>`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new" style="background:#475569;">🕒 Watched</div></div><div class="feed-body"><div class="feed-title">${f.title}</div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:18px;'>কোনো ওয়াচ হিস্টোরি নেই!</p>";
+}
+async function clearHistory(){
+  userState.history=[];
+  renderFavs();
+  await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'clear_history',uid:userId})});
+}
+
 function renderUpcoming(){document.getElementById('upcoming-list').innerHTML=upcomingList.map(u=>`<div class="feed-card"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${u.thumb_url||'/poster/default'}"><div class="b-new">📅 UPCOMING</div><div class="b-type">🕒 ${u.release_time}</div></div><div class="feed-body"><div class="feed-title">${u.title}</div><div class="feed-meta"><span>Release: ${u.release_time}</span></div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো আপকামিং শিডিউল নেই!</p>";document.getElementById('promo-full-list').innerHTML=promotions.map(p=>`<div class="feed-card" onclick="openTgLink('${p.link}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="b-new">⭐ PROMO</div></div><div class="feed-body"><div class="feed-title">${p.title}</div></div></div>`).join('');}
 renderUpcoming();
 
@@ -2556,12 +2880,16 @@ function openDetails(id){
   document.getElementById('btn-save').innerText=(userState.favorites||[]).includes(id)?'✅ Saved':'🔖 Save';
   document.getElementById('btn-like').innerText=(curFile.likes||[]).includes(userId)?'❤️ Liked':'🤍 Like';
   renderRating(); renderComments(); renderSelectors();
+  if(!(userState.history||[]).includes(id)){
+    if(!userState.history)userState.history=[];
+    userState.history.push(id);
+  }
   fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'history',uid:userId,file_id:id})});
 }
 function closeDetails(){
   const tb=document.getElementById('inline-tut-box'), tv=document.getElementById('det-tut-vid');
   tv.pause(); tb.style.display='none';
-  document.getElementById('main-chrome').style.display='block';document.getElementById('bottom-nav').style.display='flex';document.getElementById('float-search-btn').style.display='flex';document.getElementById('cmt-bar').style.display='none';document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-home').classList.add('active');
+  document.getElementById('main-chrome').style.display='block';document.getElementById('bottom-nav').style.display='grid';document.getElementById('float-search-btn').style.display='flex';document.getElementById('cmt-bar').style.display='none';document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-home').classList.add('active');
 }
 
 function toggleInlineTutorial(){
@@ -2579,36 +2907,76 @@ function toggleInlineTutorial(){
   }
 }
 
+function pad2(v){
+  const s=String(v||'1').replace(/^(?:episode|ep|e|season|s)\s*[-_:]?\s*/i,'').trim();
+  const m=s.match(/^(\d+)$/);
+  if(m){return m[1].length<2?'0'+m[1]:m[1];}
+  return s;
+}
+function sortNumKey(v){
+  const m=String(v||'').match(/\d+/);
+  return m?parseInt(m[0],10):999999;
+}
+
 function renderSelectors(){
   const area=document.getElementById('det-selector-area');
   if(curFile.type==='series'&&curFile.seasons?.length){
-    const ssns=curFile.seasons; let h=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;margin-bottom:8px;">📺 Select Season & Episode</div><div style="display:flex;gap:6px;overflow-x:auto;">`;
-    ssns.forEach((s,si)=>{h+=`<button class="s-tab ${si===curSeasonIdx?'active':''}" onclick="curSeasonIdx=${si};renderSelectors()">Season ${s.season_no}</button>`;});
+    const ssns=[...curFile.seasons].sort((a,b)=>sortNumKey(a.season_no)-sortNumKey(b.season_no));
+    if(curSeasonIdx>=ssns.length)curSeasonIdx=0;
+    const curS=ssns[curSeasonIdx];
+    const sOrig=(curS.orig_idx!==undefined)?curS.orig_idx:curSeasonIdx;
+    let h=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;margin-bottom:8px;">📺 Select Season & Episode</div><div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;">`;
+    ssns.forEach((s,si)=>{
+      const sLbl=pad2(s.season_no);
+      h+=`<button class="s-tab ${si===curSeasonIdx?'active':''}" onclick="curSeasonIdx=${si};renderSelectors()">Season ${sLbl}</button>`;
+    });
     h+=`</div>`;
-    (ssns[curSeasonIdx]?.episodes||[]).forEach((e,ei)=>{
-      h+=`<div class="ep-card"><div style="font-size:13px;font-weight:700;margin-bottom:6px;">🎬 Episode ${e.ep_no}</div><div class="q-grid">`;
-      (e.qualities||[]).forEach((q,qi)=>{h+=`<button class="q-btn" onclick="triggerDownload('sfile_${curFile._id}_${curSeasonIdx}_${ei}_${qi}')">⬇️ ${q.name}</button>`;});
+    const eps=[...(curS?.episodes||[])].sort((a,b)=>sortNumKey(a.ep_no)-sortNumKey(b.ep_no));
+    eps.forEach((e,ei)=>{
+      const eOrig=(e.orig_idx!==undefined)?e.orig_idx:ei;
+      const eLbl=pad2(e.ep_no);
+      h+=`<div class="ep-card"><div style="font-size:13px;font-weight:700;margin-bottom:6px;">🎬 Episode ${eLbl}</div><div class="q-grid">`;
+      (e.qualities||[]).forEach((q,qi)=>{
+        h+=`<button class="q-btn" onclick="triggerDownload('sfile_${curFile._id}_${sOrig}_${eOrig}_${qi}')">⬇️ Episode ${eLbl} ${q.name}</button>`;
+      });
       h+=`</div></div>`;
     });
     area.innerHTML=h+`</div>`;
   } else if(curFile.qualities?.length){
-    area.innerHTML=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;">🎞 Select Quality</div><div class="q-grid">`+curFile.qualities.map((q,qi)=>`<button class="q-btn" onclick="triggerDownload('mfile_${curFile._id}_${qi}')">⬇️ ${q.name}</button>`).join('')+`</div></div>`;
-  } else { area.innerHTML=`<div class="sel-box"><button class="btn-p" onclick="triggerDownload('file_${curFile._id}')">⬇️ Get File Now</button></div>`; }
+    area.innerHTML=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;">🎞 Select Quality</div><div class="q-grid">`+curFile.qualities.map((q,qi)=>`<button class="q-btn" onclick="triggerDownload('mfile_${curFile._id}_${qi}')">⬇️ Download ${q.name}</button>`).join('')+`</div></div>`;
+  } else { area.innerHTML=`<div class="sel-box"><button class="btn-p" onclick="triggerDownload('file_${curFile._id}')">⬇️ Download Movie</button></div>`; }
 }
 function scrollToDownload(){document.getElementById('det-selector-area')?.scrollIntoView({behavior:'smooth'});}
 
+function isFileLocallyUnlocked(fid){
+  if(userState.is_premium)return true;
+  const exp=(userState.unlocked_files||{})[fid];
+  if(!exp)return false;
+  try{return new Date(exp)>new Date();}catch(e){return false;}
+}
+
 let pendingUnlockData=null;
-async function triggerDownload(sp){
-  const dl=`https://t.me/${botUsername}?start=${sp}`, res=await fetch(`/api/get_ad/${userId}/${curFile._id}`), ad=await res.json();
-  if(!ad.show_ad){openTgLink(dl);return;}
-  pendingUnlockData={dl,ad,fileId:curFile._id};
-  const zid=ad.zone_id||(zoneIds.length?zoneIds[0]:null);
-  let h=`<button class="unlock-opt" style="background:linear-gradient(90deg,#f59e0b,#d97706);" onclick="unlockWithCoin()"><span>🪙 কয়েন দিয়ে আনলক (${ad.coin_price} Coins)</span><span>আপনার: ${userState.balance}</span></button>`;
-  if(zid){
-    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="unlockWithMonetag('${zid}')"><span>📺 Monetag Zone Ad দিয়ে আনলক</span><span>Easy ⚡</span></button>`;
+function triggerDownload(sp){
+  const dl=`https://t.me/${botUsername}?start=${sp}`;
+  if(isFileLocallyUnlocked(curFile._id)){openTgLink(dl);return;}
+  const adLinks=adConfig.ad_links||[];
+  const zList=adConfig.zone_ids||zoneIds||[];
+  const needsAd=curFile.is_premium||(adConfig.ads_on&&(adLinks.length>0||zList.length>0));
+  if(!needsAd){openTgLink(dl);return;}
+
+  const waitList=adConfig.wait_times||[5];
+  const waitT=waitList[Math.floor(Math.random()*waitList.length)]||5;
+  const randLink=adLinks.length?adLinks[Math.floor(Math.random()*adLinks.length)]:null;
+  const randZone=zList.length?zList[Math.floor(Math.random()*zList.length)]:null;
+  const coinPrice=adConfig.coin_price||50;
+
+  pendingUnlockData={dl,ad:{ad_link:randLink,zone_id:randZone,wait_time:waitT,coin_price:coinPrice},fileId:curFile._id};
+  let h=`<button class="unlock-opt" style="background:linear-gradient(90deg,#f59e0b,#d97706);" onclick="unlockWithCoin()"><span>🪙 কয়েন দিয়ে আনলক (${coinPrice} Coins)</span><span>আপনার: ${userState.balance||0}</span></button>`;
+  if(randZone){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="unlockWithMonetag('${randZone}')"><span>📺 Monetag Zone Ad দিয়ে আনলক</span><span>Easy ⚡</span></button>`;
   }
-  if(ad.ad_link){
-    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="unlockWithAdsterra()"><span>🔗 Adsterra / Link Ad দিয়ে আনলক</span><span>${ad.wait_time||5}s ⏳</span></button>`;
+  if(randLink){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="unlockWithAdsterra()"><span>🔗 Adsterra / Link Ad দিয়ে আনলক</span><span>${waitT}s ⏳</span></button>`;
   }
   document.getElementById('unlock-options-area').innerHTML=h;
   document.getElementById('unlock-modal').style.display='flex';
@@ -2620,6 +2988,8 @@ async function unlockWithCoin(){
   const r2=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'coin'})});
   const d2=await r2.json();
   if(d2.status==='success'){
+    if(!userState.unlocked_files)userState.unlocked_files={};
+    userState.unlocked_files[fileId]=d2.expiry;
     document.getElementById('unlock-modal').style.display='none';
     loadUser();
     openTgLink(dl);
@@ -2633,7 +3003,9 @@ async function unlockWithMonetag(zid){
   if(zid&&typeof window['show_'+zid]==='function'){
     try{
       await window['show_'+zid]();
-      await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'monetag'})});
+      const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'monetag'})});
+      const d=await r.json();
+      if(d.expiry){if(!userState.unlocked_files)userState.unlocked_files={};userState.unlocked_files[fileId]=d.expiry;}
       openTgLink(dl);
       return;
     }catch(e){}
@@ -2646,7 +3018,9 @@ function unlockWithAdsterra(){
   const {dl,ad,fileId}=pendingUnlockData;
   document.getElementById('unlock-modal').style.display='none';
   runAdTimer(ad.ad_link,ad.wait_time||5,async()=>{
-    await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'adsterra'})});
+    const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:fileId,method:'adsterra'})});
+    const d=await r.json();
+    if(d.expiry){if(!userState.unlocked_files)userState.unlocked_files={};userState.unlocked_files[fileId]=d.expiry;}
     openTgLink(dl);
   });
 }
@@ -2659,14 +3033,40 @@ function runAdTimer(link,sec,onDone){
 }
 
 function likeCurrent(){if(!curFile.likes)curFile.likes=[];if(!curFile.likes.includes(userId)){curFile.likes.push(userId);document.getElementById('det-likes').innerText=curFile.likes.length;document.getElementById('btn-like').innerText='❤️ Liked';fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'like',uid:userId,file_id:curFile._id})});}}
-async function saveCurrent(){const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'favorite',uid:userId,file_id:curFile._id})});const d=await r.json();document.getElementById('btn-save').innerText=d.saved?'✅ Saved':'🔖 Save';loadUser();}
+async function saveCurrent(){
+  const fid=curFile._id;
+  if(!userState.favorites)userState.favorites=[];
+  const wasSaved=userState.favorites.includes(fid);
+  if(wasSaved){userState.favorites=userState.favorites.filter(x=>x!==fid);document.getElementById('btn-save').innerText='🔖 Save';}
+  else{userState.favorites.push(fid);document.getElementById('btn-save').innerText='✅ Saved';}
+  renderFavs();
+  const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'favorite',uid:userId,file_id:fid})});
+  const d=await r.json();
+  document.getElementById('btn-save').innerText=d.saved?'✅ Saved':'🔖 Save';
+  loadUser();
+}
 function shareCurrent(){openTgLink(`https://t.me/share/url?url=${encodeURIComponent(`https://t.me/${botUsername}?start=ref${userId}file${curFile._id}`)}&text=${encodeURIComponent(curFile.title)}`);}
 function renderRating(){const rs=curFile.ratings||[],avg=rs.length?(rs.reduce((a,b)=>a+b.stars,0)/rs.length).toFixed(1):'0.0';document.getElementById('rate-avg').innerText=`⭐ ${avg} (${rs.length})`;const my=(rs.find(r=>r.uid===userId)||{}).stars||0;document.getElementById('star-row').innerHTML=[1,2,3,4,5].map(n=>`<button class="star-b ${n<=my?'lit':''}" onclick="rateVideo(${n})">★</button>`).join('');}
 async function rateVideo(stars){await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rate',uid:userId,file_id:curFile._id,stars})});if(!curFile.ratings)curFile.ratings=[];curFile.ratings=curFile.ratings.filter(x=>x.uid!==userId);curFile.ratings.push({uid:userId,stars});renderRating();}
 function renderComments(){const cs=curFile.comments||[];document.getElementById('det-cmt-list').innerHTML=cs.map(c=>`<div style="padding:8px 0;border-bottom:1px solid #f1f5f9;font-size:13.5px;"><b>User ${c.uid}</b> <small style="color:#94a3b8;">${c.time}</small><br>${c.text}</div>`).join('')||"<p style='color:#94a3b8;font-size:13px;'>No comments yet.</p>";}
 async function sendComment(){const i=document.getElementById('cmt-inp'),t=i.value.trim();if(!t||!curFile)return;i.value='';const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'comment',uid:userId,file_id:curFile._id,text:t})});const d=await r.json();if(!curFile.comments)curFile.comments=[];curFile.comments.push(d.comment);document.getElementById('det-cmts-cnt').innerText=curFile.comments.length;document.getElementById('cmt-cnt-h').innerText=curFile.comments.length;renderComments();}
 
-function switchTab(id,el){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-'+id).classList.add('active');document.querySelectorAll('.nav-i').forEach(n=>n.classList.remove('active'));if(el)el.classList.add('active');if(id==='earn')loadEarn();if(id==='tools')renderTools();}
+function switchTab(id,el,tp){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.nav-i').forEach(n=>n.classList.remove('active'));
+  if(el)el.classList.add('active');
+  if(id==='home'){
+    activeType=tp||'all';
+    feedLimit=15;
+    renderPinned();
+    renderFeed();
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  if(id==='favorite')renderFavs();
+  if(id==='profile'){loadUser();loadEarn();}
+  if(id==='tools')renderTools();
+}
 
 const TOOLS=[
   {id:'age',sec:'🔥 Popular Tools',ico:'🎂',bg:'#fef3c7',bl:'#ddd6fe',name:'Age Calculator',desc:'Calculate exact age'},
@@ -2776,104 +3176,198 @@ function copyRef(){const i=document.getElementById('ref-inp');i.select();navigat
 </body>
 </html>"""
 
+def _fetch_home_payload():
+    now = time.time()
+    if HOME_DATA_CACHE["data"] is not None and (now - HOME_DATA_CACHE["ts"]) < 6:
+        return HOME_DATA_CACHE["data"]
+
+    def q_config():
+        try: return sync_db["config"].find_one({"_id": "settings"}) or {}
+        except: return {}
+
+    def q_files():
+        res = []
+        for d in get_extra_dbs_sync():
+            try: res.extend(list(d["files"].find().sort("_id", -1)))
+            except: pass
+        return res
+
+    def q_cats():
+        try: return [c["name"] for c in sync_db["categories"].find()]
+        except: return []
+
+    def q_langs():
+        try: return [l["name"] for l in sync_db["languages"].find()]
+        except: return []
+
+    def q_promos():
+        try: return list(sync_db["promotions"].find())
+        except: return []
+
+    def q_upcs():
+        try: return list(sync_db["upcoming"].find().sort("_id", -1))
+        except: return []
+
+    def q_pkgs():
+        try: return list(sync_db["packages"].find())
+        except: return []
+
+    def q_zones():
+        try: return [z["zone_id"] for z in sync_db["zone_ids"].find()]
+        except: return []
+
+    def q_ad_links():
+        try: return [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+        except: return []
+
+    f_cfg = WEB_POOL.submit(q_config)
+    f_files = WEB_POOL.submit(q_files)
+    f_cats = WEB_POOL.submit(q_cats)
+    f_langs = WEB_POOL.submit(q_langs)
+    f_promos = WEB_POOL.submit(q_promos)
+    f_upcs = WEB_POOL.submit(q_upcs)
+    f_pkgs = WEB_POOL.submit(q_pkgs)
+    f_zones = WEB_POOL.submit(q_zones)
+    f_links = WEB_POOL.submit(q_ad_links)
+
+    config = f_cfg.result()
+    raw_files = f_files.result()
+    cats = f_cats.result()
+    langs = f_langs.result()
+    promos = f_promos.result()
+    upcs = f_upcs.result()
+    pkgs = f_pkgs.result()
+    zone_ids = f_zones.result()
+    ad_links = f_links.result()
+
+    if not zone_ids and DEFAULT_ZONE_ID:
+        zone_ids = [DEFAULT_ZONE_ID]
+
+    live_url = get_live_web_url(config)
+    files = []
+    for doc in raw_files:
+        fid = str(doc["_id"])
+        tu = doc.get("thumb_url") or ""
+        if "/poster/" in tu:
+            tu = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
+        elif tu.startswith("data:image"):
+            tu = f"{live_url}/poster/{fid}"
+        elif not tu or "placehold.co" in tu:
+            tu = f"{live_url}/poster/default"
+
+        indexed_seasons = []
+        for si, s in enumerate(doc.get("seasons", [])):
+            indexed_eps = []
+            for ei, e in enumerate(s.get("episodes", [])):
+                ep_lbl = clean_ep_no(e.get("ep_no", "1"))
+                indexed_eps.append({
+                    "ep_no": ep_lbl,
+                    "orig_idx": ei,
+                    "qualities": [{"name": q.get("name", "HD")} for q in e.get("qualities", [])]
+                })
+            indexed_eps.sort(key=lambda x: natural_sort_key(x["ep_no"]))
+            ssn_lbl = clean_season_no(s.get("season_no", "1"))
+            indexed_seasons.append({
+                "season_no": ssn_lbl,
+                "orig_idx": si,
+                "episodes": indexed_eps
+            })
+        indexed_seasons.sort(key=lambda x: natural_sort_key(x["season_no"]))
+
+        clean_doc = {
+            "_id": fid,
+            "type": doc.get("type", "movie"),
+            "title": doc.get("title", ""),
+            "name": doc.get("name", ""),
+            "year": doc.get("year", ""),
+            "category": doc.get("category", "All"),
+            "language": doc.get("language", ""),
+            "is_premium": bool(doc.get("is_premium", False)),
+            "thumb_url": tu,
+            "pinned": bool(doc.get("pinned", False)),
+            "ratings": doc.get("ratings", []),
+            "created_at": doc.get("created_at", ""),
+            "views": doc.get("views", 0),
+            "likes": doc.get("likes", []),
+            "comments": doc.get("comments", []),
+            "qualities": [{"name": q.get("name", "HD")} for q in doc.get("qualities", [])],
+            "seasons": indexed_seasons
+        }
+        files.append(clean_doc)
+
+    for p in promos:
+        p["_id"] = str(p["_id"])
+        img = p.get("image") or ""
+        if "/poster/" in img:
+            p["image"] = f"{live_url}/poster/{img.split('/poster/', 1)[1]}"
+        elif img.startswith("data:image"):
+            p["image"] = f"{live_url}/poster/promo_{p['_id']}"
+
+    for u in upcs:
+        u["_id"] = str(u["_id"])
+        tu = u.get("thumb_url") or ""
+        if "/poster/" in tu:
+            u["thumb_url"] = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
+        elif tu.startswith("data:image"):
+            u["thumb_url"] = f"{live_url}/poster/upc_{u['_id']}"
+
+    payload = {
+        "config": config,
+        "files": files,
+        "cats": cats,
+        "langs": langs,
+        "promos": promos,
+        "upcs": upcs,
+        "pkgs": pkgs,
+        "zone_ids": zone_ids,
+        "ad_links": ad_links
+    }
+    HOME_DATA_CACHE["data"] = payload
+    HOME_DATA_CACHE["ts"] = time.time()
+    return payload
+
 @web.route('/')
 def home():
-    try: config = sync_db["config"].find_one({"_id": "settings"}) or {}
-    except: config = {}
-    live_url = get_live_web_url(config)
-
-    files = []
-    for d in get_extra_dbs_sync():
-        try:
-            for doc in d["files"].find().sort("_id", -1):
-                fid = str(doc["_id"])
-                tu = doc.get("thumb_url") or ""
-                if "/poster/" in tu:
-                    tu = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
-                elif tu.startswith("data:image"):
-                    tu = f"{live_url}/poster/{fid}"
-                elif not tu or "placehold.co" in tu:
-                    tu = f"{live_url}/poster/default"
-                clean_doc = {
-                    "_id": fid,
-                    "type": doc.get("type", "movie"),
-                    "title": doc.get("title", ""),
-                    "name": doc.get("name", ""),
-                    "year": doc.get("year", ""),
-                    "category": doc.get("category", "All"),
-                    "language": doc.get("language", ""),
-                    "is_premium": bool(doc.get("is_premium", False)),
-                    "thumb_url": tu,
-                    "pinned": bool(doc.get("pinned", False)),
-                    "ratings": doc.get("ratings", []),
-                    "created_at": doc.get("created_at", ""),
-                    "views": doc.get("views", 0),
-                    "likes": doc.get("likes", []),
-                    "comments": doc.get("comments", []),
-                    "qualities": [{"name": q.get("name", "HD")} for q in doc.get("qualities", [])],
-                    "seasons": [
-                        {
-                            "season_no": s.get("season_no", "1"),
-                            "episodes": [
-                                {
-                                    "ep_no": e.get("ep_no", "1"),
-                                    "qualities": [{"name": q.get("name", "HD")} for q in e.get("qualities", [])]
-                                }
-                                for e in s.get("episodes", [])
-                            ]
-                        }
-                        for s in doc.get("seasons", [])
-                    ]
-                }
-                files.append(clean_doc)
-        except: pass
-
-    try: cats = [c["name"] for c in sync_db["categories"].find()]
-    except: cats = []
-    try: langs = [l["name"] for l in sync_db["languages"].find()]
-    except: langs = []
-    try:
-        promos = list(sync_db["promotions"].find())
-        for p in promos:
-            p["_id"] = str(p["_id"])
-            img = p.get("image") or ""
-            if "/poster/" in img:
-                p["image"] = f"{live_url}/poster/{img.split('/poster/', 1)[1]}"
-            elif img.startswith("data:image"):
-                p["image"] = f"{live_url}/poster/promo_{p['_id']}"
-    except: promos = []
-    try:
-        upcs = list(sync_db["upcoming"].find().sort("_id", -1))
-        for u in upcs:
-            u["_id"] = str(u["_id"])
-            tu = u.get("thumb_url") or ""
-            if "/poster/" in tu:
-                u["thumb_url"] = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
-            elif tu.startswith("data:image"):
-                u["thumb_url"] = f"{live_url}/poster/upc_{u['_id']}"
-    except: upcs = []
-    try: pkgs = list(sync_db["packages"].find())
-    except: pkgs = []
-    try: zone_ids = [z["zone_id"] for z in sync_db["zone_ids"].find()]
-    except: zone_ids = []
-    if not zone_ids and DEFAULT_ZONE_ID: zone_ids = [DEFAULT_ZONE_ID]
-
+    p = _fetch_home_payload()
+    config = p["config"]
     tut_vid = config.get("tutorial_vid") or ""
     tut_ver = hashlib.md5(str(tut_vid).encode()).hexdigest()[:8] if tut_vid else "0"
+    logo_val = config.get("start_logo") or config.get("site_name", "FB")
+    logo_ver = hashlib.md5(str(logo_val).encode()).hexdigest()[:8]
+    sn = config.get("site_name", "Moviee Link")
+    site_name_hash = hashlib.md5(sn.encode("utf-8")).hexdigest()[:8]
+
+    uid_arg = request.args.get("uid", "")
+    initial_user = None
+    if uid_arg.isdigit():
+        try: initial_user = build_user_state_dict(int(uid_arg))
+        except: pass
+
+    ad_config = {
+        "ads_on": config.get("ads_on", True),
+        "coin_price": config.get("premium_vid_coin", 50),
+        "ad_links": p["ad_links"],
+        "zone_ids": p["zone_ids"],
+        "wait_times": config.get("direk_wait", [5])
+    }
 
     return render_template_string(
         HTML_TEMPLATE,
-        files_json=json.dumps(files, default=str),
-        categories_json=json.dumps(cats),
-        languages_json=json.dumps(langs),
-        promotions_json=json.dumps(promos, default=str),
-        upcoming_json=json.dumps(upcs, default=str),
-        zone_ids=zone_ids,
-        zone_ids_json=json.dumps(zone_ids),
-        pkgs=pkgs,
+        files_json=json.dumps(p["files"], default=str),
+        categories_json=json.dumps(p["cats"]),
+        languages_json=json.dumps(p["langs"]),
+        promotions_json=json.dumps(p["promos"], default=str),
+        upcoming_json=json.dumps(p["upcs"], default=str),
+        zone_ids=p["zone_ids"],
+        zone_ids_json=json.dumps(p["zone_ids"]),
+        ad_config_json=json.dumps(ad_config),
+        initial_user_json=json.dumps(initial_user),
+        pkgs=p["pkgs"],
         bot_username=BOT_USERNAME,
         admin_username=config.get("payment_admin", DEFAULT_ADMIN_USERNAME),
-        site_name=config.get("site_name", "Moviee Link"),
+        site_name=sn,
+        logo_ver=logo_ver,
+        site_name_hash_json=json.dumps(site_name_hash),
         rec_group_link_json=json.dumps(config.get("rec_group_link", "")),
         has_tutorial_json=json.dumps(bool(tut_vid)),
         tutorial_ver_json=json.dumps(tut_ver),
