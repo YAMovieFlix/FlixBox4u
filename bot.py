@@ -4591,6 +4591,8 @@ function switchPkgTab(tp, btn){
   if(emp)emp.style.display=cnt===0?'block':'none';
 }
 switchPkgTab('coin', document.querySelector('.pkg-tab.active'));
+function copyRef(){const i=document.getElementById('ref-inp');i.select();navigator.clipboard.writeText(i.value);alert('✅ Link Copied!');}
+hydrateAppFast();
 </script>
 </body>
 </html>"""
