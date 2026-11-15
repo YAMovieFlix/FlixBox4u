@@ -4321,12 +4321,11 @@ async function unlockWithMonetag(zid){
   if(pendingUnlockData)renderUnlockStepModal();
 }
 
-async function unlockWithAdsterra(){
+function unlockWithAdsterra(){
   if(!pendingUnlockData)return;
   const link=pendingUnlockData.curLink;
   const wt=pendingUnlockData.waitT||5;
   document.getElementById('unlock-modal').style.display='none';
-  await startServerAdToken('file',pendingUnlockData.sp,'link');
   runAdTimer(link,wt,async()=>{await completeUnlockStep('adsterra');},()=>{if(pendingUnlockData)renderUnlockStepModal();},{kind:'file',target:pendingUnlockData.sp});
 }
 
