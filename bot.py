@@ -4383,25 +4383,84 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     };
   }
 
-  const opened=openAdNow();
-  if(link && adConfig.strict_ad && !opened){
-    pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের বাটনে ক্লিক করে পুনরায় অ্যাড ওপেন করুন।');
-    return;
+  function checkReturnNow(){
+    if(!leftPage||paused||completed||document.hidden)return;
+    if(tg && tg.isActive===false)return;
+    if((Date.now()-leftAt)<120)return;
+    const el=(Date.now()-startTs)/1000;
+    if(el<sec-0.5){
+      pauseEarly();
+    } else {
+      finishTimer();
+    }
   }
 
   if(adConfig.strict_ad && link){
     const markLeft=()=>{
       if(!leftPage){leftPage=true;leftAt=Date.now();}
     };
-    const markReturned=()=>{
-      if(!leftPage||paused||completed||document.hidden)return;
-      if((Date.now()-leftAt)<350)return;
-      const el=(Date.now()-startTs)/1000;
-      if(el<sec-0.6){
-        pauseEarly();
-      } else {
-        finishTimer();
+    const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow();};
+
+    document.addEventListener('visibilitychange',onVis);
+    window.addEventListener('blur',markLeft);
+    window.addEventListener('focus',checkReturnNow);
+    window.addEventListener('pagehide',markLeft);
+    window.addEventListener('pageshow',checkReturnNow);
+    activeAdCleanupList.push(
+      ()=>document.removeEventListener('visibilitychange',onVis),
+      ()=>window.removeEventListener('blur',markLeft),
+      ()=>window.removeEventListener('focus',checkReturnNow),
+      ()=>window.removeEventListener('pagehide',markLeft),
+      ()=>window.removeEventListener('pageshow',checkReturnNow)
+    );
+    if(tg?.onEvent && tg?.offEvent){
+      tg.onEvent('deactivated',markLeft);
+      tg.onEvent('activated',checkReturnNow);
+      activeAdCleanupList.push(
+        ()=>{try{tg.offEvent('deactivated',markLeft);}catch(e){}},
+        ()=>{try{tg.offEvent('activated',checkReturnNow);}catch(e){}}
+      );
+    }
+
+    let lastRaf=performance.now(), rafId=0;
+    const rafLoop=(now)=>{
+      if(paused||completed)return;
+      if((now-lastRaf)>850){
+        if(!leftPage){leftPage=true;leftAt=Date.now()-200;}
+        checkReturnNow();
+        if(paused||completed)return;
       }
+      lastRaf=now;
+      rafId=requestAnimationFrame(rafLoop);
+    };
+    rafId=requestAnimationFrame(rafLoop);
+    activeAdCleanupList.push(()=>cancelAnimationFrame(rafId));
+  }
+
+  const opened=openAdNow();
+  if(link && adConfig.strict_ad && !opened){
+    pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের বাটনে ক্লিক করে পুনরায় অ্যাড ওপেন করুন।');
+    return;
+  }
+
+  activeAdIv=setInterval(()=>{
+    if(paused||completed)return;
+    if(adConfig.strict_ad && link){
+      const away=document.hidden || !document.hasFocus() || (tg && tg.isActive===false);
+      if(away){
+        if(!leftPage){leftPage=true;leftAt=Date.now();}
+      } else if(leftPage){
+        checkReturnNow();
+        if(paused||completed)return;
+      }
+    }
+    const el=(Date.now()-startTs)/1000;
+    const rem=Math.max(0,Math.ceil(sec-el));
+    tm.innerText=rem;
+    if(el>=sec){
+      finishTimer();
+    }
+  },200);
     };
     const onVis=()=>{if(document.hidden)markLeft();else markReturned();};
 
