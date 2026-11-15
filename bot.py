@@ -3625,8 +3625,9 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 <div id="ad-modal" class="modal-ov"><div class="modal-card">
   <button onclick="cancelActiveAd('⚠️ অ্যাড বাতিল করা হয়েছে! কিছুই আনলক হয়নি, পুনরায় অ্যাড দেখুন।')" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
   <h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3>
-  <p style="font-size:13px;color:#64748b;">সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।</p>
+  <p id="ad-status-msg" style="font-size:13px;color:#64748b;">সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।</p>
   <h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1>
+  <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় অ্যাডে ক্লিক করুন</button>
   <button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button>
 </div></div>
 
