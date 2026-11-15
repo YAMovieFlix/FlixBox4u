@@ -2964,43 +2964,95 @@ async function verifyMonetag(){
 }
 async function verifyLinkAd(){
   document.getElementById('warn-msg').style.display='none';
+  document.getElementById('t-retry-btn').style.display='none';
   await startServerAdToken('link',waitTime||5);
-  if(adLink){ try{ window.open(adLink,'_blank'); }catch(e){} }
-  startCountdown(waitTime||5, true);
+  let blocked=false;
+  if(adLink){
+    try{
+      const w=window.open(adLink,'_blank');
+      if(w===null)blocked=true;
+    }catch(e){blocked=true;}
+  }
+  startCountdown(waitTime||5, true, blocked);
 }
 async function startDirectWait(){
   await startServerAdToken('link',3);
-  startCountdown(3, false);
+  startCountdown(3, false, false);
 }
-function startCountdown(sec, trackEarly){
+function startCountdown(sec, trackEarly, popupBlocked){
   cleanupWatchers();
   document.getElementById('verify-options').style.display='none';
-  const tb=document.getElementById('timer-box'), tn=document.getElementById('t-num');
-  tb.style.display='block'; tn.innerText=sec;
+  const tb=document.getElementById('timer-box'),
+        tn=document.getElementById('t-num'),
+        ts=document.getElementById('t-status'),
+        rb=document.getElementById('t-retry-btn'),
+        wm=document.getElementById('warn-msg');
+  tb.style.display='block';
+  rb.style.display='none';
+  wm.style.display='none';
+  ts.style.color='#475569';
+  ts.innerText='অ্যাড ভেরিফিকেশন চলছে, অনুগ্রহ করে অপেক্ষা করুন...';
+  tn.style.color='#e11d48';
+  tn.innerText=sec;
+
   const startTs=Date.now();
-  let leftPage=false;
+  let leftPage=false, leftAt=0, paused=false;
+
+  function pauseEarly(msg){
+    if(paused)return;
+    paused=true;
+    cleanupWatchers();
+    curToken=null;
+    const rem=Math.max(1,Math.ceil(sec-((Date.now()-startTs)/1000)));
+    tn.style.color='#f59e0b';
+    tn.innerText=rem+'s ⏸️';
+    ts.style.color='#dc2626';
+    ts.innerHTML='<b>⏸️ টাইমার পজ হয়েছে! পুনরায় অ্যাডে ক্লিক করুন।</b>';
+    wm.innerText=msg||'❌ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! কোনো লিংক আনলক হয়নি। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
+    wm.style.display='block';
+    rb.style.display='flex';
+  }
+
+  if(strictAd && trackEarly && popupBlocked){
+    pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের "পুনরায় অ্যাডে ক্লিক করুন" বাটনে চাপ দিন।');
+    return;
+  }
+
   if(strictAd && trackEarly){
-    visHandler=()=>{
-      if(document.hidden){leftPage=true;}
-      else if(leftPage){
-        const elapsed=(Date.now()-startTs)/1000;
-        if(elapsed<sec-0.8){
-          cleanupWatchers();
-          curToken=null;
-          showWarn('❌ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! কোনো লিংক আনলক হয়নি। আবার অ্যাড দেখুন।');
-        }
+    const markLeft=()=>{ if(!leftPage){leftPage=true;leftAt=Date.now();} };
+    const markReturned=()=>{
+      if(!leftPage||paused||document.hidden)return;
+      if((Date.now()-leftAt)<350)return;
+      const elapsed=(Date.now()-startTs)/1000;
+      if(elapsed<sec-0.6){
+        pauseEarly();
+      } else {
+        clearInterval(curIv); curIv=null;
+        unlockTarget();
       }
     };
-    document.addEventListener('visibilitychange',visHandler);
-    window.addEventListener('focus',visHandler);
+    const onVis=()=>{ if(document.hidden)markLeft(); else markReturned(); };
+    document.addEventListener('visibilitychange',onVis);
+    window.addEventListener('blur',markLeft);
+    window.addEventListener('focus',markReturned);
+    window.addEventListener('pagehide',markLeft);
+    window.addEventListener('pageshow',markReturned);
+    cleanupList.push(
+      ()=>document.removeEventListener('visibilitychange',onVis),
+      ()=>window.removeEventListener('blur',markLeft),
+      ()=>window.removeEventListener('focus',markReturned),
+      ()=>window.removeEventListener('pagehide',markLeft),
+      ()=>window.removeEventListener('pageshow',markReturned)
+    );
   }
-  let t=sec;
+
   curIv=setInterval(()=>{
+    if(paused)return;
     const elapsed=(Date.now()-startTs)/1000;
     const rem=Math.max(0,Math.ceil(sec-elapsed));
-    t=rem; tn.innerText=t;
+    tn.innerText=rem;
     if(elapsed>=sec){ clearInterval(curIv); curIv=null; unlockTarget(); }
-  },500);
+  },400);
 }
 </script>
 </body>
