@@ -3631,14 +3631,23 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
   <div class="card-box"><h3 style="margin:0 0 8px 0;">📥 Movie / Series Request</h3><div style="display:flex;gap:8px;"><input type="text" id="req-inp" class="s-input" placeholder="যেমন: Pushpa 2 (2024)"><button class="btn-p" style="width:auto;padding:0 16px;" onclick="sendMovieRequest()">Send</button></div></div>
   <div class="card-box"><h3 style="margin:0 0 8px 0;">🎟 Redeem Code</h3><div style="display:flex;gap:8px;"><input type="text" id="coupon-inp" class="s-input" placeholder="যেমন: VIP10 বা RND123"><button class="btn-p" style="width:auto;padding:0 16px;" onclick="redeemCoupon()">Redeem</button></div></div>
   <div id="earn-area"></div>
-  <div class="card-box"><h3 style="margin-top:0;">👑 Buy VIP / Coins</h3>
-    {% for pkg in pkgs %}
-    <div style="padding:10px;border:1px solid #eee;border-radius:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
-      <div><b>{{ pkg.details }}</b><br><small style="color:#64748b;">{{ pkg.type|upper }}</small></div>
-      {% if pkg.type == 'coin' %}<button class="watch-pill" style="background:#6c5ce7;" onclick="buyWithCoin('{{ pkg._id }}', {{ pkg.coins }})">Exchange</button>
-      {% else %}<button class="watch-pill" onclick="openTgLink('https://t.me/{{ admin_username }}')">Buy Now</button>{% endif %}
+  <div class="card-box">
+    <h3 style="margin-top:0;margin-bottom:12px;">👑 Buy VIP / Coins</h3>
+    <div class="pkg-tabs">
+      <button type="button" class="pkg-tab active" onclick="switchPkgTab('coin', this)">Redeem Coin</button>
+      <button type="button" class="pkg-tab" onclick="switchPkgTab('bkash', this)">Bkash Coin</button>
+      <button type="button" class="pkg-tab" onclick="switchPkgTab('usd', this)">USD Coin</button>
     </div>
-    {% endfor %}
+    <div id="pkg-list-wrap">
+      {% for pkg in pkgs %}
+      <div class="pkg-item" data-pkg-type="{{ pkg.type|lower }}" style="padding:10px;border:1px solid #eee;border-radius:12px;margin-bottom:8px;display:{{ 'flex' if pkg.type|lower == 'coin' else 'none' }};justify-content:space-between;align-items:center;">
+        <div><b>{{ pkg.details }}</b><br><small style="color:#64748b;">{{ pkg.type|upper }}</small></div>
+        {% if pkg.type|lower == 'coin' %}<button class="watch-pill" style="background:#6c5ce7;" onclick="buyWithCoin('{{ pkg._id }}', {{ pkg.coins }})">Exchange</button>
+        {% else %}<button class="watch-pill" onclick="openTgLink('https://t.me/{{ admin_username }}')">Buy Now</button>{% endif %}
+      </div>
+      {% endfor %}
+      <div id="pkg-empty-msg" style="display:none;text-align:center;color:#64748b;padding:14px 8px;font-size:13px;">No packages available in this category.</div>
+    </div>
   </div>
 </div>
 
