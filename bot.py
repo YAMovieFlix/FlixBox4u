@@ -4360,12 +4360,16 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
   function openAdNow(){
     if(!link)return true;
     try{
-      if(tg?.openLink){tg.openLink(link,{try_instant_view:false});return true;}
+      const inTg=!!(tg&&tg.openLink&&tg.platform&&tg.platform!=='unknown');
+      if(inTg){
+        const isAnd=/android/i.test(navigator.userAgent)||tg.platform==='android'||tg.platform==='android_x';
+        tg.openLink(link,isAnd?{try_instant_view:false,try_browser:'chrome'}:{try_instant_view:false});
+        return true;
+      }
       const w=window.open(link,'_blank');
       return w!==null;
     }catch(e){return false;}
   }
-
   function finishTimer(){
     if(completed||paused)return;
     completed=true;
