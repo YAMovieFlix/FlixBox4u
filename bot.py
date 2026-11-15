@@ -4670,7 +4670,7 @@ async function runTaskLink(encLink){
   const wt=(pendingTaskData&&pendingTaskData.waitT)||10;
   document.getElementById('task-ad-modal').style.display='none';
   await startServerAdToken('earn',pendingTaskData?pendingTaskData.claimType:'earn','link');
-  runAdTimer(link,wt,async()=>{await completeTaskStep();},()=>{if(pendingTaskData)renderTaskStepModal();});
+  runAdTimer(link,wt,async()=>{await completeTaskStep();},()=>{if(pendingTaskData)renderTaskStepModal();},{kind:'earn',target:pendingTaskData?pendingTaskData.claimType:'earn'});
 }
 
 async function doEarn(tp){
