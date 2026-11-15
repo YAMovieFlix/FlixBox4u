@@ -4485,13 +4485,6 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
       finishTimer();
     }
   },200);
-    if(el>=sec){
-      finishTimer();
-    }
-  },200);
-}
-
-function likeCurrent(){if(!curFile.likes)curFile.likes=[];
 }
 
 function likeCurrent(){if(!curFile.likes)curFile.likes=[];if(!curFile.likes.includes(userId)){curFile.likes.push(userId);document.getElementById('det-likes').innerText=curFile.likes.length;document.getElementById('btn-like').innerText='❤️ Liked';fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'like',uid:userId,file_id:curFile._id})});}}
