@@ -2966,20 +2966,13 @@ async function verifyLinkAd(){
   document.getElementById('warn-msg').style.display='none';
   document.getElementById('t-retry-btn').style.display='none';
   await startServerAdToken('link',waitTime||5);
-  let blocked=false;
-  if(adLink){
-    try{
-      const w=window.open(adLink,'_blank');
-      if(w===null)blocked=true;
-    }catch(e){blocked=true;}
-  }
-  startCountdown(waitTime||5, true, blocked);
+  startCountdown(waitTime||5, true, adLink);
 }
 async function startDirectWait(){
   await startServerAdToken('link',3);
-  startCountdown(3, false, false);
+  startCountdown(3, false, null);
 }
-function startCountdown(sec, trackEarly, popupBlocked){
+function startCountdown(sec, trackEarly, targetAdUrl){
   cleanupWatchers();
   document.getElementById('verify-options').style.display='none';
   const tb=document.getElementById('timer-box'),
@@ -3013,46 +3006,77 @@ function startCountdown(sec, trackEarly, popupBlocked){
     rb.style.display='flex';
   }
 
-  if(strictAd && trackEarly && popupBlocked){
-    pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের "পুনরায় অ্যাডে ক্লিক করুন" বাটনে চাপ দিন।');
-    return;
+  function checkReturnNow(){
+    if(!leftPage||paused||document.hidden)return;
+    if((Date.now()-leftAt)<120)return;
+    const elapsed=(Date.now()-startTs)/1000;
+    if(elapsed<sec-0.5){
+      pauseEarly();
+    } else {
+      clearInterval(curIv); curIv=null;
+      unlockTarget();
+    }
   }
 
   if(strictAd && trackEarly){
     const markLeft=()=>{ if(!leftPage){leftPage=true;leftAt=Date.now();} };
-    const markReturned=()=>{
-      if(!leftPage||paused||document.hidden)return;
-      if((Date.now()-leftAt)<350)return;
-      const elapsed=(Date.now()-startTs)/1000;
-      if(elapsed<sec-0.6){
-        pauseEarly();
-      } else {
-        clearInterval(curIv); curIv=null;
-        unlockTarget();
-      }
-    };
-    const onVis=()=>{ if(document.hidden)markLeft(); else markReturned(); };
+    const onVis=()=>{ if(document.hidden)markLeft(); else checkReturnNow(); };
     document.addEventListener('visibilitychange',onVis);
     window.addEventListener('blur',markLeft);
-    window.addEventListener('focus',markReturned);
+    window.addEventListener('focus',checkReturnNow);
     window.addEventListener('pagehide',markLeft);
-    window.addEventListener('pageshow',markReturned);
+    window.addEventListener('pageshow',checkReturnNow);
     cleanupList.push(
       ()=>document.removeEventListener('visibilitychange',onVis),
       ()=>window.removeEventListener('blur',markLeft),
-      ()=>window.removeEventListener('focus',markReturned),
+      ()=>window.removeEventListener('focus',checkReturnNow),
       ()=>window.removeEventListener('pagehide',markLeft),
-      ()=>window.removeEventListener('pageshow',markReturned)
+      ()=>window.removeEventListener('pageshow',checkReturnNow)
     );
+
+    let lastRaf=performance.now(), rafId=0;
+    const rafLoop=(now)=>{
+      if(paused)return;
+      if((now-lastRaf)>850){
+        if(!leftPage){leftPage=true;leftAt=Date.now()-200;}
+        checkReturnNow();
+        if(paused)return;
+      }
+      lastRaf=now;
+      rafId=requestAnimationFrame(rafLoop);
+    };
+    rafId=requestAnimationFrame(rafLoop);
+    cleanupList.push(()=>cancelAnimationFrame(rafId));
+  }
+
+  if(targetAdUrl){
+    let blocked=false;
+    try{
+      const w=window.open(targetAdUrl,'_blank');
+      if(w===null)blocked=true;
+    }catch(e){blocked=true;}
+    if(strictAd && trackEarly && blocked){
+      pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের "পুনরায় অ্যাডে ক্লিক করুন" বাটনে চাপ দিন।');
+      return;
+    }
   }
 
   curIv=setInterval(()=>{
     if(paused)return;
+    if(strictAd && trackEarly){
+      const away=document.hidden || !document.hasFocus();
+      if(away){
+        if(!leftPage){leftPage=true;leftAt=Date.now();}
+      } else if(leftPage){
+        checkReturnNow();
+        if(paused)return;
+      }
+    }
     const elapsed=(Date.now()-startTs)/1000;
     const rem=Math.max(0,Math.ceil(sec-elapsed));
     tn.innerText=rem;
     if(elapsed>=sec){ clearInterval(curIv); curIv=null; unlockTarget(); }
-  },400);
+  },200);
 }
 </script>
 </body>
