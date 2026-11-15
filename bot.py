@@ -71,26 +71,40 @@ sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)["NewBot"]
 
 POSTER_CACHE = {}
 EXTRA_URI_CACHE = {"uris": None, "ts": 0}
-HOME_DATA_CACHE = {"data": None, "ts": 0}
-SHELL_DATA_CACHE = {"data": None, "ts": 0}
+HOME_DATA_CACHE = {"data": None, "ts": 0, "ver": 0}
+SHELL_DATA_CACHE = {"data": None, "ts": 0, "ver": 0}
 AD_TOKENS = {}
 AD_TOKENS_LOCK = threading.Lock()
 WEB_POOL = ThreadPoolExecutor(max_workers=10)
 TUTORIAL_DL_LOCK = threading.Lock()
 HOME_CACHE_LOCK = threading.Lock()
 
+def get_db_cache_ver():
+    try:
+        c = sync_db["config"].find_one({"_id": "settings"}, {"cache_ver": 1}) or {}
+        return float(c.get("cache_ver", 0) or 0)
+    except:
+        return 0.0
+
 def invalidate_home_cache():
+    now = time.time()
     HOME_DATA_CACHE["data"] = None
     HOME_DATA_CACHE["ts"] = 0
+    HOME_DATA_CACHE["ver"] = 0
     SHELL_DATA_CACHE["data"] = None
     SHELL_DATA_CACHE["ts"] = 0
+    SHELL_DATA_CACHE["ver"] = 0
+    try:
+        sync_db["config"].update_one({"_id": "settings"}, {"$set": {"cache_ver": now}}, upsert=True)
+    except:
+        pass
 
-def poster_cache_put(pid, raw_bytes, mime="image/jpeg"):
+def poster_cache_put(pid, raw_bytes, mime="image/jpeg", ver=""):
     if not pid or not raw_bytes: return
     if len(POSTER_CACHE) >= 250:
         try: POSTER_CACHE.pop(next(iter(POSTER_CACHE)))
         except: POSTER_CACHE.clear()
-    POSTER_CACHE[pid] = (raw_bytes, mime)
+    POSTER_CACHE[pid] = (raw_bytes, mime, str(ver or ""))
 
 def poster_cache_del(pid):
     POSTER_CACHE.pop(pid, None)
@@ -176,7 +190,7 @@ async def get_config():
             "premium_vid_coin": 50, "vid_relock_sec": 60, "vid_relock_min": 0, "spin_coin_min": 10, "spin_coin_max": 50,
             "task_coin": 20, "spin_limit": 5, "task_limit": 5, "autopost_channel": None,
             "autopost_minute": 0, "autopost_channel_idx": 0, "tutorial_vid": None,
-            "rec_group_link": "",
+            "rec_group_link": "", "cache_ver": time.time(),
             "marquee_text": "VLC Player অথবা MX Player দিয়ে চালিয়ে দেখুন। ✅ সাউন্ড/অডিও সমস্যা হলে ভিডিওটি ডাউনলোড করে দেখুন।"
         }
         await config_col.insert_one(conf)
@@ -270,6 +284,9 @@ async def find_file_in_all_dbs(f_id):
         try:
             doc = await d["files"].find_one({"_id": f_id})
             if doc is not None: return doc, d
+            if isinstance(f_id, str) and ObjectId.is_valid(f_id):
+                doc = await d["files"].find_one({"_id": ObjectId(f_id)})
+                if doc is not None: return doc, d
         except: pass
     return None, None
 
@@ -393,20 +410,26 @@ async def extract_image_from_message(client, msg):
 
 async def save_poster_to_mongo(target_db, poster_id, b64_data, mime="image/jpeg", live_url=None):
     if mime == "image/jpg": mime = "image/jpeg"
-    payload = {"data": b64_data, "mime": mime, "created_at": datetime.utcnow().isoformat() + "Z"}
+    ver = int(time.time())
+    payload = {"data": b64_data, "mime": mime, "ver": ver, "created_at": datetime.utcnow().isoformat() + "Z"}
+    for d in await get_extra_dbs_async():
+        if d is not target_db:
+            try: await d["posters"].delete_one({"_id": poster_id})
+            except: pass
     try:
         await target_db["posters"].update_one({"_id": poster_id}, {"$set": payload}, upsert=True)
     except Exception as e:
         print("save_poster_to_mongo target_db error, falling back to main db:", e, flush=True)
         await get_db()
         await db["posters"].update_one({"_id": poster_id}, {"$set": payload}, upsert=True)
+    poster_cache_del(poster_id)
     try:
         raw, _ = decode_b64_to_bytes(b64_data)
-        if raw: poster_cache_put(poster_id, raw, mime)
+        if raw: poster_cache_put(poster_id, raw, mime, ver=str(ver))
     except: pass
     invalidate_home_cache()
     base = (live_url or get_live_web_url()).rstrip("/")
-    return f"{base}/poster/{poster_id}"
+    return f"{base}/poster/{poster_id}?v={ver}"
 
 def decode_b64_to_bytes(val):
     if not val: return None, "image/jpeg"
@@ -445,7 +468,7 @@ def get_tg_photo(thumb, tg_thumb_id=None):
                 if pdoc and pdoc.get("data"):
                     raw, mime = decode_b64_to_bytes(pdoc["data"])
                     if raw:
-                        poster_cache_put(pid, raw, pdoc.get("mime", mime))
+                        poster_cache_put(pid, raw, pdoc.get("mime", mime), ver=str(pdoc.get("ver", "")))
                         img = io.BytesIO(raw); img.name = "thumb.jpg"; return img
             except: pass
         for d in get_extra_dbs_sync():
@@ -629,8 +652,7 @@ async def deliver_cached_file(client, uid, f_id_send, title, config):
             asyncio.create_task(delete_msg_later(client, uid, sm.id, dt))
             asyncio.create_task(delete_msg_later(client, uid, w.id, dt))
     except Exception as e: await msg.edit_text(f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
-
-# ==========================================
+        # ==========================================
 # 5. BOT COMMANDS (START + STATS + SIMPLE CONFIG + STRICT AD + BLUR + BRAND + TUTORIALS)
 # ==========================================
 @app.on_message(filters.command("cancel", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -1368,8 +1390,7 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
-
-# ==========================================
+    # ==========================================
 # 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
 async def show_mv_poster_prompt(mo, st, edit=True):
@@ -1462,7 +1483,7 @@ async def handle_mv_poster_url(c, m):
         try:
             r = await asyncio.to_thread(requests.get, url, timeout=10)
             ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            if r.status_code == 200 and r.content and ct.startswith("image/"):
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 st["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
                 st["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
             else:
@@ -1546,10 +1567,14 @@ async def delmvpg_cb(c, q): await send_del_page(q, {"type": {"$ne": "series"}}, 
 
 @app.on_callback_query(filters.regex(r"^delmv_") & filters.user(ADMIN_ID) & unique_cb)
 async def delmv_cb(c, q):
-    _, f_id, pg = q.data.split("_"); doc, tdb = await find_file_in_all_dbs(f_id)
+    _, rest = q.data.split("_", 1)
+    f_id, pg = rest.rsplit("_", 1)
+    doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
-        await tdb["files"].delete_one({"_id": f_id})
-        await tdb["posters"].delete_one({"_id": f_id})
+        await tdb["files"].delete_one({"_id": doc["_id"]})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
         poster_cache_del(f_id)
         invalidate_home_cache()
         await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
@@ -1562,8 +1587,8 @@ async def cmd_edit_movies(c, m):
         admin_steps[m.from_user.id] = {"step": "edmv_search_wait"}
         return await m.reply("🔍 **যে মুভি এডিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `RRR` অথবা `RRR 2022`")
     all_m = await get_all_files_across_dbs({"type": {"$ne": "series"}})
-    ms = [d for d in all_m if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_movie_panel(m, ms[0]["_id"], edit=False)
+    ms = [d for d in all_m if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_movie_panel(m, str(ms[0]["_id"]), edit=False)
     elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in ms[:20]]))
     return await m.reply(f"❌ '{name}' নামে কোনো মুভি পাওয়া যায়নি!")
 
@@ -1572,13 +1597,15 @@ async def handle_edmv_search(c, m):
     admin_steps.pop(m.from_user.id, None)
     name, year = parse_name_year(m.text, "")
     all_m = await get_all_files_across_dbs({"type": {"$ne": "series"}})
-    ms = [d for d in all_m if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_movie_panel(m, ms[0]["_id"], edit=False)
+    ms = [d for d in all_m if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_movie_panel(m, str(ms[0]["_id"]), edit=False)
     elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in ms[:20]]))
     return await m.reply(f"❌ '{name}' নামে কোনো মুভি পাওয়া যায়নি! আবার `/editemovies` দিয়ে সার্চ করুন।")
 
 @app.on_callback_query(filters.regex(r"^edmvpick_") & filters.user(ADMIN_ID) & unique_cb)
-async def edmvpick_cb(c, q): await show_edit_movie_panel(q, q.data.split("_")[1], edit=True)
+async def edmvpick_cb(c, q):
+    admin_steps.pop(q.from_user.id, None)
+    await show_edit_movie_panel(q, q.data.split("_", 1)[1], edit=True)
 
 async def show_edit_movie_panel(mq, f_id, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
@@ -1597,9 +1624,15 @@ async def show_edit_movie_panel(mq, f_id, edit=True):
 async def edmv_cb(c, q):
     _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
-    if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
-    elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
-    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    db_id = doc["_id"]
+    if act == "pin": await tdb["files"].update_one({"_id": db_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
+    elif act == "prem": await tdb["files"].update_one({"_id": db_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
+    elif act == "del":
+        await tdb["files"].delete_one({"_id": db_id})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
+        poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
     elif act == "name": admin_steps[q.from_user.id] = {"step": "edmv_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন (যেমন: `RRR 2024`):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]))
     elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]))
     elif act == "cat":
@@ -1621,23 +1654,27 @@ async def edmv_cb(c, q):
 
 @app.on_callback_query(filters.regex(r"^edmvcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvcat_cb(c, q):
-    _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvlang_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvlang_cb(c, q):
-    _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqdel_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvqdel_cb(c, q):
-    _, f_id, idx = q.data.split("_"); idx = int(idx); doc, tdb = await find_file_in_all_dbs(f_id)
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1); idx = int(idx)
+    doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
         qs = doc.get("qualities", [])
         if 0 <= idx < len(qs): qs.pop(idx)
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"qualities": qs}}); invalidate_home_cache()
+        new_fid = qs[0]["file_id"] if qs else None
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"qualities": qs, "file_id": new_fid}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqadd_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1653,39 +1690,47 @@ async def edmvqadd_cb(c, q):
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_custom_qname") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_cq(c, m):
-    st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "edmv_addq_file"
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    st["current_quality"] = m.text.strip(); st["step"] = "edmv_addq_file"
     await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{st['f_id']}")]]))
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_addq_file") & unique_msg)
 async def handle_edmv_qf(c, m):
-    st = admin_steps.get(m.from_user.id); f_id, qn = st["f_id"], st["current_quality"]
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id, qn = st["f_id"], st["current_quality"]
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
-        await tdb["files"].update_one({"_id": f_id}, {"$push": {"qualities": {"name": qn, "file_id": fid}}})
-        if not doc.get("file_id"): await tdb["files"].update_one({"_id": f_id}, {"$set": {"file_id": fid}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$push": {"qualities": {"name": qn, "file_id": fid}}})
+        if not doc.get("file_id"): await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"file_id": fid}})
         invalidate_home_cache()
     st["step"] = "edmv_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_name(c, m):
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
     await show_edit_movie_panel(m, f_id, edit=False)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & unique_msg)
 async def handle_edmv_poster(c, m):
-    f_id = admin_steps[m.from_user.id]["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
         enc, mime, tg_fid, err = await extract_image_from_message(c, m)
         if err or not enc:
             return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
-        _, tdb = await find_file_in_all_dbs(f_id)
-        if tdb is None:
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None:
             admin_steps.pop(m.from_user.id, None)
             return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
         invalidate_home_cache()
         admin_steps.pop(m.from_user.id, None)
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
@@ -1698,19 +1743,21 @@ async def handle_edmv_poster_url(c, m):
     url = m.text.strip()
     if not url.startswith("http"):
         return await m.reply("❌ দয়া করে ছবি অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
-        _, tdb = await find_file_in_all_dbs(f_id)
-        if tdb is None: return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None: return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = url
         try:
             r = await asyncio.to_thread(requests.get, url, timeout=10)
             ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            if r.status_code == 200 and r.content and ct.startswith("image/"):
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl}})
         invalidate_home_cache()
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
@@ -1791,7 +1838,7 @@ async def handle_sr_poster_url(c, m):
         try:
             r = await asyncio.to_thread(requests.get, url, timeout=10)
             ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            if r.status_code == 200 and r.content and ct.startswith("image/"):
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 st["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
                 st["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
             else:
@@ -1951,10 +1998,14 @@ async def delsrpg_cb(c, q): await send_del_page(q, {"type": "series"}, "delsr", 
 
 @app.on_callback_query(filters.regex(r"^delsr_") & filters.user(ADMIN_ID) & unique_cb)
 async def delsr_cb(c, q):
-    _, f_id, pg = q.data.split("_"); doc, tdb = await find_file_in_all_dbs(f_id)
+    _, rest = q.data.split("_", 1)
+    f_id, pg = rest.rsplit("_", 1)
+    doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
-        await tdb["files"].delete_one({"_id": f_id})
-        await tdb["posters"].delete_one({"_id": f_id})
+        await tdb["files"].delete_one({"_id": doc["_id"]})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
         poster_cache_del(f_id)
         invalidate_home_cache()
         await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
@@ -1967,8 +2018,8 @@ async def cmd_edit_series(c, m):
         admin_steps[m.from_user.id] = {"step": "edsr_search_wait"}
         return await m.reply("🔍 **যে ওয়েব সিরিজ এডিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `Bachelor Point`")
     alls = await get_all_files_across_dbs({"type": "series"})
-    ms = [d for d in alls if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_series_panel(m, ms[0]["_id"], edit=False)
+    ms = [d for d in alls if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_series_panel(m, str(ms[0]["_id"]), edit=False)
     elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in ms[:20]]))
     return await m.reply(f"❌ '{name}' নামে কোনো সিরিজ পাওয়া যায়নি!")
 
@@ -1977,13 +2028,15 @@ async def handle_edsr_search(c, m):
     admin_steps.pop(m.from_user.id, None)
     name, year = parse_name_year(m.text, "")
     alls = await get_all_files_across_dbs({"type": "series"})
-    ms = [d for d in alls if name.lower() in d.get("title", "").lower() and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_series_panel(m, ms[0]["_id"], edit=False)
+    ms = [d for d in alls if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
+    if len(ms) == 1: return await show_edit_series_panel(m, str(ms[0]["_id"]), edit=False)
     elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in ms[:20]]))
     return await m.reply(f"❌ '{name}' নামে কোনো সিরিজ পাওয়া যায়নি! আবার `/editeseries` দিয়ে সার্চ করুন।")
 
 @app.on_callback_query(filters.regex(r"^edsrpick_") & filters.user(ADMIN_ID) & unique_cb)
-async def edsrpick_cb(c, q): await show_edit_series_panel(q, q.data.split("_")[1], edit=True)
+async def edsrpick_cb(c, q):
+    admin_steps.pop(q.from_user.id, None)
+    await show_edit_series_panel(q, q.data.split("_", 1)[1], edit=True)
 
 async def show_edit_series_panel(mq, f_id, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
@@ -2002,9 +2055,15 @@ async def show_edit_series_panel(mq, f_id, edit=True):
 async def edsr_cb(c, q):
     _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
-    if act == "pin": await tdb["files"].update_one({"_id": f_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
-    elif act == "prem": await tdb["files"].update_one({"_id": f_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
-    elif act == "del": await tdb["files"].delete_one({"_id": f_id}); await tdb["posters"].delete_one({"_id": f_id}); poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    db_id = doc["_id"]
+    if act == "pin": await tdb["files"].update_one({"_id": db_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
+    elif act == "prem": await tdb["files"].update_one({"_id": db_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
+    elif act == "del":
+        await tdb["files"].delete_one({"_id": db_id})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
+        poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
     elif act == "name": admin_steps[q.from_user.id] = {"step": "edsr_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
     elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক দিন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
     elif act == "cat":
@@ -2026,36 +2085,42 @@ async def edsr_cb(c, q):
 
 @app.on_callback_query(filters.regex(r"^edsrcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrcat_cb(c, q):
-    _, f_id, idx = q.data.split("_"); cats = await get_categories_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
     await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrlang_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrlang_cb(c, q):
-    _, f_id, idx = q.data.split("_"); ls = await get_languages_list(); _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
     await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_name(c, m):
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; _, tdb = await find_file_in_all_dbs(f_id)
-    if tdb is not None: await tdb["files"].update_one({"_id": f_id}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
     await show_edit_series_panel(m, f_id, edit=False)
 
 @app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & unique_msg)
 async def handle_edsr_poster(c, m):
-    f_id = admin_steps[m.from_user.id]["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
         enc, mime, tg_fid, err = await extract_image_from_message(c, m)
         if err or not enc:
             return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
-        _, tdb = await find_file_in_all_dbs(f_id)
-        if tdb is None:
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None:
             admin_steps.pop(m.from_user.id, None)
             return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
         invalidate_home_cache()
         admin_steps.pop(m.from_user.id, None)
         await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
@@ -2068,19 +2133,21 @@ async def handle_edsr_poster_url(c, m):
     url = m.text.strip()
     if not url.startswith("http"):
         return await m.reply("❌ দয়া করে ছবি অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
-        _, tdb = await find_file_in_all_dbs(f_id)
-        if tdb is None: return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None: return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = url
         try:
             r = await asyncio.to_thread(requests.get, url, timeout=10)
             ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            if r.status_code == 200 and r.content and ct.startswith("image/"):
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"thumb_url": purl}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl}})
         invalidate_home_cache()
         await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
     except Exception as e:
@@ -2088,10 +2155,12 @@ async def handle_edsr_poster_url(c, m):
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addssn_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addssn(c, m):
-    f_id = admin_steps.pop(m.from_user.id)["f_id"]; sno = clean_season_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; sno = clean_season_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); si = next((i for i, s in enumerate(ssns) if clean_season_no(s["season_no"]).lower() == sno.lower()), None)
-        if si is None: ssns.append({"season_no": sno, "episodes": []}); si = len(ssns) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+        if si is None: ssns.append({"season_no": sno, "episodes": []}); si = len(ssns) - 1; await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         await show_edit_season_panel(m, f_id, si, edit=False)
 
 async def show_edit_season_panel(mq, f_id, si, edit=True):
@@ -2105,32 +2174,40 @@ async def show_edit_season_panel(mq, f_id, si, edit=True):
     else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex(r"^edsrs_") & filters.user(ADMIN_ID) & unique_cb)
-async def edsrs_cb(c, q): _, f_id, si = q.data.split("_"); await show_edit_season_panel(q, f_id, int(si), edit=True)
+async def edsrs_cb(c, q):
+    _, rest = q.data.split("_", 1); f_id, si = rest.rsplit("_", 1)
+    await show_edit_season_panel(q, f_id, int(si), edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrep_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrep_cb(c, q):
-    ps = q.data.split("_"); act = ps[1]
-    if act == "view": return await show_edit_ep_panel(q, ps[2], int(ps[3]), int(ps[4]), edit=True)
-    elif act == "add": admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": ps[2], "s_idx": int(ps[3])}; return await q.message.edit_text("🎬 নতুন Episode নম্বর লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{ps[2]}_{ps[3]}")]]))
+    _, act, rest = q.data.split("_", 2)
+    if act == "view":
+        f_id, si, ei = rest.rsplit("_", 2)
+        return await show_edit_ep_panel(q, f_id, int(si), int(ei), edit=True)
+    elif act == "add":
+        f_id, si = rest.rsplit("_", 1)
+        admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": f_id, "s_idx": int(si)}
+        return await q.message.edit_text("🎬 নতুন Episode নম্বর লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{f_id}_{si}")]]))
     elif act == "delssn":
-        f_id, si = ps[2], int(ps[3]); doc, tdb = await find_file_in_all_dbs(f_id)
+        f_id, si_s = rest.rsplit("_", 1); si = int(si_s); doc, tdb = await find_file_in_all_dbs(f_id)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns): ssns.pop(si)
-            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "delep":
-        f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); doc, tdb = await find_file_in_all_dbs(f_id)
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, tdb = await find_file_in_all_dbs(f_id)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]): ssns[si]["episodes"].pop(ei)
-            await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         return await show_edit_season_panel(q, f_id, si, edit=True)
     elif act == "addq":
-        f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); admin_steps[q.from_user.id] = {"step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "e_idx": ei}
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s)
+        admin_steps[q.from_user.id] = {"step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "e_idx": ei}
         return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
     elif act == "delqmenu":
-        f_id, si, ei = ps[2], int(ps[3]), int(ps[4]); doc, _ = await find_file_in_all_dbs(f_id); qs = doc["seasons"][si]["episodes"][ei].get("qualities", [])
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, _ = await find_file_in_all_dbs(f_id); qs = doc["seasons"][si]["episodes"][ei].get("qualities", [])
         if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
         btns = [[InlineKeyboardButton(f"❌ {ql['name']}", callback_data=f"edsrqdel_{f_id}_{si}_{ei}_{qi}")] for qi, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")]]
         return await q.message.edit_text("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
@@ -2146,19 +2223,22 @@ async def show_edit_ep_panel(mq, f_id, si, ei, edit=True):
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addep_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addep(c, m):
-    st = admin_steps.pop(m.from_user.id); f_id, si, eno = st["f_id"], st["s_idx"], clean_ep_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id, si, eno = st["f_id"], st["s_idx"], clean_ep_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); eps = ssns[si]["episodes"]; ei = next((i for i, e in enumerate(eps) if clean_ep_no(e["ep_no"]).lower() == eno.lower()), None)
-        if ei is None: eps.append({"ep_no": eno, "qualities": []}); ei = len(eps) - 1; await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+        if ei is None: eps.append({"ep_no": eno, "qualities": []}); ei = len(eps) - 1; await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         await show_edit_ep_panel(m, f_id, si, ei, edit=False)
 
 @app.on_callback_query(filters.regex(r"^edsrqdel_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrqdel_cb(c, q):
-    _, f_id, si, ei, qi = q.data.split("_"); si, ei, qi = int(si), int(ei), int(qi); doc, tdb = await find_file_in_all_dbs(f_id)
+    _, rest = q.data.split("_", 1); f_id, si_s, ei_s, qi_s = rest.rsplit("_", 3)
+    si, ei, qi = int(si_s), int(ei_s), int(qi_s); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); qs = ssns[si]["episodes"][ei]["qualities"]
         if 0 <= qi < len(qs): qs.pop(qi)
-        await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
     await show_edit_ep_panel(q, f_id, si, ei, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrqadd_") & filters.user(ADMIN_ID) & unique_cb)
@@ -2172,15 +2252,19 @@ async def edsrqadd_cb(c, q):
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_custom_qname") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_cq(c, m):
-    st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "edsr_addq_file"
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    st["current_quality"] = m.text.strip(); st["step"] = "edsr_addq_file"
     back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edsrep_addq_{st['f_id']}_{st['s_idx']}_{st['e_idx']}")]])
     await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addq_file") & unique_msg)
 async def handle_edsr_qf(c, m):
-    st = admin_steps.get(m.from_user.id); f_id, si, ei, qn = st["f_id"], st["s_idx"], st["e_idx"], st["current_quality"]
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id, si, ei, qn = st["f_id"], st["s_idx"], st["e_idx"], st["current_quality"]
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": f_id}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+    if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
     st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
 
 # ==========================================
@@ -2250,7 +2334,9 @@ async def cmd_legacy_router(c, m):
             if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['delfile']}")
             for d in await get_extra_dbs_async():
                 if (await d["files"].delete_one({"_id": parts[1]})).deleted_count > 0:
-                    await d["posters"].delete_one({"_id": parts[1]})
+                    for dx in await get_extra_dbs_async():
+                        try: await dx["posters"].delete_one({"_id": parts[1]})
+                        except: pass
                     poster_cache_del(parts[1])
                     invalidate_home_cache()
                     return await m.reply("✅ ফাইল ডিলিট হয়েছে!")
@@ -2279,7 +2365,7 @@ async def cmd_legacy_router(c, m):
         if cmd == "delautochannel": chs = await auto_channels_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {ch['chat_id']}", callback_data=f"delautoch_{ch['_id']}")] for ch in chs])) if chs else await m.reply("❌ কোনো অটো চ্যানেল নেই!")
         if cmd == "spincoin":
             if "-" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['spincoin']}")
-            mn, mx = map(int, parts[1].split("-")); await config_col.update_one({"_id": "settings"}, {"$set": {"spin_coin_min": mn, "spin_coin_max": mx}}); return await m.reply("✅ Spin Coin Set!")
+            mn, mx = map(int, parts[1].split("-")); await config_col.update_one({"_id": "settings"}, {"$set": {"spin_coin_min": mn, "spin_coin_max": mx}}); invalidate_home_cache(); return await m.reply("✅ Spin Coin Set!")
         if cmd in ("addtask", "addzonetask", "addlinktask"):
             if "|" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES[cmd]}")
             segs = [x.strip() for x in arg.split("|")]
@@ -2414,18 +2500,23 @@ async def legacy_auto_cb(c, q):
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
-
-# ==========================================
+    # ==========================================
 # 10. FLASK WEB API & MONGODB POSTER HOSTING + STRICT AD + TG VERIFY + TUTORIALS
 # ==========================================
 @web.route('/poster/<poster_id>')
 def serve_poster_from_mongo(poster_id):
     if poster_id == "default":
-        return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=604800"})
+        return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+
+    req_v = request.args.get("v", "").strip()
+    cache_hdr = "public, max-age=86400" if req_v else "no-cache, max-age=0, must-revalidate"
 
     if poster_id in POSTER_CACHE:
-        raw, mime = POSTER_CACHE[poster_id]
-        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=604800"})
+        cached = POSTER_CACHE[poster_id]
+        raw, mime = cached[0], cached[1]
+        c_ver = cached[2] if len(cached) > 2 else ""
+        if req_v and c_ver == req_v:
+            return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
 
     for d in get_extra_dbs_sync():
         try:
@@ -2434,9 +2525,10 @@ def serve_poster_from_mongo(poster_id):
                 raw, mime = decode_b64_to_bytes(pdoc["data"])
                 final_mime = pdoc.get("mime", mime)
                 if final_mime == "image/jpg": final_mime = "image/jpeg"
+                db_ver = str(pdoc.get("ver", req_v or ""))
                 if raw:
-                    poster_cache_put(poster_id, raw, final_mime)
-                    return Response(raw, mimetype=final_mime, headers={"Cache-Control": "public, max-age=604800"})
+                    poster_cache_put(poster_id, raw, final_mime, ver=db_ver)
+                    return Response(raw, mimetype=final_mime, headers={"Cache-Control": cache_hdr})
         except: pass
 
     if poster_id.startswith("promo_"):
@@ -2446,8 +2538,8 @@ def serve_poster_from_mongo(poster_id):
                 if pr["image"].startswith("data:image"):
                     raw, mime = decode_b64_to_bytes(pr["image"])
                     if raw:
-                        poster_cache_put(poster_id, raw, mime)
-                        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=604800"})
+                        poster_cache_put(poster_id, raw, mime, ver=req_v)
+                        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
                 elif pr["image"].startswith("http"):
                     return redirect(pr["image"])
         except: pass
@@ -2459,8 +2551,8 @@ def serve_poster_from_mongo(poster_id):
                 if up["thumb_url"].startswith("data:image"):
                     raw, mime = decode_b64_to_bytes(up["thumb_url"])
                     if raw:
-                        poster_cache_put(poster_id, raw, mime)
-                        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=604800"})
+                        poster_cache_put(poster_id, raw, mime, ver=req_v)
+                        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
                 elif up["thumb_url"].startswith("http"):
                     return redirect(up["thumb_url"])
         except: pass
@@ -2473,24 +2565,28 @@ def serve_poster_from_mongo(poster_id):
                 if tu.startswith("data:image"):
                     raw, mime = decode_b64_to_bytes(tu)
                     if raw:
-                        poster_cache_put(poster_id, raw, mime)
-                        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=604800"})
+                        poster_cache_put(poster_id, raw, mime, ver=req_v)
+                        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
                 elif tu.startswith("http") and "/poster/" not in tu:
                     return redirect(tu)
         except: pass
 
-    return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+    return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "no-cache, max-age=60"})
 
-def warm_site_logo_sync():
+def warm_site_logo_sync(req_v=""):
     if "site_logo" in POSTER_CACHE:
-        return POSTER_CACHE["site_logo"]
+        cached = POSTER_CACHE["site_logo"]
+        c_ver = cached[2] if len(cached) > 2 else ""
+        if not req_v or c_ver == req_v:
+            return cached[0], cached[1]
     try:
         pdoc = sync_db["posters"].find_one({"_id": "site_logo"})
         if pdoc and pdoc.get("data"):
             raw, mime = decode_b64_to_bytes(pdoc["data"])
             final_mime = pdoc.get("mime", mime)
+            db_ver = str(pdoc.get("ver", req_v or ""))
             if raw:
-                poster_cache_put("site_logo", raw, final_mime)
+                poster_cache_put("site_logo", raw, final_mime, ver=db_ver)
                 return raw, final_mime
     except: pass
     conf = sync_db["config"].find_one({"_id": "settings"}) or {}
@@ -2499,7 +2595,7 @@ def warm_site_logo_sync():
         try:
             raw = _bot_api_download_sync(logo)
             if raw:
-                poster_cache_put("site_logo", raw, "image/jpeg")
+                poster_cache_put("site_logo", raw, "image/jpeg", ver=req_v)
                 try:
                     sync_db["posters"].update_one({"_id": "site_logo"}, {"$set": {"data": base64.b64encode(raw).decode("utf-8"), "mime": "image/jpeg"}}, upsert=True)
                 except: pass
@@ -2509,12 +2605,16 @@ def warm_site_logo_sync():
 
 @web.route('/site_logo')
 def serve_site_logo():
+    req_v = request.args.get("v", "").strip()
+    cache_hdr = "public, max-age=86400" if req_v else "no-cache, max-age=0, must-revalidate"
     if "site_logo" in POSTER_CACHE:
-        raw, mime = POSTER_CACHE["site_logo"]
-        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=86400"})
-    raw, mime = warm_site_logo_sync()
+        cached = POSTER_CACHE["site_logo"]
+        c_ver = cached[2] if len(cached) > 2 else ""
+        if req_v and c_ver == req_v:
+            return Response(cached[0], mimetype=cached[1], headers={"Cache-Control": cache_hdr})
+    raw, mime = warm_site_logo_sync(req_v)
     if raw:
-        return Response(raw, mimetype=mime, headers={"Cache-Control": "public, max-age=86400"})
+        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
     conf = sync_db["config"].find_one({"_id": "settings"}) or {}
     logo = conf.get("start_logo")
     if logo and str(logo).startswith("http"):
@@ -3231,8 +3331,10 @@ def api_home_data():
     if uid_arg.isdigit():
         try: u_state = build_user_state_dict(int(uid_arg))
         except: pass
-    return jsonify({"files": p["files"], "user": u_state})
-    
+    resp = jsonify({"files": p["files"], "user": u_state})
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+
 # ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
@@ -3671,7 +3773,7 @@ function applyUserStateUI(){
   }
   renderFavs();
 }
-async function loadUser(){try{const r=await fetch('/api/user/'+userId);userState=await r.json();applyUserStateUI();}catch(e){}}
+async function loadUser(){try{const r=await fetch('/api/user/'+userId+'?_t='+Date.now(),{cache:'no-store'});userState=await r.json();applyUserStateUI();}catch(e){}}
 applyUserStateUI();
 
 function hideSplash(){
@@ -3690,12 +3792,13 @@ async function hydrateAppFast(){
       renderFeed();
       setTimeout(hideSplash,350);
     }
-    const r=await fetch('/api/home_data?uid='+userId);
+    const r=await fetch('/api/home_data?uid='+userId+'&_t='+Date.now(),{cache:'no-store'});
     const d=await r.json();
     if(Array.isArray(d.files)){
       allFiles=d.files;
       renderTopSlider();
       renderFeed();
+      renderFavs();
     }
     if(d.user){
       userState=d.user;
@@ -3831,7 +3934,6 @@ async function clearHistory(){
   renderFavs();
   await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'clear_history',uid:userId})});
 }
-
 function renderUpcoming(){document.getElementById('upcoming-list').innerHTML=upcomingList.map(u=>`<div class="feed-card"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${u.thumb_url||'/poster/default'}"><div class="b-new">📅 UPCOMING</div>${brandBadgeHtml()}<div class="b-type">🕒 ${u.release_time}</div></div><div class="feed-body"><div class="feed-title">${u.title}</div><div class="feed-meta"><span>Release: ${u.release_time}</span></div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো আপকামিং শিডিউল নেই!</p>";document.getElementById('promo-full-list').innerHTML=promotions.map(p=>`<div class="feed-card" onclick="openTgLink('${p.link}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="b-new">⭐ PROMO</div></div><div class="feed-body"><div class="feed-title">${p.title}</div></div></div>`).join('');}
 renderUpcoming();
 
@@ -4279,7 +4381,7 @@ function openTool(id){
   };
   b.innerHTML=ui[id];
   if(id==='blood')showBlood();
-  if(id==='tz'){const zs=[['🇧🇩 Dhaka','Asia/Dhaka'],['🇸🇦 Riyadh','Asia/Riyadh'],['🇦🇪 Dubai','Asia/Dubai'],['🇮🇳 Delhi','Asia/Kolkata'],['🇬🇧 London','Europe/London'],['🇺🇸 New York','America/New_York']];document.getElementById('tr').innerHTML=zs.map(z=>`<b>${z[0]}:</b> ${new Date().toLocaleTimeString('en-US',{timeZone:z[1]})}`).join('<br>');}
+  if(id==='tz'){const zs=[['🇧🇩 Dhaka','Asia/Dhaka'],['🇸🇦 Riyadh','Asia/Dhaka'.replace('Dhaka','Riyadh')],['🇦🇪 Dubai','Asia/Dubai'],['🇮🇳 Delhi','Asia/Kolkata'],['🇬🇧 London','Europe/London'],['🇺🇸 New York','America/New_York']];document.getElementById('tr').innerHTML=zs.map(z=>`<b>${z[0]}:</b> ${new Date().toLocaleTimeString('en-US',{timeZone:z[1]})}`).join('<br>');}
   if(id==='color')pickCol();
 }
 
@@ -4473,7 +4575,12 @@ hydrateAppFast();
 
 def _fetch_shell_payload():
     now = time.time()
-    if SHELL_DATA_CACHE["data"] is not None and (now - SHELL_DATA_CACHE["ts"]) < 60:
+    db_ver = get_db_cache_ver()
+    if (
+        SHELL_DATA_CACHE["data"] is not None
+        and SHELL_DATA_CACHE.get("ver") == db_ver
+        and (now - SHELL_DATA_CACHE["ts"]) < 60
+    ):
         return SHELL_DATA_CACHE["data"]
 
     def q_config():
@@ -4575,16 +4682,27 @@ def _fetch_shell_payload():
     }
     SHELL_DATA_CACHE["data"] = payload
     SHELL_DATA_CACHE["ts"] = time.time()
+    SHELL_DATA_CACHE["ver"] = db_ver
     return payload
 
 def _fetch_home_payload():
     now = time.time()
-    if HOME_DATA_CACHE["data"] is not None and (now - HOME_DATA_CACHE["ts"]) < 120:
+    db_ver = get_db_cache_ver()
+    if (
+        HOME_DATA_CACHE["data"] is not None
+        and HOME_DATA_CACHE.get("ver") == db_ver
+        and (now - HOME_DATA_CACHE["ts"]) < 120
+    ):
         return HOME_DATA_CACHE["data"]
 
     with HOME_CACHE_LOCK:
         now = time.time()
-        if HOME_DATA_CACHE["data"] is not None and (now - HOME_DATA_CACHE["ts"]) < 120:
+        db_ver = get_db_cache_ver()
+        if (
+            HOME_DATA_CACHE["data"] is not None
+            and HOME_DATA_CACHE.get("ver") == db_ver
+            and (now - HOME_DATA_CACHE["ts"]) < 120
+        ):
             return HOME_DATA_CACHE["data"]
 
         shell = _fetch_shell_payload()
@@ -4653,6 +4771,7 @@ def _fetch_home_payload():
         }
         HOME_DATA_CACHE["data"] = payload
         HOME_DATA_CACHE["ts"] = time.time()
+        HOME_DATA_CACHE["ver"] = db_ver
         return payload
 
 def warm_caches_loop():
@@ -4665,7 +4784,7 @@ def warm_caches_loop():
 
 @web.route('/')
 def home():
-    p = _fetch_shell_payload()
+    p = _fetch_home_payload()
     config = p["config"]
     tut_vid = config.get("tutorial_vid") or ""
     tut_ver = hashlib.md5((str(tut_vid) + str(len(p["tutorials"]))).encode()).hexdigest()[:8] if (tut_vid or p["tutorials"]) else "0"
@@ -4680,9 +4799,7 @@ def home():
         try: initial_user = build_user_state_dict(int(uid_arg))
         except: pass
 
-    initial_files = []
-    if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
-        initial_files = HOME_DATA_CACHE["data"]["files"][:15]
+    initial_files = p["files"][:15] if p.get("files") else []
 
     ad_config = {
         "ads_on": config.get("ads_on", True),
@@ -4700,7 +4817,7 @@ def home():
         "wait_times": config.get("direk_wait", [5])
     }
 
-    return render_template_string(
+    html = render_template_string(
         HTML_TEMPLATE,
         files_json=json.dumps(initial_files, default=str),
         categories_json=json.dumps(p["cats"]),
@@ -4725,6 +4842,7 @@ def home():
         marquee_text=config.get("marquee_text", "VLC Player অথবা MX Player দিয়ে চালিয়ে দেখুন। ✅ সাউন্ড/অডিও সমস্যা হলে ভিডিওটি ডাউনলোড করে দেখুন।"),
         ref_coin=config.get("ref_coin", 10)
     )
+    return Response(html, mimetype="text/html", headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
 
 app_flask = web
 
