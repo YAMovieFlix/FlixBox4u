@@ -1,4 +1,4 @@
-import os, sys, re, asyncio, threading, random, string, time, requests, json, base64, socket, io, traceback, gzip, hashlib
+import os, sys, re, asyncio, threading, random, string, time, requests, json, base64, socket, io, traceback, gzip, hashlib, secrets
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from datetime import datetime, timedelta
@@ -66,13 +66,15 @@ db_client, db = None, None
 users_col, files_col, cats_col, langs_col, tasks_col, titles_col = None, None, None, None, None, None
 pkgs_col, links_col, config_col, channels_col, coupons_col, mongos_col = None, None, None, None, None, None
 auto_channels_col, promotions_col, zone_ids_col, upcoming_col = None, None, None, None
-posters_col, short_links_col = None, None
+posters_col, short_links_col, tutorials_col = None, None, None
 sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)["NewBot"]
 
 POSTER_CACHE = {}
 EXTRA_URI_CACHE = {"uris": None, "ts": 0}
 HOME_DATA_CACHE = {"data": None, "ts": 0}
 SHELL_DATA_CACHE = {"data": None, "ts": 0}
+AD_TOKENS = {}
+AD_TOKENS_LOCK = threading.Lock()
 WEB_POOL = ThreadPoolExecutor(max_workers=10)
 TUTORIAL_DL_LOCK = threading.Lock()
 HOME_CACHE_LOCK = threading.Lock()
@@ -147,7 +149,7 @@ def compress_response(response):
 async def get_db():
     global db_client, db, users_col, files_col, cats_col, langs_col, pkgs_col, links_col, config_col
     global channels_col, coupons_col, mongos_col, tasks_col, titles_col, auto_channels_col, promotions_col, zone_ids_col, upcoming_col
-    global posters_col, short_links_col
+    global posters_col, short_links_col, tutorials_col
     if db_client is None:
         db_client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=8000); db = db_client["NewBot"]
         users_col, files_col, cats_col, langs_col = db["users"], db["files"], db["categories"], db["languages"]
@@ -155,7 +157,7 @@ async def get_db():
         channels_col, coupons_col, mongos_col = db["channels"], db["coupons"], db["mongos"]
         tasks_col, titles_col = db["custom_tasks"], db["auto_titles"]
         auto_channels_col, promotions_col, zone_ids_col, upcoming_col = db["auto_channels"], db["promotions"], db["zone_ids"], db["upcoming"]
-        posters_col, short_links_col = db["posters"], db["short_links"]
+        posters_col, short_links_col, tutorials_col = db["posters"], db["short_links"], db["tutorials"]
     return db
 
 async def get_config():
@@ -165,7 +167,9 @@ async def get_config():
         conf = {
             "_id": "settings", "ref_coin": 10, "ref_on": True, "auto_del_time": 0,
             "autodel_text": "⏳ ফাইলটি নির্দিষ্ট সময় পর অটো ডিলিট হয়ে যাবে।", "frotect": False,
-            "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "prstep": 1, "regstep": 1, "task_step": 1,
+            "ads_on": True, "direk_wait": [5], "prem_vid_wait": 10, "task_wait_sec": 10, "monetag_wait": 4,
+            "strict_ad": True, "blur_sec": 20, "brand_name": "",
+            "prstep": 1, "regstep": 1, "task_step": 1,
             "start_logo": None, "start_text": "", "payment_admin": DEFAULT_ADMIN_USERNAME,
             "autovid_msg_id": None, "autovid_chat_id": None, "autovid_time_min": 0,
             "autopost_time_hr": 0, "autopost_idx": 0, "site_name": "Moviee Link",
@@ -206,6 +210,28 @@ def send_tg_api_fallback(chat_id, text):
     if BOT_TOKEN:
         try: requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=5)
         except: pass
+
+def send_tg_tutorial_sync(chat_id, vid, title="Tutorial Video"):
+    if not vid:
+        return False
+    cap = f"🎬 **{title}**\n\n✅ কিভাবে ভিডিও দেখবেন ও ডাউনলোড করবেন তা এখানে দেখানো হয়েছে।"
+    try:
+        if getattr(app, "is_connected", False):
+            if str(vid).startswith("http"):
+                asyncio.run_coroutine_threadsafe(app.send_message(chat_id, f"{cap}\n🔗 {vid}"), loop)
+            else:
+                asyncio.run_coroutine_threadsafe(app.send_video(chat_id, video=vid, caption=cap), loop)
+            return True
+    except: pass
+    if BOT_TOKEN:
+        try:
+            if str(vid).startswith("http"):
+                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"{cap}\n{vid}"}, timeout=8).json()
+            else:
+                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json={"chat_id": chat_id, "video": vid, "caption": cap}, timeout=10).json()
+            return bool(r.get("ok"))
+        except: pass
+    return False
 
 def keep_alive():
     while True:
@@ -605,7 +631,7 @@ async def deliver_cached_file(client, uid, f_id_send, title, config):
     except Exception as e: await msg.edit_text(f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
 
 # ==========================================
-# 5. BOT COMMANDS (START + STATS + SIMPLE CONFIG)
+# 5. BOT COMMANDS (START + STATS + SIMPLE CONFIG + STRICT AD + BLUR + BRAND + TUTORIALS)
 # ==========================================
 @app.on_message(filters.command("cancel", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_cancel(c, m): admin_steps.pop(m.from_user.id, None); await m.reply("✅ প্রসেস বাতিল করা হয়েছে!")
@@ -618,80 +644,58 @@ async def cmd_list(c, m):
     part1 = """🛠 **সকল কমান্ড ও ব্যবহারের উদাহরণ (পর্ব ১/২):**
 💡 _কমান্ডে ক্লিক করলে সরাসরি বটে রান হবে, আর কোড বক্সে ক্লিক করলে কপি হবে!_
 
-🎬 **Movies & Series:**
+🎬 **Movies, Series, Brand & 18+ Blur:**
 • /movies — নতুন মুভি এড
   কপি: `/movies NAME RRR 2024`
-• /editemovies — মুভি এডিট (নাম লিখে সার্চ করুন)
-  কপি: `/editemovies RRR`
+• /editemovies — মুভি এডিট (কপি: `/editemovies RRR`)
 • /deletedmovies — মুভি ডিলিট লিস্ট
 • /addseries — নতুন ওয়েব সিরিজ এড
   কপি: `/addseries Bachelor Point 2026`
-• /editeseries — সিরিজ এডিট (নাম লিখে সার্চ করুন)
-  কপি: `/editeseries Bachelor Point`
+• /editeseries — সিরিজ এডিট (কপি: `/editeseries Bachelor Point`)
 • /deleteseries — সিরিজ ডিলিট লিস্ট
-• /addupcoming — আপকামিং শিডিউল এড (ছবিতে রিপ্লাই করেও করা যাবে)
-  কপি: `/addupcoming Pushpa 3 | আজ রাত ৮টা`
+• /addupcoming — আপকামিং শিডিউল এড (কপি: `/addupcoming Pushpa 3 | আজ রাত ৮টা`)
 • /delupcoming — আপকামিং ডিলিট
-• /setcategory — নতুন ক্যাটাগরি এড
-  কপি: `/setcategory Action` অথবা `/setcategory 18+`
+• /setcategory — নতুন ক্যাটাগরি এড (কপি: `/setcategory 18+` অথবা `/setcategory Action`)
 • /deletecategory — ক্যাটাগরি ডিলিট
-• /setlanguage — নতুন ভাষা এড
-  কপি: `/setlanguage Bangla`
-• /deletelanguage — ভাষা ডিলিট
-• /setrecgroup — Movie Recommendation গ্রুপ লিংক সেট
-  কপি: `/setrecgroup https://t.me/my_movie_group`
-• /delrecgroup — Recommendation গ্রুপ রিমুভ
+• /blar — ১৮+ পোস্টার ট্যাপ করে দেখার পর কত সেকেন্ডে অটো ব্লার হবে
+  কপি: `/blar 20s` (বন্ধ করতে `/blar 0`)
+• /brand — সব পোস্টারের নিচে বাম কোনায় ব্র্যান্ড নাম সেট
+  কপি: `/brand Flixbix4u` | রিমুভ: `/delbrand`
+• /setlanguage — ভাষা এড (কপি: `/setlanguage Bangla`) | /deletelanguage
+• /setrecgroup — Recommendation গ্রুপ (কপি: `/setrecgroup https://t.me/my_group`) | /delrecgroup
 • /cancel — চলমান প্রসেস বাতিল"""
 
     part2 = """🛠 **সকল কমান্ড ও ব্যবহারের উদাহরণ (পর্ব ২/২):**
 
-💰 **Monetag, Adsterra, Steps, Redeem & Premium:**
-• /addzoonid — Monetag Zone ID এড
-  কপি: `/addzoonid 12242829`
-• /deletezoonid — Zone ID ডিলিট
-• /addlink — Adsterra / Direct Ad Link এড
-  কপি: `/addlink https://example.com/ad`
-• /delink — Ad Link ডিলিট
-• /prstep — প্রিমিয়াম অ্যাড স্টেপ (কপি: `/prstep 2`)
-• /regstep — রেগুলার অ্যাড স্টেপ (কপি: `/regstep 2`)
-• /taskstep — টাস্ক ও স্পিন অ্যাড স্টেপ (কপি: `/taskstep 2`)
-• /prparadd — প্রিমিয়াম ডাইরেক্ট লিংক ওয়েট সেকেন্ড (কপি: `/prparadd 10`)
-• /addredeem — প্রিমিয়াম বা কয়েন রিডিম কোড তৈরি
-  কপি: `/addredeem 1day 10 VIP10` অথবা `/addredeem 50 10 COIN50`
-• /allred — র‍্যান্ডম কয়েন কোড তৈরি
-  কপি: `/allred 100 10-50`
-• /Premiumuserlist — প্রিমিয়াম ইউজার লিস্ট
-• /deletepremium — প্রিমিয়াম রিমুভ
-  কপি: `/deletepremium 12345678`
-• /addrdiem — নির্দিষ্ট ইউজারকে প্রিমিয়াম দেওয়া
-  কপি: `/addrdiem 12345678 30 d`
+💰 **Strict Ad, Wait Time, Monetag, Steps, Redeem & Telegram Tasks:**
+• /strictad — অ্যাড শেষ না করে ব্যাক দিলে কিছু পাবে না (`on` / `off`)
+  কপি: `/strictad on`
+• /regwait — রেগুলার ডাইরেক্ট অ্যাডের সময় (সেকেন্ড)
+  কপি: `/regwait 10` অথবা `/regwait 5-15`
+• /prparadd — প্রিমিয়াম ডাইরেক্ট অ্যাডের সময় (কপি: `/prparadd 10`)
+• /taskwait — স্পিন ও টাস্ক ডাইরেক্ট অ্যাডের সময় (কপি: `/taskwait 10`)
+• /monetagwait — Monetag অ্যাডের ন্যূনতম দেখার সময় (কপি: `/monetagwait 4`)
+• /addzoonid — Monetag Zone ID এড (কপি: `/addzoonid 12242829`) | /deletezoonid
+• /addlink — Adsterra / Direct Link এড (কপি: `/addlink https://example.com`) | /delink
+• /prstep (কপি: `/prstep 2`) | /regstep (কপি: `/regstep 2`) | /taskstep (কপি: `/taskstep 2`)
+• /tgtask — টেলিগ্রাম চ্যানেল/গ্রুপ জয়েন টাস্ক (বট অ্যাডমিন থাকতে হবে)
+  কপি: `/tgtask -100123456789 50` | ডিলিট: `/deltgtask`
+• /addtask — কাস্টম টাস্ক (কপি: `/addtask Join | https://t.me/ch | 50`)
+• /addzonetask (কপি: `/addzonetask Monetag | 12242829 | 30`) | /addlinktask | /deltask
+• /addredeem (কপি: `/addredeem 1day 10 VIP10`) | /allred (কপি: `/allred 100 10-50`)
+• /Premiumuserlist | /deletepremium | /addrdiem
 
-⚙️ **Site, Tasks, Relock (Seconds) & Channel Settings:**
-• /stats — বট স্ট্যাটিস্টিকস
-• /name — সাইটের নাম (কপি: `/name Moviee Link`)
-• /setnotice — লাইভ স্ক্রলিং নোটিশ (কপি: `/setnotice নতুন মুভি পেতে জয়েন করুন`)
-• /settutorial — ভিডিওতে রিপ্লাই করে টিউটোরিয়াল সেট
-• /logo — ছবিতে রিপ্লাই করে স্টার্ট ও মিনি অ্যাপ লোগো সেট
-• /addtex — স্টার্ট এক্সট্রা টেক্সট (কপি: `/addtex স্বাগতম!`) | /deltex
-• /setpremcoin — আনলক কয়েন সেট (কপি: `/setpremcoin 50`)
-• /relocktime — আনলক মেয়াদ **সেকেন্ড** (কপি: `/relocktime 30`, `0`=প্রতি ক্লিকে অ্যাড) | /delrelocktime
-• /lockall — সবার আনলক ভিডিও রিসেট
-• /spincoin — স্পিন কয়েন (কপি: `/spincoin 10-50`) | কপি: `/spinlimit 5`
-• /taskcoin — টাস্ক কয়েন (কপি: `/taskcoin 20`) | কপি: `/tasklimit 5`
-• /addtask — কাস্টম টাস্ক (অটো Zone/Link) (কপি: `/addtask Join | https://t.me/ch | 50`)
-• /addzonetask — আলাদা Zone ID টাস্ক (কপি: `/addzonetask Monetag Task | 12242829 | 30`)
-• /addlinktask — আলাদা Direct Link টাস্ক (কপি: `/addlinktask Direct Task | https://example.com | 30`)
-• /deltask — কাস্টম টাস্ক ডিলিট
-• /refbonous — রেফার বোনাস (কপি: `/refbonous 20`) | /refbonousoff
-• /usd — USD প্যাকেজ (কপি: `/usd 100 5`) | /bdt (কপি: `/bdt 100 50`)
-• /addcred — কয়েন প্যাকেজ (কপি: `/addcred 500 = 7 d`) | /delcred
-• /addcnl — ইনলাইন চ্যানেল (কপি: `/addcnl Backup https://t.me/ch`) | /delcnl
-• /vercnl — Must Join চ্যানেল (কপি: `/vercnl -100123456 https://t.me/ch`) | /delvrcnl
-• /autochannel — অটো পোস্ট চ্যানেল (কপি: `/autochannel -100123456 30 60`) | /delautochannel
-• /brodcast ও /cnlbdcst — মেসেজে রিপ্লাই করে ব্রডকাস্ট
-• /autodel (কপি: `/autodel 600`) | /frotect (কপি: `/frotect on`) | /addadmin (কপি: `/addadmin Sudo_king`)
-• /mongo (কপি: `/mongo <uri>`) | /delmongo | /mongostats
-• /addfile | /delfile (কপি: `/delfile <id>`) | /delall | /vidtitel (কপি: `/vidtitel <title>`) | /deltitel | /auto | /auto2 | /promot (কপি: `/promot Title | https://t.me/...`) | /delpromot"""
+⚙️ **Tutorials (Unlimited + Multi-Language), Site & Channels:**
+• /addtutorial — ভাষা অনুযায়ী আনলিমিটেড টিউটোরিয়াল এড (ভিডিওতে রিপ্লাই)
+  কপি: `/addtutorial Bangla | ডাউনলোডের নিয়ম`
+• /deltutorial — টিউটোরিয়াল ডিলিট | /tutorial — টেলিগ্রামে টিউটোরিয়াল দেখা
+• /settutorial — ডিফল্ট টিউটোরিয়াল ভিডিও সেট (ভিডিওতে রিপ্লাই)
+• /stats | /name (কপি: `/name Moviee Link`) | /setnotice | /logo | /addtex | /deltex
+• /setpremcoin (কপি: `/setpremcoin 50`) | /relocktime (কপি: `/relocktime 30`) | /delrelocktime | /lockall
+• /spincoin (কপি: `/spincoin 10-50`) | /spinlimit 5 | /taskcoin 20 | /tasklimit 5
+• /refbonous 20 | /refbonousoff | /usd 100 5 | /bdt 100 50 | /addcred 500 = 7 d | /delcred
+• /addcnl | /delcnl | /vercnl | /delvrcnl | /autochannel | /delautochannel
+• /brodcast | /cnlbdcst | /autodel | /frotect | /addadmin | /mongo | /delmongo | /mongostats | /addfile | /delfile | /delall | /vidtitel | /deltitel | /auto | /auto2 | /promot | /delpromot"""
 
     kb1 = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 /movies", callback_data="cmdrun_movies"), InlineKeyboardButton("📺 /addseries", callback_data="cmdrun_addseries")],
@@ -734,7 +738,15 @@ async def cmd_stats(c, m):
         for d in dbs:
             try: tf += await d["files"].count_documents({})
             except: pass
-        await m.reply(f"📊 **Bot Statistics:**\n\n👥 Total Users: `{tu}`\n🎬 Total Movies/Series: `{tf}`\n💎 Premium Users: `{pu}`\n👤 Regular Users: `{max(0, tu - pu)}`\n🗄 MongoDBs: `{len(dbs)}`\n🌐 Mini App URL: `{live_url}`")
+        await m.reply(
+            f"📊 **Bot Statistics:**\n\n"
+            f"👥 Total Users: `{tu}`\n🎬 Total Movies/Series: `{tf}`\n"
+            f"💎 Premium Users: `{pu}`\n👤 Regular Users: `{max(0, tu - pu)}`\n"
+            f"🗄 MongoDBs: `{len(dbs)}`\n"
+            f"🛡 Strict Ad: `{'ON' if conf.get('strict_ad', True) else 'OFF'}` | 🔞 Blur: `{conf.get('blur_sec', 20)}s`\n"
+            f"🏷 Brand: `{conf.get('brand_name') or 'None'}`\n"
+            f"🌐 Mini App URL: `{live_url}`"
+        )
     except Exception as e:
         await m.reply(f"❌ Stats Error: `{e}`")
 
@@ -755,10 +767,12 @@ SIMPLE_CONF = {
     "autpost": ("autopost_time_hr", "int", "/autpost 2"),
     "autodel": ("auto_del_time", "int", "/autodel 600"),
     "autex": ("autodel_text", "str", "/autex ভিডিওটি ১০ মিনিট পর ডিলিট হবে।"),
-    "prparadd": ("prem_vid_wait", "int", "/prparadd 10")
+    "prparadd": ("prem_vid_wait", "int", "/prparadd 10"),
+    "taskwait": ("task_wait_sec", "int", "/taskwait 10"),
+    "monetagwait": ("monetag_wait", "int", "/monetagwait 4")
 }
 
-@app.on_message(filters.command(list(SIMPLE_CONF.keys()) + ["delrelocktime", "deltex", "refbonous", "refbonousoff", "frotect"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+@app.on_message(filters.command(list(SIMPLE_CONF.keys()) + ["delrelocktime", "deltex", "refbonous", "refbonousoff", "frotect", "strictad", "regwait", "blar", "blur", "brand", "delbrand"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_simple_config(c, m):
     await get_db(); parts = m.text.split(None, 1); cmd = parts[0].lstrip("/").lower().split("@")[0]; arg = parts[1].strip() if len(parts) > 1 else ""
     if cmd == "delrelocktime": await config_col.update_one({"_id": "settings"}, {"$set": {"vid_relock_sec": -1, "vid_relock_min": 0}}); invalidate_home_cache(); return await m.reply("✅ Relock Time Disabled (একবার আনলক করলে আর লক হবে না)!")
@@ -770,17 +784,64 @@ async def cmd_simple_config(c, m):
     if cmd == "frotect":
         if arg.lower() not in ["on", "off"]: return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/frotect on` অথবা `/frotect off`")
         await config_col.update_one({"_id": "settings"}, {"$set": {"frotect": arg.lower() == "on"}}); invalidate_home_cache(); return await m.reply(f"✅ Protect Content: `{arg.upper()}`")
+    if cmd == "strictad":
+        if arg.lower() not in ["on", "off"]: return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/strictad on` (আগে ব্যাক করলে কিছুই পাবে না)\n`/strictad off` (বন্ধ করতে)")
+        is_on = (arg.lower() == "on")
+        await config_col.update_one({"_id": "settings"}, {"$set": {"strict_ad": is_on}}, upsert=True); invalidate_home_cache()
+        return await m.reply(f"✅ **Strict Ad Verification:** `{'ON 🔒' if is_on else 'OFF 🔓'}`\n_(এখন অ্যাডের সময় শেষ হওয়ার আগে ব্যাক করলে ভিডিও, শর্ট লিংক, টাস্ক বা স্পিন কয়েন পাবে না!)_" if is_on else "✅ Strict Ad OFF করা হয়েছে।")
+    if cmd == "regwait":
+        if not arg: return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/regwait 10` অথবা রেঞ্জ `/regwait 5-15`")
+        if "-" in arg:
+            try:
+                a, b = [max(1, int(x.strip())) for x in arg.split("-", 1)]
+                lo, hi = min(a, b), max(a, b)
+                vals = [lo, (lo + hi) // 2, hi] if hi - lo >= 2 else [lo, hi]
+                await config_col.update_one({"_id": "settings"}, {"$set": {"direk_wait": vals}}, upsert=True); invalidate_home_cache()
+                return await m.reply(f"✅ Regular Ad Wait Time Set: `{lo}-{hi}` সেকেন্ড")
+            except: return await m.reply("❌ উদাহরণ: `/regwait 10` অথবা `/regwait 5-15`")
+        try:
+            sec = max(1, int(re.sub(r"[^0-9]", "", arg)))
+            await config_col.update_one({"_id": "settings"}, {"$set": {"direk_wait": [sec]}}, upsert=True); invalidate_home_cache()
+            return await m.reply(f"✅ Regular Ad Wait Time Set: `{sec}` সেকেন্ড")
+        except: return await m.reply("❌ উদাহরণ: `/regwait 10`")
+    if cmd in ("blar", "blur"):
+        if not arg: return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/blar 20s` (২০ সেকেন্ড পর আবার অটো ব্লার হবে)\n`/blar 0` (অটো রিব্লার বন্ধ)")
+        nums = re.sub(r"[^0-9]", "", arg)
+        if not nums: return await m.reply("❌ উদাহরণ: `/blar 20s`")
+        sec = int(nums)
+        await config_col.update_one({"_id": "settings"}, {"$set": {"blur_sec": sec}}, upsert=True); invalidate_home_cache()
+        return await m.reply(f"✅ 18+ পোস্টার অটো-ব্লার সময় সেট হয়েছে: `{sec}s`" if sec > 0 else "✅ 18+ অটো রিব্লার `0s` সেট করা হয়েছে!")
+    if cmd == "brand":
+        if not arg:
+            admin_steps[m.from_user.id] = {"step": "set_brand_wait"}
+            return await m.reply("🏷 পোস্টারে প্রদর্শনের জন্য আপনার **Brand Name** লিখুন:\nউদাহরণ: `Flixbix4u`")
+        await config_col.update_one({"_id": "settings"}, {"$set": {"brand_name": arg}}, upsert=True); invalidate_home_cache()
+        return await m.reply(f"✅ Brand Watermark সেট হয়েছে: **{arg}**\n_(সব মুভি, সিরিজ ও ডিটেইল পোস্টারের নিচে বাম কোনায় দেখাবে!)_")
+    if cmd == "delbrand":
+        await config_col.update_one({"_id": "settings"}, {"$set": {"brand_name": ""}}, upsert=True); invalidate_home_cache()
+        return await m.reply("✅ Brand Watermark রিমুভ করা হয়েছে!")
     k, tp, ex = SIMPLE_CONF[cmd]
     if not arg: return await m.reply(f"❌ **সঠিক নিয়ম ও উদাহরণ:**\n`{ex}`")
     try:
-        val = int(arg) if tp == "int" else (arg.replace("@", "") if tp == "admin" else arg)
+        val = int(re.sub(r"[^0-9-]", "", arg)) if tp == "int" else (arg.replace("@", "") if tp == "admin" else arg)
         if tp == "int" and cmd in ("prstep", "regstep", "taskstep") and val < 1: val = 1
-        await config_col.update_one({"_id": "settings"}, {"$set": {k: val}}); invalidate_home_cache()
+        if tp == "int" and cmd in ("prparadd", "taskwait") and val < 1: val = 1
+        if tp == "int" and cmd == "monetagwait" and val < 0: val = 0
+        await config_col.update_one({"_id": "settings"}, {"$set": {k: val}}, upsert=True); invalidate_home_cache()
         if cmd == "relocktime":
             extra = " (প্রতি বাটন ক্লিকে অ্যাড আসবে)" if val == 0 else f" ({val} সেকেন্ড পর আবার লক হবে)"
             return await m.reply(f"✅ Relock Time সেট হয়েছে: `{val}` সেকেন্ড{extra}")
         await m.reply(f"✅ সেট হয়েছে: **{k}** = `{val}`")
     except: await m.reply(f"❌ ভুল ইনপুট! উদাহরণ:\n`{ex}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("set_brand_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_set_brand_text(c, m):
+    bn = m.text.strip()
+    await get_db()
+    await config_col.update_one({"_id": "settings"}, {"$set": {"brand_name": bn}}, upsert=True)
+    admin_steps.pop(m.from_user.id, None)
+    invalidate_home_cache()
+    await m.reply(f"✅ Brand Watermark সেট হয়েছে: **{bn}**")
 
 @app.on_message(filters.command("setrecgroup", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_setrecgroup(c, m):
@@ -830,15 +891,138 @@ async def cmd_settutorial(c, m):
             dl_path = await c.download_media(m.reply_to_message, file_name=cache_path + ".part")
             if dl_path and os.path.exists(dl_path) and os.path.getsize(dl_path) > 0:
                 os.replace(dl_path, cache_path)
-            await status_msg.edit_text("✅ টিউটোরিয়াল ভিডিও সেট ও ক্যাশ হয়েছে! এখন মিনি অ্যাপে সাথে সাথে প্লে হবে।")
-        except Exception as e:
-            await status_msg.edit_text("✅ টিউটোরিয়াল ভিডিও সেট হয়েছে! (স্ট্রিমিং ব্যাকআপ সক্রিয়)")
+            await status_msg.edit_text("✅ ডিফল্ট টিউটোরিয়াল ভিডিও সেট ও ক্যাশ হয়েছে! _(ভাষা অনুযায়ী আনলিমিটেড টিউটোরিয়াল এড করতে `/addtutorial` ব্যবহার করুন)_")
+        except Exception:
+            await status_msg.edit_text("✅ ডিফল্ট টিউটোরিয়াল ভিডিও সেট হয়েছে! (স্ট্রিমিং ব্যাকআপ সক্রিয়)")
     elif len(parts) > 1 and parts[1].strip().startswith("http"):
         await config_col.update_one({"_id": "settings"}, {"$set": {"tutorial_vid": parts[1].strip()}}, upsert=True)
         invalidate_home_cache()
-        await m.reply("✅ টিউটোরিয়াল ভিডিও লিংক সেট হয়েছে!")
+        await m.reply("✅ ডিফল্ট টিউটোরিয়াল ভিডিও লিংক সেট হয়েছে!")
     else:
-        await m.reply("❌ **সঠিক নিয়ম:** কোনো ভিডিওতে রিপ্লাই (Reply) করে `/settutorial` লিখুন অথবা `/settutorial https://...mp4` দিন।")
+        await m.reply("❌ **সঠিক নিয়ম:** কোনো ভিডিওতে রিপ্লাই (Reply) করে `/settutorial` লিখুন অথবা `/settutorial https://...mp4` দিন।\n💡 ভাষা অনুযায়ী আনলিমিটেড টিউটোরিয়াল এড করতে `/addtutorial` ব্যবহার করুন!")
+
+@app.on_message(filters.command("addtutorial", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_addtutorial(c, m):
+    await get_db()
+    clean = re.sub(r"^/addtutorial(?:@\w+)?\s*", "", m.text, count=1, flags=re.IGNORECASE).strip()
+    if m.reply_to_message and (m.reply_to_message.video or m.reply_to_message.animation or m.reply_to_message.document):
+        media = m.reply_to_message.video or m.reply_to_message.animation or m.reply_to_message.document
+        vid_id = media.file_id
+        if "|" in clean:
+            lang, title = [x.strip() for x in clean.split("|", 1)]
+        elif clean:
+            lang, title = clean, f"{clean} Tutorial"
+        else:
+            admin_steps[m.from_user.id] = {"step": "tut_lang_only", "video_id": vid_id, "is_url": False}
+            return await m.reply("🌐 এই টিউটোরিয়াল ভিডিওর **ভাষা ও টাইটেল** লিখুন:\nউদাহরণ: `Bangla | কিভাবে ডাউনলোড করবেন`")
+        doc = {"lang": lang, "title": title, "video_id": vid_id, "is_url": False, "created_at": datetime.utcnow().isoformat() + "Z"}
+        await tutorials_col.insert_one(doc)
+        invalidate_home_cache()
+        st_m = await m.reply(f"⏳ **{lang}** টিউটোরিয়াল ক্যাশ হচ্ছে...")
+        try:
+            vid_hash = hashlib.md5(str(vid_id).encode()).hexdigest()[:14]
+            cp = f"/tmp/tutorial_{vid_hash}.mp4"
+            dp = await c.download_media(m.reply_to_message, file_name=cp + ".part")
+            if dp and os.path.exists(dp) and os.path.getsize(dp) > 0: os.replace(dp, cp)
+        except: pass
+        return await st_m.edit_text(f"✅ টিউটোরিয়াল এড হয়েছে!\n🌐 ভাষা: **{lang}**\n🎬 টাইটেল: **{title}**")
+
+    if "|" in clean:
+        segs = [x.strip() for x in clean.split("|")]
+        if len(segs) >= 3 and segs[2].startswith("http"):
+            await tutorials_col.insert_one({"lang": segs[0], "title": segs[1], "video_id": segs[2], "is_url": True, "created_at": datetime.utcnow().isoformat() + "Z"})
+            invalidate_home_cache()
+            return await m.reply(f"✅ টিউটোরিয়াল লিংক এড হয়েছে!\n🌐 ভাষা: **{segs[0]}** | 🎬 **{segs[1]}**")
+        admin_steps[m.from_user.id] = {"step": "tut_video_wait", "lang": segs[0], "title": segs[1]}
+        return await m.reply(f"🌐 ভাষা: **{segs[0]}** | 🎬 **{segs[1]}**\n\n📤 এবার **টিউটোরিয়াল ভিডিও ফাইল** অথবা ভিডিও লিংক (`https://...mp4`) পাঠান:")
+
+    admin_steps[m.from_user.id] = {"step": "tut_lang_title"}
+    await m.reply("🌐 টিউটোরিয়ালের **ভাষা ও টাইটেল** লিখুন:\nউদাহরণ: `Bangla | মুভি ডাউনলোড করার নিয়ম`\nঅথবা `Hindi | Download Guide`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("tut_lang_only") & ~filters.regex(r"^/") & unique_msg)
+async def handle_tut_lang_only(c, m):
+    st = admin_steps.pop(m.from_user.id)
+    if "|" in m.text: lang, title = [x.strip() for x in m.text.split("|", 1)]
+    else: lang, title = m.text.strip(), f"{m.text.strip()} Tutorial"
+    await get_db()
+    await tutorials_col.insert_one({"lang": lang, "title": title, "video_id": st["video_id"], "is_url": st["is_url"], "created_at": datetime.utcnow().isoformat() + "Z"})
+    invalidate_home_cache()
+    threading.Thread(target=ensure_tutorial_cached_sync, args=(st["video_id"],), daemon=True).start()
+    await m.reply(f"✅ টিউটোরিয়াল এড হয়েছে!\n🌐 ভাষা: **{lang}** | 🎬 **{title}**")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("tut_lang_title") & ~filters.regex(r"^/") & unique_msg)
+async def handle_tut_lang_title(c, m):
+    if "|" in m.text: lang, title = [x.strip() for x in m.text.split("|", 1)]
+    else: lang, title = m.text.strip(), f"{m.text.strip()} Tutorial"
+    admin_steps[m.from_user.id] = {"step": "tut_video_wait", "lang": lang, "title": title}
+    await m.reply(f"🌐 ভাষা: **{lang}** | 🎬 **{title}**\n\n📤 এবার **টিউটোরিয়াল ভিডিও** অথবা লিংক পাঠান:")
+
+@app.on_message((filters.video | filters.animation | filters.document | filters.text) & filters.user(ADMIN_ID) & filters.private & is_in_step("tut_video_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_tut_video_wait(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st: return
+    if m.text:
+        v = m.text.strip()
+        if not v.startswith("http"):
+            return await m.reply("❌ দয়া করে ভিডিও ফাইল অথবা `https://...` লিংক পাঠান।")
+        vid_id, is_url = v, True
+    else:
+        media = m.video or m.animation or m.document
+        vid_id, is_url = media.file_id, False
+    admin_steps.pop(m.from_user.id, None)
+    await get_db()
+    await tutorials_col.insert_one({"lang": st["lang"], "title": st["title"], "video_id": vid_id, "is_url": is_url, "created_at": datetime.utcnow().isoformat() + "Z"})
+    invalidate_home_cache()
+    if not is_url:
+        st_m = await m.reply("⏳ টিউটোরিয়াল ভিডিও ক্যাশ হচ্ছে...")
+        try:
+            vid_hash = hashlib.md5(str(vid_id).encode()).hexdigest()[:14]
+            cp = f"/tmp/tutorial_{vid_hash}.mp4"
+            dp = await c.download_media(m, file_name=cp + ".part")
+            if dp and os.path.exists(dp) and os.path.getsize(dp) > 0: os.replace(dp, cp)
+        except: pass
+        return await st_m.edit_text(f"✅ টিউটোরিয়াল এড হয়েছে!\n🌐 ভাষা: **{st['lang']}** | 🎬 **{st['title']}**")
+    await m.reply(f"✅ টিউটোরিয়াল লিংক এড হয়েছে!\n🌐 ভাষা: **{st['lang']}** | 🎬 **{st['title']}**")
+
+@app.on_message(filters.command("deltutorial", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_deltutorial(c, m):
+    await get_db(); ts = await tutorials_col.find().to_list(100)
+    if not ts: return await m.reply("❌ কোনো আলাদা টিউটোরিয়াল এড করা নেই! `/addtutorial` দিয়ে এড করুন।")
+    btns = [[InlineKeyboardButton(f"❌ [{t['lang']}] {t['title'][:24]}", callback_data=f"deltut_{t['_id']}")] for t in ts]
+    await m.reply("🗑 ডিলিট করতে টিউটোরিয়ালে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^deltut_") & filters.user(ADMIN_ID) & unique_cb)
+async def deltut_cb(c, q):
+    await get_db()
+    await tutorials_col.delete_one({"_id": ObjectId(q.data.split("_", 1)[1])})
+    invalidate_home_cache()
+    await q.message.edit_text("✅ টিউটোরিয়াল ডিলিট হয়েছে!")
+
+@app.on_message(filters.command("tutorial", case_sensitive=False) & filters.private & unique_msg)
+async def cmd_user_tutorial(c, m):
+    await get_db(); conf = await get_config(); ts = await tutorials_col.find().to_list(100)
+    if ts:
+        btns = [[InlineKeyboardButton(f"🎬 {t['lang']} — {t['title'][:26]}", callback_data=f"getut_{t['_id']}")] for t in ts]
+        return await m.reply("🌐 **আপনার পছন্দের ভাষায় টিউটোরিয়াল ভিডিও দেখুন:**", reply_markup=InlineKeyboardMarkup(btns))
+    if conf.get("tutorial_vid"):
+        vid = conf["tutorial_vid"]
+        if str(vid).startswith("http"):
+            return await m.reply(f"🎬 **Tutorial Video:**\n🔗 {vid}")
+        return await c.send_video(m.from_user.id, video=vid, caption="🎬 **কিভাবে মুভি/সিরিজ দেখবেন ও ডাউনলোড করবেন**")
+    await m.reply("⚠️ এখনো কোনো টিউটোরিয়াল ভিডিও সেট করা হয়নি।")
+
+@app.on_callback_query(filters.regex(r"^getut_") & unique_cb)
+async def getut_cb(c, q):
+    await get_db()
+    tid = q.data.split("_", 1)[1]
+    t = await tutorials_col.find_one({"_id": ObjectId(tid)})
+    if not t: return await q.answer("❌ টিউটোরিয়াল পাওয়া যায়নি!", show_alert=True)
+    await q.answer("⏳ টিউটোরিয়াল পাঠানো হচ্ছে...")
+    cap = f"🎬 **{t['title']}**\n🌐 Language: **{t['lang']}**"
+    if t.get("is_url") or str(t["video_id"]).startswith("http"):
+        await c.send_message(q.from_user.id, f"{cap}\n🔗 {t['video_id']}")
+    else:
+        await c.send_video(q.from_user.id, video=t["video_id"], caption=cap)
 
 @app.on_message(filters.command("start", case_sensitive=False) & filters.private & unique_msg)
 async def start_cmd(client, message):
@@ -848,6 +1032,23 @@ async def start_cmd(client, message):
         ref_by, pf = None, None
         if len(args) > 1:
             v = args[1]
+            if v.startswith("tut_"):
+                tid = v[4:]
+                if tid == "default":
+                    vid = config.get("tutorial_vid")
+                    if vid:
+                        if str(vid).startswith("http"): return await message.reply(f"🎬 **Tutorial Video:**\n🔗 {vid}")
+                        return await client.send_video(uid, video=vid, caption="🎬 **Tutorial Video**")
+                    return await message.reply("❌ টিউটোরিয়াল পাওয়া যায়নি!")
+                try:
+                    t = await tutorials_col.find_one({"_id": ObjectId(tid)})
+                    if t:
+                        cap = f"🎬 **{t['title']}**\n🌐 Language: **{t['lang']}**"
+                        if t.get("is_url") or str(t["video_id"]).startswith("http"):
+                            return await message.reply(f"{cap}\n🔗 {t['video_id']}")
+                        return await client.send_video(uid, video=t["video_id"], caption=cap)
+                except: pass
+                return await message.reply("❌ টিউটোরিয়াল পাওয়া যায়নি!")
             if v.isdigit(): ref_by = int(v)
             elif v.startswith(("file_", "mfile_", "sfile_")): pf = v
             elif v.startswith("ref") and "file" in v:
@@ -905,7 +1106,7 @@ async def start_cmd(client, message):
 
         full = f"{message.from_user.first_name} {message.from_user.last_name or ''}".strip()
         sn = config.get("site_name", "Moviee Link")
-        txt = f"👋 **হ্যালো {full}!**\n\n🎬 উপরের টিউটোরিয়াল ভিডিওটি অন্তত একবার দেখে নিন\n\n🍿 এখানে পাবেন **নিত্য নতুন মুভি ও সিরিজ** কালেকশন — নিচের Watch Now বাটনে ক্লিক করো!"
+        txt = f"👋 **হ্যালো {full}!**\n\n🎬 উপরের টিউটোরিয়াল ভিডিওটি অন্তত একবার দেখে নিন (অথবা /tutorial লিখুন)\n\n🍿 এখানে পাবেন **নিত্য নতুন মুভি ও সিরিজ** কালেকশন — নিচের Watch Now বাটনে ক্লিক করো!"
         if config.get("start_text"): txt += f"\n\n📝 {config.get('start_text')}"
         ichs = await channels_col.find({"type": "inline"}).to_list(100)
         jurl = ichs[0]["link"] if ichs else f"https://t.me/{BOT_USERNAME}"
@@ -938,7 +1139,7 @@ async def check_join_cb(c, q):
     await start_cmd(c, FakeMsg(q.from_user))
 
 # ==========================================
-# 6. CATEGORY, LANGUAGE, UPCOMING, ZONE ID, REDEEM, PREMIUM
+# 6. CATEGORY, LANGUAGE, UPCOMING, ZONE ID, REDEEM, PREMIUM, TG TASK
 # ==========================================
 @app.on_message(filters.command("setcategory", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_setcategory(c, m):
@@ -1042,6 +1243,81 @@ async def cmd_deletezoonid(c, m):
 
 @app.on_callback_query(filters.regex(r"^delzone_") & filters.user(ADMIN_ID) & unique_cb)
 async def delzone_cb(c, q): await get_db(); await zone_ids_col.delete_one({"_id": ObjectId(q.data.split("_")[1])}); invalidate_home_cache(); await q.message.edit_text("✅ ডিলিট হয়েছে!")
+
+async def save_telegram_join_task(c, m, target_raw, coin, custom_title=None, custom_link=None):
+    await get_db()
+    target = int(target_raw) if re.match(r"^-?\d+$", str(target_raw).strip()) else str(target_raw).strip()
+    try:
+        chat = await c.get_chat(target)
+    except Exception as e:
+        return await m.reply(f"❌ চ্যানেল/গ্রুপ পাওয়া যায়নি (`{target_raw}`)!\nবটকে আগে ওই চ্যানেল/গ্রুপে **Admin** বানিয়ে তারপর চেষ্টা করুন।\nError: `{e}`")
+    is_admin = False
+    try:
+        me_mem = await c.get_chat_member(chat.id, "me")
+        is_admin = me_mem.status in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER)
+    except: pass
+    invite_link = custom_link or ""
+    if not invite_link:
+        if getattr(chat, "username", None):
+            invite_link = f"https://t.me/{chat.username}"
+        elif getattr(chat, "invite_link", None):
+            invite_link = chat.invite_link
+        else:
+            try: invite_link = await c.export_chat_invite_link(chat.id)
+            except: pass
+    if not invite_link:
+        return await m.reply(f"❌ চ্যানেলের Invite Link পাওয়া যায়নি! বটকে Admin দিন অথবা এভাবে লিংক সহ দিন:\n`/tgtask {chat.id} | {chat.title or 'Join Channel'} | https://t.me/+invite | {coin}`")
+    title = custom_title or getattr(chat, "title", None) or getattr(chat, "username", None) or "Join Telegram"
+    await tasks_col.insert_one({
+        "title": title,
+        "task_type": "tg_join",
+        "chat_id": str(chat.id),
+        "zone_id": "",
+        "link": invite_link,
+        "coin": int(coin),
+        "steps": 0
+    })
+    warn = "" if is_admin else "\n⚠️ **সতর্কতা:** বট এখনো ওই চ্যানেল/গ্রুপে Admin না হলে Verify কাজ করবে না—বটকে অবশ্যই Admin রাখবেন!"
+    await m.reply(f"✅ **Telegram Join Task Added!**\n📢 **{title}** (`{chat.id}`)\n🔗 {invite_link}\n🪙 Reward: `{coin}` Coins{warn}")
+
+@app.on_message(filters.command("tgtask", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_tgtask(c, m):
+    clean = re.sub(r"^/tgtask(?:@\w+)?\s*", "", m.text, count=1, flags=re.IGNORECASE).strip()
+    if not clean:
+        admin_steps[m.from_user.id] = {"step": "tgtask_wait"}
+        return await m.reply("📢 টেলিগ্রাম চ্যানেল/গ্রুপের **ID (বা @username) ও কয়েন** দিন:\nউদাহরণ: `-100123456789 50`\nঅথবা: `-100123456789 | My Channel | https://t.me/+abc | 50`\n\n⚠️ _বটকে ওই চ্যানেল/গ্রুপে অবশ্যই Admin থাকতে হবে!_")
+    if "|" in clean:
+        segs = [x.strip() for x in clean.split("|")]
+        if len(segs) == 4 and segs[3].isdigit():
+            return await save_telegram_join_task(c, m, segs[0], int(segs[3]), segs[1], segs[2])
+        if len(segs) == 3 and segs[2].isdigit():
+            return await save_telegram_join_task(c, m, segs[0], int(segs[2]), segs[1])
+        if len(segs) == 2 and segs[1].isdigit():
+            return await save_telegram_join_task(c, m, segs[0], int(segs[1]))
+        return await m.reply("❌ উদাহরণ: `/tgtask -100123456789 50`")
+    ps = clean.split()
+    if len(ps) < 2 or not ps[-1].isdigit():
+        return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/tgtask -100123456789 50`\nঅথবা `/tgtask @mychannel 50`")
+    return await save_telegram_join_task(c, m, ps[0], int(ps[-1]))
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("tgtask_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_tgtask_wait(c, m):
+    txt = m.text.strip(); admin_steps.pop(m.from_user.id, None)
+    if "|" in txt:
+        segs = [x.strip() for x in txt.split("|")]
+        if len(segs) >= 4 and segs[3].isdigit(): return await save_telegram_join_task(c, m, segs[0], int(segs[3]), segs[1], segs[2])
+        if len(segs) >= 2 and segs[-1].isdigit(): return await save_telegram_join_task(c, m, segs[0], int(segs[-1]), segs[1] if len(segs) > 2 else None)
+    ps = txt.split()
+    if len(ps) >= 2 and ps[-1].isdigit():
+        return await save_telegram_join_task(c, m, ps[0], int(ps[-1]))
+    await m.reply("❌ ভুল ফরম্যাট! উদাহরণ: `-100123456789 50`")
+
+@app.on_message(filters.command("deltgtask", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_deltgtask(c, m):
+    await get_db(); ts = await tasks_col.find({"task_type": "tg_join"}).to_list(100)
+    if not ts: return await m.reply("❌ কোনো Telegram Join Task নেই! উদাহরণ: `/tgtask -100123456789 50`")
+    btns = [[InlineKeyboardButton(f"❌ {t['title'][:24]} (+{t.get('coin',0)})", callback_data=f"deltask_{t['_id']}")] for t in ts]
+    await m.reply("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
 def parse_duration_seconds(dur_str):
     m = re.match(r"^(\d+)\s*([a-zA-Z]+)$", dur_str.strip().lower())
@@ -2021,7 +2297,8 @@ async def cmd_legacy_router(c, m):
             if not ts: return await m.reply("❌ কোনো টাস্ক নেই!")
             btns = []
             for t in ts:
-                tag = f"Zone:{t['zone_id']}" if t.get("task_type") == "zone" or t.get("zone_id") else "Link"
+                tt = t.get("task_type")
+                tag = "TG" if tt == "tg_join" else (f"Zone:{t['zone_id']}" if tt == "zone" or t.get("zone_id") else "Link")
                 btns.append([InlineKeyboardButton(f"❌ [{tag}] {t['title'][:22]} (+{t.get('coin',0)})", callback_data=f"deltask_{t['_id']}")])
             return await m.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
         if cmd == "addlink":
@@ -2139,7 +2416,7 @@ async def legacy_auto_cb(c, q):
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
 
 # ==========================================
-# 10. FLASK WEB API & MONGODB POSTER HOSTING + LOGO + WELCOME AUDIO + HTTP 206 TUTORIAL + SHORTENER
+# 10. FLASK WEB API & MONGODB POSTER HOSTING + STRICT AD + TG VERIFY + TUTORIALS
 # ==========================================
 @web.route('/poster/<poster_id>')
 def serve_poster_from_mongo(poster_id):
@@ -2278,8 +2555,16 @@ def serve_welcome_audio():
 
 @web.route('/tutorial_video')
 def serve_tutorial_video():
-    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
-    vid = conf.get("tutorial_vid")
+    tut_id = request.args.get("id", "").strip()
+    vid = None
+    if tut_id and tut_id != "default":
+        try:
+            tdoc = sync_db["tutorials"].find_one({"_id": ObjectId(tut_id)})
+            if tdoc: vid = tdoc.get("video_id")
+        except: pass
+    if not vid:
+        conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+        vid = conf.get("tutorial_vid")
     if not vid:
         return "Tutorial video not set", 404
     if str(vid).startswith("http"):
@@ -2336,6 +2621,98 @@ def serve_tutorial_video():
     rv.headers["Cache-Control"] = "public, max-age=86400"
     return rv
 
+@web.route('/api/send_tutorial', methods=['POST'])
+def api_send_tutorial():
+    d = request.json or {}
+    uid = d.get("uid")
+    tut_id = (d.get("tut_id") or "").strip()
+    if not uid:
+        return jsonify({"status": "error", "msg": "❌ ইউজার আইডি পাওয়া যায়নি!"})
+    vid, title = None, "Tutorial Video"
+    if tut_id and tut_id != "default":
+        try:
+            td = sync_db["tutorials"].find_one({"_id": ObjectId(tut_id)})
+            if td:
+                vid = td.get("video_id")
+                title = f"{td.get('title', 'Tutorial')} ({td.get('lang', '')})"
+        except: pass
+    if not vid:
+        conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+        vid = conf.get("tutorial_vid")
+    if not vid:
+        return jsonify({"status": "error", "msg": "❌ টিউটোরিয়াল ভিডিও সেট করা নেই!"})
+    ok = send_tg_tutorial_sync(int(uid), vid, title)
+    if ok:
+        return jsonify({"status": "success", "msg": "✅ টিউটোরিয়াল ভিডিওটি আপনার টেলিগ্রাম বটে পাঠানো হয়েছে!"})
+    return jsonify({"status": "error", "msg": "❌ টেলিগ্রামে পাঠানো যায়নি, বটকে /start দিয়ে দেখুন!"})
+
+def create_ad_token(uid, kind, target, min_sec):
+    tok = secrets.token_urlsafe(16)
+    now = time.time()
+    with AD_TOKENS_LOCK:
+        if len(AD_TOKENS) > 5000:
+            expired = [k for k, v in AD_TOKENS.items() if (now - v["ts"]) > 3600]
+            for k in expired: AD_TOKENS.pop(k, None)
+        AD_TOKENS[tok] = {
+            "uid": int(uid) if uid else 0,
+            "kind": kind,
+            "target": str(target),
+            "min_sec": max(0, int(min_sec)),
+            "ts": now,
+            "used": False
+        }
+    return tok
+
+def verify_ad_token(tok, uid):
+    if not tok:
+        return False, "❌ অ্যাড ভেরিফিকেশন টোকেন পাওয়া যায়নি! আবার অ্যাড দেখুন।"
+    with AD_TOKENS_LOCK:
+        rec = AD_TOKENS.get(tok)
+        if not rec:
+            return False, "❌ অ্যাড সেশন বাতিল বা মেয়াদ শেষ হয়েছে! পুনরায় অ্যাড দেখুন।"
+        if rec.get("used"):
+            return False, "❌ এই অ্যাড সেশন আগেই ব্যবহার হয়েছে! পুনরায় অ্যাড দেখুন।"
+        if rec["uid"] != 0 and int(uid or 0) != rec["uid"]:
+            return False, "❌ অবৈধ অ্যাড সেশন!"
+        elapsed = time.time() - rec["ts"]
+        req_sec = max(0, rec["min_sec"] - 1)
+        if elapsed < req_sec:
+            return False, "❌ অ্যাড শেষ হওয়ার আগেই ফিরে এসেছেন! পুনরায় অ্যাডটি সম্পূর্ণ দেখুন।"
+        rec["used"] = True
+        return True, "ok"
+
+@web.route('/api/ad_start', methods=['POST'])
+def api_ad_start():
+    d = request.json or {}
+    uid = int(d.get("uid") or 0)
+    kind = d.get("kind", "file")
+    target = str(d.get("target") or "")
+    mode = d.get("mode", "link")
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    strict_ad = bool(conf.get("strict_ad", True))
+    req_sec = 0
+    if strict_ad:
+        if mode == "monetag":
+            req_sec = int(conf.get("monetag_wait", 4))
+        elif kind == "file":
+            base_fid = extract_base_file_id(target)
+            fd = None
+            for dbx in get_extra_dbs_sync():
+                fd = dbx["files"].find_one({"_id": base_fid}, {"is_premium": 1})
+                if fd: break
+            if fd and fd.get("is_premium"):
+                req_sec = int(conf.get("prem_vid_wait", 10))
+            else:
+                dw = conf.get("direk_wait", [5])
+                req_sec = int(min(dw)) if dw else 5
+        elif kind == "earn":
+            req_sec = int(conf.get("task_wait_sec", 10))
+        elif kind == "short":
+            dw = conf.get("direk_wait", [5])
+            req_sec = int(min(dw)) if dw else 5
+    tok = create_ad_token(uid, kind, target, req_sec)
+    return jsonify({"status": "success", "token": tok, "min_sec": req_sec, "strict_ad": strict_ad})
+
 @web.route('/api/shorten', methods=['POST'])
 def api_shorten():
     url = (request.json.get("url") or "").strip()
@@ -2378,13 +2755,15 @@ p{margin:0 0 18px 0;font-size:13.5px;color:#64748b}
 .btn-go{background:linear-gradient(90deg,#10b981,#059669);color:#fff;display:none;text-decoration:none}
 .timer-box{display:none;background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-bottom:12px}
 .timer-num{font-size:38px;font-weight:800;color:#e11d48;line-height:1.1}
+.warn-msg{display:none;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:12px;padding:10px;font-size:13px;font-weight:600;margin-bottom:12px}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="badge">🔗 {{ site_name }} Safe Link</div>
   <h2>লিংকটি ভেরিফাই করুন</h2>
-  <p>আপনার সুবিধামতো যেকোনো একটি অ্যাড ভেরিফিকেশন সম্পন্ন করে আসল লিংকে যান।</p>
+  <p>অ্যাড শেষ না হওয়া পর্যন্ত ব্যাক করবেন না। সময়ের আগে ফিরে আসলে পুনরায় অ্যাড দেখতে হবে।</p>
+  <div class="warn-msg" id="warn-msg"></div>
 
   <div id="verify-options">
     {% if zone_ids %}
@@ -2399,46 +2778,121 @@ p{margin:0 0 18px 0;font-size:13.5px;color:#64748b}
   </div>
 
   <div class="timer-box" id="timer-box">
-    <div style="font-size:13px;color:#475569;">অনুগ্রহ করে অপেক্ষা করুন...</div>
+    <div style="font-size:13px;color:#475569;">অ্যাড ভেরিফিকেশন চলছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
     <div class="timer-num" id="t-num">{{ wait_time }}</div>
   </div>
 
-  <a id="go-btn" class="btn btn-go" href="{{ target_url }}">✅ লিংক আনলক হয়েছে — এখানে ক্লিক করুন</a>
+  <a id="go-btn" class="btn btn-go" href="#">✅ লিংক আনলক হয়েছে — এখানে ক্লিক করুন</a>
 </div>
 <script>
-const targetUrl={{ target_url_json | safe }};
+const shortCode={{ short_code_json | safe }};
 const adLink={{ ad_link_json | safe }};
 const zoneIds={{ zone_ids_json | safe }};
 const waitTime={{ wait_time }};
+const monetagWait={{ monetag_wait }};
+const strictAd={{ strict_ad_json | safe }};
+let curToken=null, curIv=null, visHandler=null;
 
-function unlockTarget(){
+function showWarn(msg){
+  const w=document.getElementById('warn-msg');
+  w.innerText=msg; w.style.display='block';
+  document.getElementById('timer-box').style.display='none';
+  document.getElementById('verify-options').style.display='block';
+}
+function cleanupWatchers(){
+  if(curIv){clearInterval(curIv);curIv=null;}
+  if(visHandler){
+    document.removeEventListener('visibilitychange',visHandler);
+    window.removeEventListener('focus',visHandler);
+    visHandler=null;
+  }
+}
+async function startServerAdToken(mode,minSec){
+  const r=await fetch('/api/ad_start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:0,kind:'short',target:shortCode,mode,min_sec:minSec})});
+  const d=await r.json();
+  curToken=d.token;
+  return d;
+}
+async function unlockTarget(){
+  cleanupWatchers();
+  const r=await fetch('/api/verify_short',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:shortCode,ad_token:curToken})});
+  const d=await r.json();
+  if(d.status!=='success'){
+    showWarn(d.msg||'❌ ভেরিফিকেশন ব্যর্থ হয়েছে! আবার অ্যাড দেখুন।');
+    return;
+  }
+  document.getElementById('warn-msg').style.display='none';
   document.getElementById('verify-options').style.display='none';
   document.getElementById('timer-box').style.display='none';
   const g=document.getElementById('go-btn');
   g.style.display='flex';
-  g.href=targetUrl;
+  g.href=d.url;
 }
 async function verifyMonetag(){
+  document.getElementById('warn-msg').style.display='none';
   const zid=zoneIds[0];
+  await startServerAdToken('monetag',monetagWait);
+  const t0=Date.now();
   if(zid && typeof window['show_'+zid]==='function'){
-    try{ await window['show_'+zid](); unlockTarget(); return; }catch(e){}
+    try{
+      await window['show_'+zid]();
+      const el=(Date.now()-t0)/1000;
+      if(strictAd && monetagWait>0 && el<monetagWait){
+        curToken=null;
+        showWarn(`❌ অ্যাড শেষ হওয়ার আগেই ব্যাক করেছেন (${Math.floor(el)}s)! অন্তত ${monetagWait}s অপেক্ষা করে আবার দেখুন।`);
+        return;
+      }
+      await unlockTarget();
+      return;
+    }catch(e){
+      if(strictAd){
+        curToken=null;
+        showWarn('❌ অ্যাড সম্পূর্ণ না করেই ফিরে এসেছেন! আবার অ্যাড দেখুন।');
+        return;
+      }
+    }
   }
-  startCountdown(3);
+  startCountdown(3, false);
 }
-function verifyLinkAd(){
+async function verifyLinkAd(){
+  document.getElementById('warn-msg').style.display='none';
+  await startServerAdToken('link',waitTime||5);
   if(adLink){ try{ window.open(adLink,'_blank'); }catch(e){} }
-  startCountdown(waitTime||5);
+  startCountdown(waitTime||5, true);
 }
-function startDirectWait(){ startCountdown(3); }
-function startCountdown(sec){
+async function startDirectWait(){
+  await startServerAdToken('link',3);
+  startCountdown(3, false);
+}
+function startCountdown(sec, trackEarly){
+  cleanupWatchers();
   document.getElementById('verify-options').style.display='none';
   const tb=document.getElementById('timer-box'), tn=document.getElementById('t-num');
   tb.style.display='block'; tn.innerText=sec;
+  const startTs=Date.now();
+  let leftPage=false;
+  if(strictAd && trackEarly){
+    visHandler=()=>{
+      if(document.hidden){leftPage=true;}
+      else if(leftPage){
+        const elapsed=(Date.now()-startTs)/1000;
+        if(elapsed<sec-0.8){
+          cleanupWatchers();
+          curToken=null;
+          showWarn('❌ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! কোনো লিংক আনলক হয়নি। আবার অ্যাড দেখুন।');
+        }
+      }
+    };
+    document.addEventListener('visibilitychange',visHandler);
+    window.addEventListener('focus',visHandler);
+  }
   let t=sec;
-  const iv=setInterval(()=>{
-    t--; tn.innerText=Math.max(0,t);
-    if(t<=0){ clearInterval(iv); unlockTarget(); }
-  },1000);
+  curIv=setInterval(()=>{
+    const elapsed=(Date.now()-startTs)/1000;
+    const rem=Math.max(0,Math.ceil(sec-elapsed));
+    t=rem; tn.innerText=t;
+    if(elapsed>=sec){ clearInterval(curIv); curIv=null; unlockTarget(); }
+  },500);
 }
 </script>
 </body>
@@ -2458,14 +2912,30 @@ def short_link_gate(code):
     return render_template_string(
         SHORT_VERIFY_HTML,
         site_name=conf.get("site_name", "Moviee Link"),
-        target_url=doc["url"],
-        target_url_json=json.dumps(doc["url"]),
+        short_code_json=json.dumps(code),
         ad_link=ad_link,
         ad_link_json=json.dumps(ad_link),
         zone_ids=zones,
         zone_ids_json=json.dumps(zones),
-        wait_time=wait_time
+        wait_time=wait_time,
+        monetag_wait=int(conf.get("monetag_wait", 4)),
+        strict_ad_json=json.dumps(bool(conf.get("strict_ad", True)))
     )
+
+@web.route('/api/verify_short', methods=['POST'])
+def api_verify_short():
+    d = request.json or {}
+    code = d.get("code")
+    tok = d.get("ad_token")
+    doc = sync_db["short_links"].find_one({"_id": code})
+    if not doc:
+        return jsonify({"status": "error", "msg": "❌ লিংক পাওয়া যায়নি!"})
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    if conf.get("strict_ad", True):
+        ok, msg = verify_ad_token(tok, 0)
+        if not ok:
+            return jsonify({"status": "error", "msg": msg})
+    return jsonify({"status": "success", "url": doc["url"]})
 
 @web.route('/api/rates')
 def api_rates():
@@ -2519,18 +2989,29 @@ def get_ad_api(user_id, file_id):
             "zone_ids": zones,
             "ad_link": random.choice(links) if links else None,
             "zone_id": random.choice(zones) if zones else None,
-            "wait_time": wait_t
+            "wait_time": wait_t,
+            "monetag_wait": int(config.get("monetag_wait", 4)),
+            "strict_ad": bool(config.get("strict_ad", True))
         })
     return jsonify({"show_ad": False, "is_unlocked": True})
 
 @web.route('/api/unlock_file', methods=['POST'])
 def unlock_file():
-    d = request.json; uid, fid, m = d['uid'], d['file_id'], d['method']
+    d = request.json or {}; uid, fid, m = d['uid'], d['file_id'], d['method']
     conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}
     if m == "coin":
         cost = conf.get("premium_vid_coin", 50)
         if u.get("balance", 0) < cost: return jsonify({"status": "error", "msg": "❌ পর্যাপ্ত কয়েন নেই!"})
         sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": -cost}})
+    else:
+        is_prem_user = bool(u.get("premium_until") and u["premium_until"] > datetime.now())
+        if not is_prem_user and conf.get("strict_ad", True):
+            zones = list(sync_db["zone_ids"].find())
+            links = list(sync_db["ad_links"].find())
+            if zones or links or DEFAULT_ZONE_ID:
+                ok, msg = verify_ad_token(d.get("ad_token"), uid)
+                if not ok:
+                    return jsonify({"status": "error", "msg": msg})
     rl = get_relock_seconds(conf)
     if rl < 0:
         exp = (datetime.utcnow() + timedelta(seconds=52560000)).isoformat() + "Z"
@@ -2566,7 +3047,9 @@ def get_earn_info(uid):
         "custom_tasks_done": u.get("custom_tasks_done", []),
         "zone_ids": zones,
         "ad_links": links,
-        "wait_time": random.choice(conf.get("direk_wait", [5]))
+        "wait_time": int(conf.get("task_wait_sec", 10)),
+        "monetag_wait": int(conf.get("monetag_wait", 4)),
+        "strict_ad": bool(conf.get("strict_ad", True))
     })
 
 @web.route('/api/get_earn_ad/<ad_type>')
@@ -2580,15 +3063,67 @@ def get_earn_ad_dynamic(ad_type):
         "ad_links": links,
         "zone_ids": zones,
         "task_step": max(1, int(conf.get("task_step", 1))),
-        "wait_time": 10
+        "wait_time": int(conf.get("task_wait_sec", 10)),
+        "monetag_wait": int(conf.get("monetag_wait", 4)),
+        "strict_ad": bool(conf.get("strict_ad", True))
     })
+
+@web.route('/api/verify_tg_task', methods=['POST'])
+def api_verify_tg_task():
+    d = request.json or {}
+    uid = d.get("uid")
+    tid = d.get("task_id")
+    if not uid or not tid:
+        return jsonify({"status": "error", "msg": "❌ তথ্য সঠিক নয়!"})
+    try:
+        t = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
+    except:
+        t = None
+    if not t or t.get("task_type") != "tg_join":
+        return jsonify({"status": "error", "msg": "❌ টাস্ক পাওয়া যায়নি!"})
+    u = sync_db["users"].find_one({"_id": int(uid)}) or {}
+    if tid in u.get("custom_tasks_done", []):
+        return jsonify({"status": "error", "msg": "❌ আপনি এই টাস্ক আগেই সম্পন্ন করেছেন!"})
+    if not BOT_TOKEN:
+        return jsonify({"status": "error", "msg": "❌ বট টোকেন কনফিগার করা নেই!"})
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember",
+            params={"chat_id": t["chat_id"], "user_id": int(uid)},
+            timeout=8
+        ).json()
+        if not r.get("ok"):
+            return jsonify({"status": "error", "msg": "❌ ভেরিফাই করা যায়নি! বট ওই চ্যানেল/গ্রুপে Admin কিনা নিশ্চিত করুন অথবা চ্যানেলে জয়েন হয়ে আবার চেষ্টা করুন।"})
+        res = r.get("result", {})
+        st = res.get("status", "left")
+        joined = (st in ("member", "administrator", "creator")) or (st == "restricted" and bool(res.get("is_member")))
+        if not joined:
+            return jsonify({"status": "error", "msg": "❌ আপনি এখনো চ্যানেল/গ্রুপে জয়েন করেননি! আগে জয়েন হয়ে তারপর Verify-এ ক্লিক করুন।"})
+    except Exception as e:
+        return jsonify({"status": "error", "msg": f"❌ টেলিগ্রাম চেক এরর: {e}"})
+    sync_db["users"].update_one({"_id": int(uid)}, {"$inc": {"balance": t["coin"]}, "$addToSet": {"custom_tasks_done": tid}}, upsert=True)
+    return jsonify({"status": "success", "msg": f"🎉 ভেরিফাই সফল! +{t['coin']} কয়েন পেয়েছেন!"})
 
 @web.route('/api/claim_earn', methods=['POST'])
 def claim_earn():
-    d = request.json; uid, tt = d['uid'], d['type']; conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
+    d = request.json or {}; uid, tt = d['uid'], d['type']; conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
     if u.get("last_activity_date") != td:
         sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": td, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}}, upsert=True)
         u["spin_count"], u["task_count"], u["custom_tasks_done"] = 0, 0, []
+    if conf.get("strict_ad", True):
+        zones = list(sync_db["zone_ids"].find())
+        links = list(sync_db["ad_links"].find())
+        need_ad = bool(zones or links or DEFAULT_ZONE_ID)
+        if tt.startswith("custom_"):
+            tid = tt.split("_")[1]
+            t = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
+            if t and t.get("task_type") == "tg_join":
+                return jsonify({"status": "error", "msg": "❌ টেলিগ্রাম টাস্কের জন্য Verify বাটন ব্যবহার করুন!"})
+            need_ad = bool(t and (t.get("zone_id") or t.get("link")))
+        if need_ad:
+            ok, msg = verify_ad_token(d.get("ad_token"), uid)
+            if not ok:
+                return jsonify({"status": "error", "msg": msg})
     if tt == "spin":
         if u.get("spin_count", 0) >= conf.get("spin_limit", 5): return jsonify({"status": "error", "msg": "❌ স্পিন লিমিট শেষ!"})
         c = random.randint(conf.get("spin_coin_min", 10), conf.get("spin_coin_max", 50))
@@ -2697,7 +3232,7 @@ def api_home_data():
         try: u_state = build_user_state_dict(int(uid_arg))
         except: pass
     return jsonify({"files": p["files"], "user": u_state})
-
+    
 # ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
@@ -2725,7 +3260,9 @@ body.ready{background:#f4f5f7}
 @keyframes gradFlow{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
 @keyframes fadeInSlide{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 @keyframes popIn{from{opacity:0;transform:scale(.88)}to{opacity:1;transform:scale(1)}}
-@keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(108,92,231,.45)}50%{box-shadow:0 0 0 8px rgba(108,92,231,0)}}
+@keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(108,92,231,.45),0 0 12px rgba(236,72,153,.28)}50%{box-shadow:0 0 0 8px rgba(108,92,231,0),0 0 18px rgba(6,182,212,.45)}}
+@keyframes posterGlow{0%{box-shadow:0 4px 16px rgba(124,58,237,.28),0 0 0 1.5px rgba(124,58,237,.45)}50%{box-shadow:0 6px 22px rgba(236,72,153,.35),0 0 0 1.5px rgba(6,182,212,.65)}100%{box-shadow:0 4px 16px rgba(124,58,237,.28),0 0 0 1.5px rgba(124,58,237,.45)}}
+@keyframes neonBtnGlow{0%,100%{box-shadow:0 4px 14px rgba(108,92,231,.38),0 0 10px rgba(236,72,153,.28)}50%{box-shadow:0 4px 18px rgba(6,182,212,.48),0 0 14px rgba(124,58,237,.45)}}
 @keyframes floatLogo{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-5px) scale(1.04)}}
 @keyframes spinRing{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 @keyframes dotBlink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
@@ -2733,29 +3270,30 @@ body.ready{background:#f4f5f7}
 @keyframes rippleAnim{to{transform:scale(4);opacity:0}}
 @keyframes gentleBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
 
-.anim-btn,button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c{
+.anim-btn,button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c,.tut-lang-pill{
   transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .22s ease,background .25s ease;
   position:relative;overflow:hidden;
 }
-button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active{
+button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active,.tut-lang-pill:active{
   transform:scale(.92)!important;
 }
-.btn-p::after,.q-btn::after,.p-dl::after,.unlock-opt::after,.watch-pill::after,.tut-btn::after,.cat-pill.active::after{
+.btn-p,.q-btn,.p-dl,.unlock-opt,.watch-pill,.tut-btn{animation:gradFlow 3.5s ease infinite,neonBtnGlow 3.2s ease-in-out infinite}
+.btn-p::after,.q-btn::after,.p-dl::after,.unlock-opt::after,.watch-pill::after,.tut-btn::after,.cat-pill.active::after,.p-like::after,.p-save::after,.s-tab.active::after{
   content:"";position:absolute;top:0;left:-120%;width:55%;height:100%;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.38),transparent);
-  transform:skewX(-20deg);animation:btnShine 2.6s infinite ease-in-out;pointer-events:none;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.42),transparent);
+  transform:skewX(-20deg);animation:btnShine 2.5s infinite ease-in-out;pointer-events:none;
 }
 .ripple-fx{position:absolute;border-radius:50%;background:rgba(255,255,255,.45);transform:scale(0);animation:rippleAnim .5s linear;pointer-events:none}
 
-.top-header{position:sticky;top:0;z-index:90;background:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+.top-header{position:sticky;top:0;z-index:90;background:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 12px rgba(124,58,237,.12)}
 .brand{display:flex;align-items:center;gap:7px;font-size:18.5px;font-weight:700}
-.hdr-logo{width:30px;height:30px;border-radius:9px;object-fit:cover;box-shadow:0 2px 8px rgba(108,92,231,.25);animation:gentleBob 3s ease-in-out infinite}
+.hdr-logo{width:30px;height:30px;border-radius:9px;object-fit:cover;box-shadow:0 2px 10px rgba(124,58,237,.35);animation:gentleBob 3s ease-in-out infinite}
 .brand-badge{background:linear-gradient(90deg,#d90429,#ef233c,#ff4d6d);background-size:200% 200%;animation:gradFlow 4s ease infinite;color:#fff;font-size:12px;padding:2px 8px;border-radius:6px}
 .hdr-r{display:flex;align-items:center;gap:8px}.coin-pill{background:#fff3cd;color:#856404;border:1px solid #ffeeba;padding:4px 10px;border-radius:16px;font-size:12.5px;font-weight:700;animation:pulseGlow 2.8s infinite}
 .r-search{width:36px;height:36px;border-radius:50%;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
 .r-search::before,.float-search::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);animation:spinRing 3.5s linear infinite}
 .r-search-in{position:relative;z-index:2;width:30px;height:30px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px}
-.float-search{position:fixed;bottom:82px;right:14px;z-index:95;width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 18px rgba(0,0,0,.22);cursor:pointer}
+.float-search{position:fixed;bottom:82px;right:14px;z-index:95;width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 20px rgba(124,58,237,.35);cursor:pointer}
 .float-search .r-search-in{width:38px;height:38px;font-size:16px}
 
 .live-bar{background:linear-gradient(90deg,#4b39ef,#7c3aed,#ec4899);background-size:200% 200%;animation:gradFlow 6s ease infinite;color:#fff;display:flex;align-items:center;height:34px;overflow:hidden}
@@ -2767,56 +3305,86 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 
 .cat-scroll{display:flex;flex-wrap:nowrap;gap:8px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-x;padding:10px 14px 5px 14px;scrollbar-width:none}
 .cat-scroll::-webkit-scrollbar{display:none}
-.cat-pill{flex:0 0 auto;width:max-content;background:#fff;color:#333;padding:7px 15px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.06);border:1px solid #ececec}
-.cat-pill.active{background:linear-gradient(90deg,#ff512f,#dd2476,#ff512f);background-size:200% 200%;animation:gradFlow 3s ease infinite;color:#fff;border-color:transparent;box-shadow:0 4px 12px rgba(221,36,118,.3)}
-.cat-pill.adult{background:#5e0b2b;color:#fff;border-color:transparent}
-.lang-pill{flex:0 0 auto;width:max-content;background:#eef2ff;color:#4338ca;padding:5px 13px;border-radius:14px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer}
-.lang-pill.active{background:linear-gradient(90deg,#4338ca,#6366f1);color:#fff;box-shadow:0 3px 8px rgba(67,56,202,.25)}
+.cat-pill{flex:0 0 auto;width:max-content;background:#fff;color:#333;padding:7px 15px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 2px 8px rgba(124,58,237,.1);border:1px solid #e2e8f0}
+.cat-pill.active{background:linear-gradient(90deg,#ff512f,#dd2476,#ff512f);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
+.cat-pill.adult{background:linear-gradient(90deg,#5e0b2b,#9d174d);color:#fff;border-color:transparent;box-shadow:0 3px 12px rgba(157,23,77,.35)}
+.lang-pill{flex:0 0 auto;width:max-content;background:#eef2ff;color:#4338ca;padding:5px 13px;border-radius:14px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 2px 6px rgba(67,56,202,.12)}
+.lang-pill.active{background:linear-gradient(90deg,#4338ca,#6366f1,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite;color:#fff;box-shadow:0 3px 12px rgba(99,102,241,.38)}
 
 .page{display:none}.page.active{display:block;animation:fadeInSlide .26s ease}
 .sec-head{padding:10px 14px 6px 14px;font-size:15.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-.pin-scroll{display:flex;flex-wrap:nowrap;gap:10px;overflow-x:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x;padding:0 14px 10px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
+.pin-scroll{display:flex;flex-wrap:nowrap;gap:10px;overflow-x:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x;padding:4px 14px 12px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
 .pin-card{flex:0 0 auto;min-width:168px;max-width:168px;cursor:pointer;transition:transform .2s ease;animation:fadeInSlide .3s ease}.pin-card:active{transform:scale(.94)}
-.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,.1);background:#141624}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block}
-.pin-tag{position:absolute;top:6px;left:6px;background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.3)}
-.pin-views{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;padding:2px 6px;border-radius:8px}
+.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#141624;animation:posterGlow 3.6s ease-in-out infinite}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block;transition:filter .35s ease,transform .35s ease}
+.pin-tag{position:absolute;top:6px;left:6px;z-index:4;background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.pin-views{position:absolute;bottom:6px;right:6px;z-index:4;background:rgba(0,0,0,.74);color:#fff;font-size:10px;padding:2px 6px;border-radius:8px}
 .pin-t{font-size:12.5px;font-weight:600;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 
-.feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid #7c6cf6;box-shadow:0 4px 14px rgba(108,92,231,.1);cursor:pointer;transition:transform .22s ease,box-shadow .22s ease;animation:fadeInSlide .3s ease}
+.feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid transparent;background-image:linear-gradient(#fff,#fff),linear-gradient(120deg,#7c3aed,#ec4899,#06b6d4,#7c3aed);background-origin:border-box;background-clip:content-box,border-box;background-size:200% 200%;animation:fadeInSlide .3s ease,posterGlow 4s ease-in-out infinite;cursor:pointer;transition:transform .22s ease}
 .feed-card:active{transform:scale(.96)}
-.feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#141624}.feed-img-w img{width:100%;height:100%;object-fit:cover;display:block}
-.b-new{position:absolute;top:10px;left:10px;background:linear-gradient(90deg,#2979ff,#00b0ff);color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px}.b-type{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.75);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px}
+.feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#141624;overflow:hidden}.feed-img-w img{width:100%;height:100%;object-fit:cover;display:block;transition:filter .35s ease,transform .35s ease}
+.feed-img-w::after,.pin-img-w::after,.det-img-w::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent 30%,rgba(255,255,255,.14) 50%,transparent 70%);transform:translateX(-120%);animation:btnShine 4.5s infinite ease-in-out;pointer-events:none;z-index:2}
+.b-new{position:absolute;top:10px;left:10px;z-index:4;background:linear-gradient(90deg,#2979ff,#00b0ff);color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px;box-shadow:0 2px 8px rgba(0,176,255,.4)}.b-type{position:absolute;top:10px;right:10px;z-index:4;background:rgba(0,0,0,.78);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.18)}
 .feed-body{padding:10px 12px 12px 12px}.feed-title{font-size:15px;font-weight:700;margin-bottom:3px}.feed-meta{font-size:12px;color:#777;display:flex;justify-content:space-between}
 .car-wrap{display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:4px 0 12px 0;scrollbar-width:none}.car-wrap::-webkit-scrollbar{display:none}
-.p-slide{flex:0 0 auto;min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);border:1px solid #eee}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.p-slide-b{padding:10px 12px}
-.watch-pill{background:linear-gradient(90deg,#e63946,#d90429);color:#fff;border:none;padding:7px 17px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
+.p-slide{flex:0 0 auto;min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 16px rgba(124,58,237,.16);border:1.5px solid rgba(124,58,237,.35)}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.p-slide-b{padding:10px 12px}
+.watch-pill{background:linear-gradient(90deg,#e63946,#d90429,#ff4d6d);background-size:200% 200%;color:#fff;border:none;padding:7px 17px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
+
+.brand-mark{
+  position:absolute;bottom:8px;left:8px;z-index:6;
+  display:inline-flex;align-items:center;gap:5px;
+  padding:3px 10px;border-radius:10px;
+  background:rgba(10,12,24,0.78);backdrop-filter:blur(6px);
+  border:1px solid rgba(255,215,0,0.65);
+  color:#fff;font-size:10.5px;font-weight:800;letter-spacing:0.4px;
+  box-shadow:0 2px 12px rgba(0,0,0,0.5),0 0 12px rgba(124,58,237,0.45);
+  pointer-events:none;
+}
+.brand-mark::before{
+  content:"";width:6px;height:6px;border-radius:50%;
+  background:linear-gradient(135deg,#ff4d4d,#ffb703);
+  box-shadow:0 0 8px #ffb703;
+}
+.adult-blur{filter:blur(22px) brightness(0.72)!important;transform:scale(1.08)!important}
+.blur-ov{
+  position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;
+  background:rgba(15,10,25,0.38);color:#fff;text-align:center;padding:10px;cursor:pointer;
+}
+.blur-ov span{
+  background:linear-gradient(90deg,#be123c,#9333ea);padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;
+  box-shadow:0 4px 15px rgba(190,18,60,.45);border:1px solid rgba(255,255,255,.35);
+}
 
 .det-hdr{background:#fff;padding:12px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #eee;position:sticky;top:0;z-index:95}.back-btn{width:34px;height:34px;border-radius:50%;background:#f1f3f5;border:none;font-size:18px;cursor:pointer}
-.det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#141624}.det-img-w img{width:100%;height:100%;object-fit:cover;display:block}.hd-b{position:absolute;top:12px;left:12px;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
+.det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#141624;overflow:hidden;animation:posterGlow 4s ease-in-out infinite}.det-img-w img{width:100%;height:100%;object-fit:cover;display:block;transition:filter .35s ease,transform .35s ease}.hd-b{position:absolute;top:12px;left:12px;z-index:4;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
 .det-body{background:#fff;padding:14px 16px}.det-title{font-size:19px;font-weight:700;margin:0 0 8px 0}.d-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.d-tag{background:#f1f5f9;color:#475569;padding:3px 10px;border-radius:12px;font-size:11.5px;font-weight:600}
 .stats-r{display:flex;justify-content:space-around;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9;margin-bottom:12px}.stat-i{text-align:center;font-size:12px;color:#64748b}.stat-i b{display:block;font-size:15px;color:#111}
 .shr-c{width:40px;height:40px;border-radius:50%;background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;font-size:16px;cursor:pointer;animation:pulseGlow 2.8s infinite}.tip-ban{background:#fff8eb;border:1px solid #fde68a;color:#92400e;padding:9px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:10px}
-.tut-btn{display:block;margin:0 auto 12px auto;background:linear-gradient(90deg,#1d4ed8,#4f46e5,#1d4ed8);background-size:200% 200%;animation:gradFlow 3s ease infinite;color:#fff;border:none;padding:9px 20px;border-radius:22px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(29,78,216,.3)}
-.tut-box{display:none;margin:0 auto 14px auto;background:#000;border-radius:14px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.22);position:relative}
+.tut-btn{display:block;margin:0 auto 12px auto;background:linear-gradient(90deg,#1d4ed8,#4f46e5,#ec4899);background-size:200% 200%;color:#fff;border:none;padding:9px 20px;border-radius:22px;font-size:13px;font-weight:700;cursor:pointer}
+.tut-box{display:none;margin:0 auto 14px auto;background:#0f172a;border-radius:14px;overflow:hidden;box-shadow:0 6px 22px rgba(79,70,229,.28);position:relative;border:1.5px solid #4f46e5}
+.tut-lang-row{display:flex;gap:6px;overflow-x:auto;padding:8px 10px;background:#1e293b;scrollbar-width:none}.tut-lang-row::-webkit-scrollbar{display:none}
+.tut-lang-pill{flex:0 0 auto;background:#334155;color:#e2e8f0;border:1px solid #475569;padding:5px 12px;border-radius:16px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.tut-lang-pill.active{background:linear-gradient(90deg,#06b6d4,#6366f1);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(6,182,212,.45)}
 .tut-box video{width:100%;max-height:250px;display:block;background:#000}
-.tut-status{color:#e2e8f0;font-size:12px;text-align:center;padding:6px;background:rgba(15,23,42,.85)}
+.tut-status{color:#e2e8f0;font-size:12px;text-align:center;padding:6px;background:rgba(15,23,42,.9)}
+.tut-tg-btn{width:100%;border:none;background:linear-gradient(90deg,#0ea5e9,#2563eb);color:#fff;padding:10px;font-size:13px;font-weight:700;cursor:pointer}
 
 .act-r{display:flex;gap:10px;margin-bottom:14px}
-.p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-dl{flex:1.2;background:linear-gradient(90deg,#0f172a,#334155,#0f172a);background-size:200% 200%;animation:gradFlow 4s ease infinite;border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(15,23,42,.25)}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}
-.sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed,#6366f1);background-size:200% 200%;animation:gradFlow 3.5s ease infinite;color:#fff;border:none;padding:9px 14px;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(79,70,229,.28)}
-.s-tab{flex:0 0 auto;width:max-content;background:#fff;border:1px solid #cbd5e1;color:#334155;padding:7px 14px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}.s-tab.active{background:linear-gradient(90deg,#111827,#334155);color:#fff;border-color:#111;box-shadow:0 3px 10px rgba(0,0,0,.2)}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px;animation:fadeInSlide .22s ease}
+.p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 3px 10px rgba(225,29,72,.14)}.p-dl{flex:1.2;background:linear-gradient(90deg,#0f172a,#334155,#4f46e5);background-size:200% 200%;border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 3px 10px rgba(217,119,6,.14)}
+.sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed,#ec4899);background-size:200% 200%;color:#fff;border:none;padding:9px 14px;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer}
+.s-tab{flex:0 0 auto;width:max-content;background:#fff;border:1px solid #cbd5e1;color:#334155;padding:7px 14px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}.s-tab.active{background:linear-gradient(90deg,#111827,#4f46e5);color:#fff;border-color:#4f46e5;box-shadow:0 3px 12px rgba(79,70,229,.35)}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px;animation:fadeInSlide .22s ease}
 .rate-c{background:#fffbeb;border:1px solid #fde68a;border-radius:14px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-size:13px;font-weight:600}.star-b{font-size:20px;color:#cbd5e1;background:none;border:none;cursor:pointer;padding:0 2px}.star-b.lit{color:#f59e0b}
-.cmt-sec{background:#fff;margin-top:10px;padding:14px 16px 80px 16px}.cmt-bar{position:fixed;bottom:0;left:0;width:100%;background:#fff;padding:10px 14px;border-top:1px solid #eee;display:none;gap:10px;z-index:120}.cmt-bar input{flex:1;background:#f1f5f9;border:none;border-radius:22px;padding:10px 16px;outline:none;font-size:14px}.cmt-bar button{width:40px;height:40px;border-radius:50%;background:#111;color:#fff;border:none;font-size:16px;cursor:pointer}
-.card-box{background:#fff;border-radius:16px;padding:16px;margin:12px 14px;box-shadow:0 2px 10px rgba(0,0,0,.05);border:1px solid #eee;animation:fadeInSlide .25s ease}.btn-p{width:100%;background:linear-gradient(90deg,#6c5ce7,#4f46e5,#7c3aed);background-size:200% 200%;animation:gradFlow 3.5s ease infinite;color:#fff;border:none;padding:11px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;box-shadow:0 4px 12px rgba(79,70,229,.25)}
+.cmt-sec{background:#fff;margin-top:10px;padding:14px 16px 80px 16px}.cmt-bar{position:fixed;bottom:0;left:0;width:100%;background:#fff;padding:10px 14px;border-top:1px solid #eee;display:none;gap:10px;z-index:120}.cmt-bar input{flex:1;background:#f1f5f9;border:none;border-radius:22px;padding:10px 16px;outline:none;font-size:14px}.cmt-bar button{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#4f46e5,#ec4899);color:#fff;border:none;font-size:16px;cursor:pointer}
+.card-box{background:#fff;border-radius:16px;padding:16px;margin:12px 14px;box-shadow:0 3px 12px rgba(124,58,237,.08);border:1px solid #e2e8f0;animation:fadeInSlide .25s ease}.btn-p{width:100%;background:linear-gradient(90deg,#6c5ce7,#4f46e5,#ec4899);background-size:200% 200%;color:#fff;border:none;padding:11px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer}
 
 .tools-hero{text-align:center;padding:12px 14px 4px 14px}.tools-stats{display:flex;gap:10px;padding:10px 14px}.t-stat{flex:1;background:#fff;border-radius:16px;padding:12px 8px;text-align:center;box-shadow:0 3px 10px rgba(0,0,0,.05)}.t-stat b{font-size:20px;display:block}
-.t-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 14px 10px 14px}.t-card{background:#fff;border-radius:18px;padding:14px;position:relative;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.06);cursor:pointer;border:1px solid #f1f5f9;transition:transform .2s ease;animation:fadeInSlide .25s ease}
+.t-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 14px 10px 14px}.t-card{background:#fff;border-radius:18px;padding:14px;position:relative;overflow:hidden;box-shadow:0 4px 14px rgba(124,58,237,.1);cursor:pointer;border:1px solid #e2e8f0;transition:transform .2s ease;animation:fadeInSlide .25s ease}
 .t-card:active{transform:scale(.94)}
 .t-blob{position:absolute;top:-16px;right:-16px;width:62px;height:62px;border-radius:50%;opacity:.55}.t-new{position:absolute;top:8px;right:8px;background:#10b981;color:#fff;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;z-index:2}
 .t-ico{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:21px;margin-bottom:10px}.t-name{font-size:13.5px;font-weight:700;color:#0f172a;margin-bottom:3px}.t-desc{font-size:11px;color:#64748b;line-height:1.35}
 .tool-lbl{display:block;text-align:left;font-size:12px;font-weight:600;color:#475569;margin:6px 0 3px 2px}.tool-res{background:#f1f5f9;border-radius:12px;padding:12px;margin-top:10px;font-size:13.5px;text-align:left;word-break:break-word}
 
-.bottom-nav{position:fixed;bottom:8px;left:6px;right:6px;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border-radius:24px;display:grid;grid-template-columns:repeat(7,1fr);align-items:center;padding:6px 2px;box-shadow:0 6px 24px rgba(0,0,0,.14);z-index:100;border:1px solid rgba(255,255,255,.95)}
+.bottom-nav{position:fixed;bottom:8px;left:6px;right:6px;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border-radius:24px;display:grid;grid-template-columns:repeat(7,1fr);align-items:center;padding:6px 2px;box-shadow:0 6px 24px rgba(124,58,237,.2);z-index:100;border:1px solid rgba(124,58,237,.22)}
 .nav-i{display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9.5px;color:#64748b;cursor:pointer;font-weight:600;padding:3px 1px;letter-spacing:-0.2px;white-space:nowrap;transition:transform .2s ease,color .2s ease}
 .nav-i.active{color:#d90429;font-weight:700;animation:navPop .35s cubic-bezier(.34,1.56,.64,1)}
 .nav-i.active span{animation:gentleBob 1.8s ease-in-out infinite}
@@ -2829,7 +3397,7 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 .wel-logo-ring img{width:100%;height:100%;border-radius:21px;object-fit:cover;display:block;background:#141624}
 .wel-voice-btn{background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;border-radius:16px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:10px;display:inline-flex;align-items:center;gap:5px}
 .wel-item{text-align:left;font-size:13.5px;line-height:1.55;margin-bottom:8px;color:#334155}
-.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff}
 .step-badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-size:12px;font-weight:700;padding:4px 12px;border-radius:16px;margin-bottom:8px}
 .clr-hist-btn{background:#fee2e2;color:#dc2626;border:none;padding:5px 12px;border-radius:12px;font-size:11.5px;font-weight:700;cursor:pointer}
 </style>
@@ -2876,7 +3444,7 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
   <div style="font-size:38px;margin-bottom:4px;">🔓</div>
   <div class="step-badge" id="unlock-step-badge">Step 1 / 1</div>
   <h3 style="margin:0 0 6px 0;color:#0f172a;">ফাইল আনলক করুন</h3>
-  <p style="font-size:13px;color:#64748b;margin:0 0 14px 0;">আপনার যেটি সহজ মনে হয়, সেটি দিয়ে আনলক করে ডাউনলোড করুন:</p>
+  <p style="font-size:13px;color:#64748b;margin:0 0 14px 0;">অ্যাড শেষ না হওয়া পর্যন্ত ব্যাক করবেন না। সময়ের আগে ফিরলে পুনরায় অ্যাড দেখতে হবে:</p>
   <div id="unlock-options-area"></div>
 </div></div>
 
@@ -2889,7 +3457,13 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
   <div id="task-options-area"></div>
 </div></div>
 
-<div id="ad-modal" class="modal-ov"><div class="modal-card"><h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3><p style="font-size:13px;color:#64748b;">সম্পূর্ণ অ্যাড দেখুন</p><h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1><button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button></div></div>
+<div id="ad-modal" class="modal-ov"><div class="modal-card">
+  <button onclick="cancelActiveAd('⚠️ অ্যাড বাতিল করা হয়েছে! কিছুই আনলক হয়নি, পুনরায় অ্যাড দেখুন।')" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
+  <h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3>
+  <p style="font-size:13px;color:#64748b;">সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।</p>
+  <h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1>
+  <button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button>
+</div></div>
 
 <div id="tool-modal" class="modal-ov"><div class="modal-card"><button onclick="document.getElementById('tool-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button><h3 id="tool-m-title" style="margin:0 0 10px 0;"></h3><div id="tool-m-body"></div></div></div>
 
@@ -2901,15 +3475,22 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 
 <div id="page-details" class="page">
   <div class="det-hdr"><button class="back-btn" onclick="closeDetails()">❮</button><b style="font-size:16px;">Video Details</b></div>
-  <div class="det-img-w"><img id="det-poster" src=""><div class="hd-b">HD</div></div>
+  <div class="det-img-w" id="det-poster-wrap" onclick="handleDetPosterTap()">
+    <img id="det-poster" src="">
+    <div class="hd-b">HD</div>
+    <div id="det-brand-slot"></div>
+    <div class="blur-ov" id="det-blur-ov" style="display:none;"><span>🔞 Tap Poster to Reveal</span></div>
+  </div>
   <div class="det-body">
     <h2 class="det-title" id="det-title"></h2><div class="d-tags" id="det-tags"></div>
     <div class="stats-r"><div class="stat-i">❤️<b id="det-likes">0</b>Like</div><div class="stat-i">⬇️<b id="det-views">0</b>Download</div><div class="stat-i">💬<b id="det-cmts-cnt">0</b>Comments</div><button class="shr-c" onclick="shareCurrent()">🔗</button></div>
     <div class="tip-ban">💡 Tap the button below to download easily</div>
     <button class="tut-btn" id="tut-toggle-btn" onclick="toggleInlineTutorial()">❓ Need help? Watch the tutorial</button>
     <div class="tut-box" id="inline-tut-box">
+      <div class="tut-lang-row" id="tut-lang-row" style="display:none;"></div>
       <div class="tut-status" id="tut-status">⏳ টিউটোরিয়াল ভিডিও লোড হচ্ছে...</div>
       <video id="det-tut-vid" controls playsinline webkit-playsinline preload="auto"><source id="det-tut-src" type="video/mp4"></video>
+      <button class="tut-tg-btn" onclick="sendTutorialToTelegram()">📲 টেলিগ্রামে টিউটোরিয়াল ভিডিও নিন</button>
     </div>
     <div class="act-r"><button class="p-like" id="btn-like" onclick="likeCurrent()">🤍 Like</button><button class="p-dl" onclick="scrollToDownload()">⬇️ Download</button><button class="p-save" id="btn-save" onclick="saveCurrent()">🔖 Save</button></div>
     <div id="det-selector-area"></div>
@@ -2972,6 +3553,8 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 const tg=window.Telegram?.WebApp;
 const botUsername="{{ bot_username }}", siteName="{{ site_name }}", recGroupLink={{ rec_group_link_json | safe }};
 const hasTutorial={{ has_tutorial_json | safe }}, tutorialVer={{ tutorial_ver_json | safe }}, siteNameHash={{ site_name_hash_json | safe }};
+const brandName={{ brand_name_json | safe }};
+const tutorialsList={{ tutorials_json | safe }};
 let allFiles={{ files_json | safe }};
 const categories={{ categories_json | safe }}, dbLanguages={{ languages_json | safe }};
 const promotions={{ promotions_json | safe }}, upcomingList={{ upcoming_json | safe }}, zoneIds={{ zone_ids_json | safe }};
@@ -2979,6 +3562,13 @@ const adConfig={{ ad_config_json | safe }};
 const initialUserState={{ initial_user_json | safe }};
 
 (function(){const p=siteName.trim().split(/\s+/),e=document.getElementById('brand-title');e.innerHTML=p.length>1?`${p[0]} <span class="brand-badge">${p.slice(1).join(' ')}</span>`:`${siteName} <span class="brand-badge">Bot</span>`;})();
+
+function brandBadgeHtml(){
+  return brandName?`<div class="brand-mark">${brandName}</div>`:'';
+}
+function isAdult(f){
+  return ((f&&f.category)||'').includes('18');
+}
 
 function ensureZoneSdk(zid){
   return new Promise((resolve)=>{
@@ -3003,7 +3593,7 @@ function ensureZoneSdk(zid){
 }
 
 document.addEventListener('click',function(e){
-  const btn=e.target.closest('button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.unlock-opt');
+  const btn=e.target.closest('button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.unlock-opt,.tut-lang-pill');
   if(!btn)return;
   const r=document.createElement('span'); r.className='ripple-fx';
   const rect=btn.getBoundingClientRect(), sz=Math.max(rect.width,rect.height);
@@ -3060,6 +3650,8 @@ function closeWelcome(){
 
 let userState=initialUserState||{balance:0,is_premium:false,expiry:null,history:[],favorites:[],unlocked_files:{}};
 let activeCat='All',activeLang='All',activeType='all',pendingCat=null,curFile=null,curSeasonIdx=0,feedLimit=15,lastFilteredLen=0;
+let blurTimers={}, detBlurTimer=null, curTutId=(tutorialsList.length?tutorialsList[0]._id:'default');
+
 function openTgLink(u){
   if(!u)return;
   try{
@@ -3151,32 +3743,66 @@ function topScore(f){
 }
 
 function renderTopSlider(){
-  let base=allFiles.filter(f=>matchesType(f)&&(!(f.category||'').includes('18')||sessionStorage.getItem('age_18_ok')==='1'));
+  let base=allFiles.filter(f=>matchesType(f)&&!isAdult(f));
   let tops=[...base].sort((a,b)=>topScore(b)-topScore(a)).slice(0,10);
   const sec=document.getElementById('pinned-section');
   if(!tops.length){sec.style.display='none';return;}
   sec.style.display='block';
   document.getElementById('home-pinned-head').innerText=activeType==='movie'?'🔥 Top Movies':(activeType==='series'?'🔥 Top Series':'🔥 Top Movies & Series');
-  document.getElementById('pinned-list').innerHTML=tops.map((f,idx)=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="${idx<3?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">🔥 Top #${idx+1}</div><div class="pin-views">⬇️ ${f.views||0}</div></div><div class="pin-t">${f.title}</div></div>`).join('');
+  document.getElementById('pinned-list').innerHTML=tops.map((f,idx)=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="${idx<3?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">🔥 Top #${idx+1}</div>${brandBadgeHtml()}<div class="pin-views">⬇️ ${f.views||0}</div></div><div class="pin-t">${f.title}</div></div>`).join('');
 }
 
 function timeAgo(iso){if(!iso)return 'Recently';const s=Math.floor((new Date()-new Date(iso))/1000);if(s<3600)return Math.max(1,Math.floor(s/60))+' min ago';if(s<86400)return Math.floor(s/3600)+' hr ago';return new Date(iso).toLocaleDateString();}
+
+function revealCardPoster(key, fid, ev){
+  const img=document.getElementById('pimg-'+key);
+  const ov=document.getElementById('blurov-'+key);
+  if(img && img.classList.contains('adult-blur')){
+    if(ev)ev.stopPropagation();
+    img.classList.remove('adult-blur');
+    if(ov)ov.style.display='none';
+    if(blurTimers[key])clearTimeout(blurTimers[key]);
+    const bsec=Number(adConfig.blur_sec||0);
+    if(bsec>0){
+      blurTimers[key]=setTimeout(()=>{
+        const im=document.getElementById('pimg-'+key), o=document.getElementById('blurov-'+key);
+        if(im)im.classList.add('adult-blur');
+        if(o)o.style.display='flex';
+      },bsec*1000);
+    }
+    return;
+  }
+  openDetails(fid);
+}
+
+function buildPosterCardHtml(f, i, pfx, badgeHtml){
+  const adult=isAdult(f);
+  const key=`${pfx}_${f._id}`;
+  const imgCls=adult?'adult-blur':'';
+  const tapAttr=adult?`onclick="revealCardPoster('${key}','${f._id}',event)"`:'';
+  const blurOv=adult?`<div class="blur-ov" id="blurov-${key}"><span>🔞 Tap Poster to View</span></div>`:'';
+  return `<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w" ${tapAttr}><img id="pimg-${key}" class="${imgCls}" loading="${i<2?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}">${badgeHtml}${brandBadgeHtml()}${blurOv}</div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
+}
 
 function renderFeed(){
   const q=(document.getElementById('search-inp').value||'').toLowerCase();
   const list=allFiles.filter(f=>{
     if(!matchesType(f))return false;
-    if((f.category||'').includes('18')&&activeCat==='All'&&sessionStorage.getItem('age_18_ok')!=='1')return false;
-    if(activeCat!=='All'&&(f.category||'All')!==activeCat)return false;
+    if(activeCat==='All'){
+      if(isAdult(f))return false;
+    } else {
+      if((f.category||'All')!==activeCat)return false;
+    }
     if(activeLang!=='All'&&(f.language||'')!==activeLang)return false;
-    if(q&&!f.title.toLowerCase().includes(q))return false; return true;
+    if(q&&!f.title.toLowerCase().includes(q))return false;
+    return true;
   });
   lastFilteredLen=list.length;
   const shown=list.slice(0,feedLimit);
   let h='';
   shown.forEach((f,i)=>{
     const tl=f.type==='series'?'📺 Series':(f.is_premium?'💎 VIP':'🎬 Movie');
-    h+=`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="${i<2?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new">🆕 New</div><div class="b-type">${tl}</div></div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
+    h+=buildPosterCardHtml(f,i,'feed',`<div class="b-new">🆕 New</div><div class="b-type">${tl}</div>`);
     if((i+1)%3===0&&promotions.length>0)h+=`<div class="car-wrap">`+promotions.map(p=>`<div class="p-slide" onclick="openTgLink('${p.link}')"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="p-slide-b"><div style="font-size:14px;font-weight:700;margin-bottom:6px;">${p.title}</div><button class="watch-pill">Watch Now</button></div></div>`).join('')+`</div>`;
   });
   if(list.length>feedLimit){
@@ -3194,11 +3820,11 @@ window.addEventListener('scroll',()=>{
 function renderFavs(){
   const favIds=[...(userState.favorites||[])];
   const favIts=allFiles.filter(f=>favIds.includes(f._id));
-  document.getElementById('fav-list').innerHTML=favIts.map(f=>`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new">🔖 Saved</div></div><div class="feed-body"><div class="feed-title">${f.title}</div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো ফেভারিট ভিডিও সেভ করা নেই!</p>";
+  document.getElementById('fav-list').innerHTML=favIts.map((f,i)=>buildPosterCardHtml(f,i,'fav',`<div class="b-new">🔖 Saved</div>`)).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো ফেভারিট ভিডিও সেভ করা নেই!</p>";
 
   const histIds=(userState.history||[]).filter(id=>!favIds.includes(id));
   const histIts=allFiles.filter(f=>histIds.includes(f._id));
-  document.getElementById('hist-list').innerHTML=histIts.map(f=>`<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="b-new" style="background:#475569;">🕒 Watched</div></div><div class="feed-body"><div class="feed-title">${f.title}</div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:18px;'>কোনো ওয়াচ হিস্টোরি নেই!</p>";
+  document.getElementById('hist-list').innerHTML=histIts.map((f,i)=>buildPosterCardHtml(f,i,'hist',`<div class="b-new" style="background:#475569;">🕒 Watched</div>`)).join('')||"<p style='text-align:center;color:#777;padding:18px;'>কোনো ওয়াচ হিস্টোরি নেই!</p>";
 }
 async function clearHistory(){
   userState.history=[];
@@ -3206,17 +3832,40 @@ async function clearHistory(){
   await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'clear_history',uid:userId})});
 }
 
-function renderUpcoming(){document.getElementById('upcoming-list').innerHTML=upcomingList.map(u=>`<div class="feed-card"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${u.thumb_url||'/poster/default'}"><div class="b-new">📅 UPCOMING</div><div class="b-type">🕒 ${u.release_time}</div></div><div class="feed-body"><div class="feed-title">${u.title}</div><div class="feed-meta"><span>Release: ${u.release_time}</span></div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো আপকামিং শিডিউল নেই!</p>";document.getElementById('promo-full-list').innerHTML=promotions.map(p=>`<div class="feed-card" onclick="openTgLink('${p.link}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="b-new">⭐ PROMO</div></div><div class="feed-body"><div class="feed-title">${p.title}</div></div></div>`).join('');}
+function renderUpcoming(){document.getElementById('upcoming-list').innerHTML=upcomingList.map(u=>`<div class="feed-card"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${u.thumb_url||'/poster/default'}"><div class="b-new">📅 UPCOMING</div>${brandBadgeHtml()}<div class="b-type">🕒 ${u.release_time}</div></div><div class="feed-body"><div class="feed-title">${u.title}</div><div class="feed-meta"><span>Release: ${u.release_time}</span></div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো আপকামিং শিডিউল নেই!</p>";document.getElementById('promo-full-list').innerHTML=promotions.map(p=>`<div class="feed-card" onclick="openTgLink('${p.link}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="b-new">⭐ PROMO</div></div><div class="feed-body"><div class="feed-title">${p.title}</div></div></div>`).join('');}
 renderUpcoming();
+
+function handleDetPosterTap(){
+  if(!curFile||!isAdult(curFile))return;
+  const img=document.getElementById('det-poster'), ov=document.getElementById('det-blur-ov');
+  if(img.classList.contains('adult-blur')){
+    img.classList.remove('adult-blur');
+    ov.style.display='none';
+    if(detBlurTimer)clearTimeout(detBlurTimer);
+    const bsec=Number(adConfig.blur_sec||0);
+    if(bsec>0){
+      detBlurTimer=setTimeout(()=>{
+        img.classList.add('adult-blur');
+        ov.style.display='flex';
+      },bsec*1000);
+    }
+  }
+}
 
 function openDetails(id){
   curFile=allFiles.find(f=>f._id===id); if(!curFile)return;
-  if((curFile.category||'').includes('18')&&sessionStorage.getItem('age_18_ok')!=='1'){pendingCat=curFile.category;document.getElementById('age-modal').style.display='flex';return;}
+  if(isAdult(curFile)&&sessionStorage.getItem('age_18_ok')!=='1'){pendingCat=curFile.category;document.getElementById('age-modal').style.display='flex';return;}
   curSeasonIdx=0; document.getElementById('main-chrome').style.display='none'; document.getElementById('bottom-nav').style.display='none'; document.getElementById('float-search-btn').style.display='none';
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); document.getElementById('page-details').classList.add('active'); document.getElementById('cmt-bar').style.display='flex'; window.scrollTo(0,0);
   const tb=document.getElementById('inline-tut-box'), tv=document.getElementById('det-tut-vid'), tbtn=document.getElementById('tut-toggle-btn');
   tv.pause(); tb.style.display='none'; tbtn.innerText='❓ Need help? Watch the tutorial';
-  document.getElementById('det-poster').src=curFile.thumb_url||'/poster/default'; document.getElementById('det-title').innerText=curFile.title;
+  const dp=document.getElementById('det-poster'), dbov=document.getElementById('det-blur-ov');
+  dp.src=curFile.thumb_url||'/poster/default';
+  document.getElementById('det-brand-slot').innerHTML=brandBadgeHtml();
+  if(detBlurTimer){clearTimeout(detBlurTimer);detBlurTimer=null;}
+  if(isAdult(curFile)){dp.classList.add('adult-blur');dbov.style.display='flex';}
+  else{dp.classList.remove('adult-blur');dbov.style.display='none';}
+  document.getElementById('det-title').innerText=curFile.title;
   document.getElementById('det-likes').innerText=(curFile.likes||[]).length; document.getElementById('det-views').innerText=curFile.views||0;
   document.getElementById('det-cmts-cnt').innerText=(curFile.comments||[]).length; document.getElementById('cmt-cnt-h').innerText=(curFile.comments||[]).length;
   let tags=[]; if(curFile.year)tags.push(curFile.year); if(curFile.category)tags.push(curFile.category); if(curFile.language)tags.push(curFile.language);
@@ -3233,31 +3882,57 @@ function openDetails(id){
 function closeDetails(){
   const tb=document.getElementById('inline-tut-box'), tv=document.getElementById('det-tut-vid');
   tv.pause(); tb.style.display='none';
+  if(detBlurTimer){clearTimeout(detBlurTimer);detBlurTimer=null;}
   document.getElementById('main-chrome').style.display='block';document.getElementById('bottom-nav').style.display='grid';document.getElementById('float-search-btn').style.display='flex';document.getElementById('cmt-bar').style.display='none';document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-home').classList.add('active');
 }
 
+function renderTutorialLangs(){
+  const row=document.getElementById('tut-lang-row');
+  if(!tutorialsList.length){row.style.display='none';curTutId='default';return;}
+  row.style.display='flex';
+  if(!tutorialsList.some(t=>t._id===curTutId))curTutId=tutorialsList[0]._id;
+  row.innerHTML=tutorialsList.map(t=>`<button class="tut-lang-pill ${t._id===curTutId?'active':''}" onclick="selectTutorial('${t._id}')">🌐 ${t.lang}${t.title?' • '+t.title:''}</button>`).join('');
+}
+function selectTutorial(tid){
+  curTutId=tid;
+  renderTutorialLangs();
+  const vid=document.getElementById('det-tut-vid'), src=document.getElementById('det-tut-src'), st=document.getElementById('tut-status');
+  st.style.display='block';
+  st.innerText='⏳ টিউটোরিয়াল ভিডিও লোড হচ্ছে...';
+  const vUrl=`/tutorial_video?id=${encodeURIComponent(tid)}&v=${tutorialVer}`;
+  src.setAttribute('src',vUrl);
+  vid.oncanplay=()=>{st.style.display='none';};
+  vid.onplaying=()=>{st.style.display='none';};
+  vid.onerror=()=>{st.style.display='block';st.innerText='⚠️ ভিডিও লোড হতে সময় নিচ্ছে, অথবা নিচের বাটন থেকে টেলিগ্রামে দেখুন।';};
+  vid.load();
+  vid.play().catch(()=>{});
+}
 function toggleInlineTutorial(){
-  const box=document.getElementById('inline-tut-box'), vid=document.getElementById('det-tut-vid'), src=document.getElementById('det-tut-src'), st=document.getElementById('tut-status'), btn=document.getElementById('tut-toggle-btn');
-  if(!hasTutorial){alert('⚠️ টিউটোরিয়াল ভিডিও এখনো সেট করা হয়নি!');return;}
+  const box=document.getElementById('inline-tut-box'), vid=document.getElementById('det-tut-vid'), src=document.getElementById('det-tut-src'), btn=document.getElementById('tut-toggle-btn');
+  if(!hasTutorial && !tutorialsList.length){alert('⚠️ টিউটোরিয়াল ভিডিও এখনো সেট করা হয়নি!');return;}
   if(box.style.display==='none'||!box.style.display){
     box.style.display='block';
-    const vUrl='/tutorial_video?v='+tutorialVer;
+    renderTutorialLangs();
     if(!src.getAttribute('src')){
-      st.style.display='block';
-      st.innerText='⏳ টিউটোরিয়াল ভিডিও লোড হচ্ছে...';
-      src.setAttribute('src',vUrl);
-      vid.oncanplay=()=>{st.style.display='none';};
-      vid.onplaying=()=>{st.style.display='none';};
-      vid.onerror=()=>{st.style.display='block';st.innerText='⚠️ ভিডিও লোড হতে সময় নিচ্ছে, অনুগ্রহ করে কয়েক সেকেন্ড পর আবার চেষ্টা করুন।';};
-      vid.load();
+      selectTutorial(curTutId||'default');
+    } else {
+      vid.play().catch(()=>{});
     }
-    vid.play().catch(()=>{});
     btn.innerText='🔼 Hide tutorial video';
   } else {
     vid.pause();
     box.style.display='none';
     btn.innerText='❓ Need help? Watch the tutorial';
   }
+}
+async function sendTutorialToTelegram(){
+  const tid=curTutId||'default';
+  try{
+    const r=await fetch('/api/send_tutorial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,tut_id:tid})});
+    const d=await r.json();
+    if(d.status==='success'){alert(d.msg);return;}
+  }catch(e){}
+  openTgLink(`https://t.me/${botUsername}?start=tut_${tid}`);
 }
 
 function pad2(v){
@@ -3309,7 +3984,33 @@ function isFileLocallyUnlocked(btnKey){
   try{return new Date(exp)>new Date();}catch(e){return false;}
 }
 
-let pendingUnlockData=null;
+let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdVisHandler=null, activeAdCancelCb=null;
+
+function cleanupAdWatchers(){
+  if(activeAdIv){clearInterval(activeAdIv);activeAdIv=null;}
+  if(activeAdVisHandler){
+    document.removeEventListener('visibilitychange',activeAdVisHandler);
+    window.removeEventListener('focus',activeAdVisHandler);
+    activeAdVisHandler=null;
+  }
+}
+function cancelActiveAd(reasonMsg){
+  cleanupAdWatchers();
+  curAdToken=null;
+  document.getElementById('ad-modal').style.display='none';
+  if(reasonMsg)alert(reasonMsg);
+  const cb=activeAdCancelCb; activeAdCancelCb=null;
+  if(cb)cb();
+}
+async function startServerAdToken(kind,target,mode){
+  try{
+    const r=await fetch('/api/ad_start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,kind,target,mode})});
+    const d=await r.json();
+    curAdToken=d.token||null;
+    return d;
+  }catch(e){curAdToken=null;return {token:null,min_sec:0,strict_ad:adConfig.strict_ad};}
+}
+
 function renderUnlockStepModal(){
   if(!pendingUnlockData)return;
   const {currentStep,totalSteps,waitT,adLinks,zList,coinPrice}=pendingUnlockData;
@@ -3327,7 +4028,7 @@ function renderUnlockStepModal(){
     h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="unlockWithAdsterra()"><span>🔗 Direct Link Ad (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
   }
   if(!randZone&&!randLink){
-    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#10b981,#059669);" onclick="completeUnlockStep('direct')"><span>⚡ Verify &amp; Continue (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#10b981,#059669);" onclick="directStepWait()"><span>⚡ Verify &amp; Continue (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
   }
   document.getElementById('unlock-options-area').innerHTML=h;
   document.getElementById('unlock-modal').style.display='flex';
@@ -3358,10 +4059,16 @@ async function completeUnlockStep(method){
     return;
   }
   const {dl,sp}=pendingUnlockData;
+  const tok=curAdToken; curAdToken=null;
+  const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:sp,method,ad_token:tok})});
+  const d=await r.json();
+  if(d.status!=='success'){
+    alert(d.msg||'❌ আনলক ব্যর্থ হয়েছে! আবার অ্যাড দেখুন।');
+    renderUnlockStepModal();
+    return;
+  }
   pendingUnlockData=null;
   document.getElementById('unlock-modal').style.display='none';
-  const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:sp,method})});
-  const d=await r.json();
   if(d.expiry&&adConfig.relock_sec!==0){
     if(!userState.unlocked_files)userState.unlocked_files={};
     userState.unlocked_files[sp]=d.expiry;
@@ -3389,31 +4096,85 @@ async function unlockWithCoin(){
 async function unlockWithMonetag(zid){
   if(!pendingUnlockData)return;
   document.getElementById('unlock-modal').style.display='none';
+  await startServerAdToken('file',pendingUnlockData.sp,'monetag');
+  const mWait=Number(adConfig.monetag_wait||0);
+  const t0=Date.now();
   const ok=await ensureZoneSdk(zid);
   if(ok&&typeof window['show_'+zid]==='function'){
     try{
       await window['show_'+zid]();
+      const el=(Date.now()-t0)/1000;
+      if(adConfig.strict_ad && mWait>0 && el<mWait){
+        curAdToken=null;
+        alert(`❌ অ্যাড শেষ হওয়ার আগেই ব্যাক করেছেন (${Math.floor(el)}s)! অন্তত ${mWait}s অ্যাড দেখুন।`);
+        if(pendingUnlockData)renderUnlockStepModal();
+        return;
+      }
       await completeUnlockStep('monetag');
       return;
-    }catch(e){}
+    }catch(e){
+      curAdToken=null;
+      alert('❌ অ্যাড সম্পূর্ণ না করেই ব্যাক করেছেন! আবার অ্যাড দেখুন।');
+      if(pendingUnlockData)renderUnlockStepModal();
+      return;
+    }
   }
-  alert('⚠️ Monetag অ্যাড লোড হয়নি, অন্য মাধ্যম (Direct Link) দিয়ে চেষ্টা করুন অথবা কয়েক সেকেন্ড পর আবার ক্লিক করুন।');
+  curAdToken=null;
+  alert('⚠️ Monetag অ্যাড লোড হয়নি, অন্য মাধ্যম (Direct Link) দিয়ে চেষ্টা করুন।');
   if(pendingUnlockData)renderUnlockStepModal();
 }
 
-function unlockWithAdsterra(){
+async function unlockWithAdsterra(){
   if(!pendingUnlockData)return;
   const link=pendingUnlockData.curLink;
   const wt=pendingUnlockData.waitT||5;
   document.getElementById('unlock-modal').style.display='none';
-  runAdTimer(link,wt,async()=>{await completeUnlockStep('adsterra');});
+  await startServerAdToken('file',pendingUnlockData.sp,'link');
+  runAdTimer(link,wt,async()=>{await completeUnlockStep('adsterra');},()=>{if(pendingUnlockData)renderUnlockStepModal();});
 }
 
-function runAdTimer(link,sec,onDone){
+async function directStepWait(){
+  if(!pendingUnlockData)return;
+  document.getElementById('unlock-modal').style.display='none';
+  await startServerAdToken('file',pendingUnlockData.sp,'link');
+  runAdTimer(null,pendingUnlockData.waitT||5,async()=>{await completeUnlockStep('direct');},()=>{if(pendingUnlockData)renderUnlockStepModal();});
+}
+
+function runAdTimer(link,sec,onDone,onCancel){
+  cleanupAdWatchers();
+  activeAdCancelCb=onCancel||null;
   const ov=document.getElementById('ad-modal'),tm=document.getElementById('ad-timer'),btn=document.getElementById('ad-action-btn');
   ov.style.display='flex';btn.style.display='none';tm.innerText=sec;
+  const startTs=Date.now();
+  let leftPage=false;
   if(link){try{if(tg?.openLink)tg.openLink(link);else window.open(link,'_blank');}catch(e){}}
-  let t=sec,iv=setInterval(()=>{t--;tm.innerText=Math.max(0,t);if(t<=0){clearInterval(iv);btn.style.display='block';btn.onclick=()=>{ov.style.display='none';onDone();};}},1000);
+  if(adConfig.strict_ad && link){
+    activeAdVisHandler=()=>{
+      if(document.hidden){leftPage=true;}
+      else if(leftPage){
+        const el=(Date.now()-startTs)/1000;
+        if(el<sec-0.8){
+          cancelActiveAd('❌ অ্যাডের সময় শেষ হওয়ার আগেই ব্যাক করেছেন! কোনো ভিডিও/লিংক/কয়েন পাবেন না। পুনরায় অ্যাড সম্পূর্ণ সময় দেখুন।');
+        }
+      }
+    };
+    document.addEventListener('visibilitychange',activeAdVisHandler);
+    window.addEventListener('focus',activeAdVisHandler);
+  }
+  activeAdIv=setInterval(()=>{
+    const el=(Date.now()-startTs)/1000;
+    const rem=Math.max(0,Math.ceil(sec-el));
+    tm.innerText=rem;
+    if(el>=sec){
+      cleanupAdWatchers();
+      btn.style.display='block';
+      btn.onclick=()=>{
+        ov.style.display='none';
+        activeAdCancelCb=null;
+        onDone();
+      };
+    }
+  },400);
 }
 
 function likeCurrent(){if(!curFile.likes)curFile.likes=[];if(!curFile.likes.includes(userId)){curFile.likes.push(userId);document.getElementById('det-likes').innerText=curFile.likes.length;document.getElementById('btn-like').innerText='❤️ Liked';fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'like',uid:userId,file_id:curFile._id})});}}
@@ -3548,12 +4309,23 @@ async function loadEarn(){
   h+=`<div class="card-box"><b>📱 Daily Task (${d.tasks_done}/${d.task_limit})</b> <small style="color:#64748b;">(${d.task_step||1} Step)</small><br><br><button class="btn-p" onclick="doEarn('task')" ${d.tasks_done>=d.task_limit?'disabled':''}>Complete Task</button></div>`;
   (d.custom_tasks||[]).forEach((t,idx)=>{
     const dn=(d.custom_tasks_done||[]).includes(t._id);
+    if(t.task_type==='tg_join'){
+      h+=`<div class="card-box"><b>📢 ${t.title} (+${t.coin}C)</b><div style="font-size:11.5px;color:#64748b;margin:4px 0 10px 0;">Telegram Join Task • জয়েন না করলে Verify হবে না</div><div style="display:flex;gap:8px;"><button class="btn-p" style="background:linear-gradient(90deg,#0ea5e9,#2563eb);" onclick="openTgLink('${t.link}')">📢 Join</button><button class="btn-p" onclick="verifyTgTask('${t._id}')" ${dn?'disabled':''}>${dn?'Verified ✅':'✅ Verify'}</button></div></div>`;
+      return;
+    }
     const isZ=(t.task_type==='zone'||!!t.zone_id);
     const badge=isZ?`📺 Monetag Zone (${t.zone_id})`:`🔗 Direct Link`;
     const stp=t.steps>0?t.steps:(d.task_step||1);
     h+=`<div class="card-box"><b>💎 ${t.title} (+${t.coin}C)</b><div style="font-size:11.5px;color:#64748b;margin:4px 0 10px 0;">${badge} • ${stp} Step</div><button class="btn-p" onclick="doCustomEarnIdx(${idx})" ${dn?'disabled':''}>${dn?'Completed':'Complete'}</button></div>`;
   });
   document.getElementById('earn-area').innerHTML=h;
+}
+
+async function verifyTgTask(tid){
+  const r=await fetch('/api/verify_tg_task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,task_id:tid})});
+  const d=await r.json();
+  alert(d.msg);
+  if(d.status==='success'){loadUser();loadEarn();}
 }
 
 function renderTaskStepModal(){
@@ -3567,10 +4339,10 @@ function renderTaskStepModal(){
     document.getElementById('task-modal-desc').innerText=`Monetag Zone (${fixedZone}) অ্যাড দেখে স্টেপ সম্পন্ন করুন:`;
     h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="runTaskMonetag('${fixedZone}')"><span>📺 Monetag Ad (Step ${currentStep}/${totalSteps})</span><span>Zone ${fixedZone} ⚡</span></button>`;
   } else if(mode==='link'){
-    document.getElementById('task-modal-desc').innerText=`ডিরেক্ট লিংক ভিজিট করে স্টেপ সম্পন্ন করুন:`;
+    document.getElementById('task-modal-desc').innerText=`ডিরেক্ট লিংক ভিজিট করে স্টেপ সম্পন্ন করুন (সময়ের আগে ব্যাক করবেন না):`;
     h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="runTaskLink('${encodeURIComponent(fixedLink)}')"><span>🔗 Direct Link Ad (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
   } else {
-    document.getElementById('task-modal-desc').innerText='আপনার পছন্দমতো যেকোনো একটি মাধ্যমে ভেরিফাই করুন:';
+    document.getElementById('task-modal-desc').innerText='অ্যাড শেষ না হওয়া পর্যন্ত ব্যাক করবেন না। নিচের যেকোনো একটি মাধ্যমে ভেরিফাই করুন:';
     const rz=zoneList.length?zoneList[Math.floor(Math.random()*zoneList.length)]:null;
     const rl=linkList.length?linkList[Math.floor(Math.random()*linkList.length)]:null;
     if(rz){
@@ -3592,30 +4364,52 @@ async function completeTaskStep(){
     return;
   }
   const tp=pendingTaskData.claimType;
-  pendingTaskData=null;
-  document.getElementById('task-ad-modal').style.display='none';
-  await claimEarn(tp);
+  const tok=curAdToken; curAdToken=null;
+  const ok=await claimEarn(tp,tok);
+  if(ok){
+    pendingTaskData=null;
+    document.getElementById('task-ad-modal').style.display='none';
+  } else if(pendingTaskData){
+    renderTaskStepModal();
+  }
 }
 
 async function runTaskMonetag(zid){
   document.getElementById('task-ad-modal').style.display='none';
+  await startServerAdToken('earn',pendingTaskData?pendingTaskData.claimType:'earn','monetag');
+  const mWait=Number(adConfig.monetag_wait||0);
+  const t0=Date.now();
   const ok=await ensureZoneSdk(zid);
   if(ok&&typeof window['show_'+zid]==='function'){
     try{
       await window['show_'+zid]();
+      const el=(Date.now()-t0)/1000;
+      if(adConfig.strict_ad && mWait>0 && el<mWait){
+        curAdToken=null;
+        alert(`❌ অ্যাড শেষ হওয়ার আগেই ব্যাক করেছেন (${Math.floor(el)}s)! অন্তত ${mWait}s দেখুন।`);
+        if(pendingTaskData)renderTaskStepModal();
+        return;
+      }
       await completeTaskStep();
       return;
-    }catch(e){}
+    }catch(e){
+      curAdToken=null;
+      alert('❌ অ্যাড সম্পূর্ণ না করেই ব্যাক করেছেন! কোনো কয়েন পাবেন না, আবার অ্যাড দেখুন।');
+      if(pendingTaskData)renderTaskStepModal();
+      return;
+    }
   }
-  alert('⚠️ Monetag অ্যাড লোড হয়নি, অনুগ্রহ করে Direct Link ব্যবহার করুন বা কয়েক সেকেন্ড পর আবার চেষ্টা করুন।');
+  curAdToken=null;
+  alert('⚠️ Monetag অ্যাড লোড হয়নি, অনুগ্রহ করে Direct Link ব্যবহার করুন।');
   if(pendingTaskData)renderTaskStepModal();
 }
 
-function runTaskLink(encLink){
+async function runTaskLink(encLink){
   const link=decodeURIComponent(encLink||'');
   const wt=(pendingTaskData&&pendingTaskData.waitT)||10;
   document.getElementById('task-ad-modal').style.display='none';
-  runAdTimer(link,wt,async()=>{await completeTaskStep();});
+  await startServerAdToken('earn',pendingTaskData?pendingTaskData.claimType:'earn','link');
+  runAdTimer(link,wt,async()=>{await completeTaskStep();},()=>{if(pendingTaskData)renderTaskStepModal();});
 }
 
 async function doEarn(tp){
@@ -3624,7 +4418,7 @@ async function doEarn(tp){
   const lList=ad.ad_links||[];
   const steps=Math.max(1,ad.task_step||(earnState&&earnState.task_step)||1);
   if(!zList.length&&!lList.length){
-    return claimEarn(tp);
+    return claimEarn(tp,null);
   }
   pendingTaskData={
     claimType:tp,
@@ -3634,7 +4428,7 @@ async function doEarn(tp){
     currentStep:1,
     zoneList:zList,
     linkList:lList,
-    waitT:ad.wait_time||10
+    waitT:ad.wait_time||adConfig.task_wait_sec||10
   };
   renderTaskStepModal();
 }
@@ -3655,13 +4449,18 @@ function doCustomEarnIdx(idx){
     fixedLink:t.link||'',
     zoneList:[],
     linkList:[],
-    waitT:10
+    waitT:earnState.wait_time||adConfig.task_wait_sec||10
   };
   renderTaskStepModal();
 }
 
-function doCustomEarn(id,lk){runAdTimer(lk,10,()=>claimEarn('custom_'+id));}
-async function claimEarn(tp){const d=await(await fetch('/api/claim_earn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,type:tp})})).json();alert(d.msg);loadUser();loadEarn();}
+function doCustomEarn(id,lk){runAdTimer(lk,10,()=>claimEarn('custom_'+id,curAdToken));}
+async function claimEarn(tp,adTok){
+  const d=await(await fetch('/api/claim_earn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,type:tp,ad_token:adTok})})).json();
+  alert(d.msg);
+  loadUser();loadEarn();
+  return d.status==='success';
+}
 async function redeemCoupon(){const c=document.getElementById('coupon-inp').value.trim();if(!c)return;const d=await(await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,code:c})})).json();alert(d.msg);if(d.status==='success'){document.getElementById('coupon-inp').value='';loadUser();}}
 async function sendMovieRequest(){const n=document.getElementById('req-inp').value.trim();if(!n)return;const d=await(await fetch('/api/request_movie',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,movie_name:n})})).json();alert(d.msg);document.getElementById('req-inp').value='';}
 async function buyWithCoin(pid,cost){if(!confirm(`${cost} কয়েন দিয়ে কিনবেন?`))return;const d=await(await fetch('/api/buy_with_coin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,pkg_id:pid})})).json();alert(d.msg);loadUser();}
@@ -3709,6 +4508,10 @@ def _fetch_shell_payload():
         try: return [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
         except: return []
 
+    def q_tutorials():
+        try: return list(sync_db["tutorials"].find())
+        except: return []
+
     f_cfg = WEB_POOL.submit(q_config)
     f_cats = WEB_POOL.submit(q_cats)
     f_langs = WEB_POOL.submit(q_langs)
@@ -3717,6 +4520,7 @@ def _fetch_shell_payload():
     f_pkgs = WEB_POOL.submit(q_pkgs)
     f_zones = WEB_POOL.submit(q_zones)
     f_links = WEB_POOL.submit(q_ad_links)
+    f_tuts = WEB_POOL.submit(q_tutorials)
 
     config = f_cfg.result()
     cats = f_cats.result()
@@ -3726,6 +4530,7 @@ def _fetch_shell_payload():
     pkgs = f_pkgs.result()
     zone_ids = f_zones.result()
     ad_links = f_links.result()
+    raw_tuts = f_tuts.result()
 
     if not zone_ids and DEFAULT_ZONE_ID:
         zone_ids = [DEFAULT_ZONE_ID]
@@ -3747,6 +4552,16 @@ def _fetch_shell_payload():
         elif tu.startswith("data:image"):
             u["thumb_url"] = f"{live_url}/poster/upc_{u['_id']}"
 
+    tutorials = []
+    for t in raw_tuts:
+        tutorials.append({
+            "_id": str(t["_id"]),
+            "lang": t.get("lang", "Bangla"),
+            "title": t.get("title", "")
+        })
+    if not tutorials and config.get("tutorial_vid"):
+        tutorials.append({"_id": "default", "lang": "Default", "title": "Tutorial"})
+
     payload = {
         "config": config,
         "cats": cats,
@@ -3755,7 +4570,8 @@ def _fetch_shell_payload():
         "upcs": upcs,
         "pkgs": pkgs,
         "zone_ids": zone_ids,
-        "ad_links": ad_links
+        "ad_links": ad_links,
+        "tutorials": tutorials
     }
     SHELL_DATA_CACHE["data"] = payload
     SHELL_DATA_CACHE["ts"] = time.time()
@@ -3852,7 +4668,7 @@ def home():
     p = _fetch_shell_payload()
     config = p["config"]
     tut_vid = config.get("tutorial_vid") or ""
-    tut_ver = hashlib.md5(str(tut_vid).encode()).hexdigest()[:8] if tut_vid else "0"
+    tut_ver = hashlib.md5((str(tut_vid) + str(len(p["tutorials"]))).encode()).hexdigest()[:8] if (tut_vid or p["tutorials"]) else "0"
     logo_val = config.get("start_logo") or config.get("site_name", "FB")
     logo_ver = hashlib.md5(str(logo_val).encode()).hexdigest()[:8]
     sn = config.get("site_name", "Moviee Link")
@@ -3870,11 +4686,15 @@ def home():
 
     ad_config = {
         "ads_on": config.get("ads_on", True),
+        "strict_ad": bool(config.get("strict_ad", True)),
+        "blur_sec": int(config.get("blur_sec", 20)),
         "coin_price": config.get("premium_vid_coin", 50),
         "prstep": max(1, int(config.get("prstep", 1))),
         "regstep": max(1, int(config.get("regstep", 1))),
         "relock_sec": get_relock_seconds(config),
         "prem_wait_time": int(config.get("prem_vid_wait", 10)),
+        "task_wait_sec": int(config.get("task_wait_sec", 10)),
+        "monetag_wait": int(config.get("monetag_wait", 4)),
         "ad_links": p["ad_links"],
         "zone_ids": p["zone_ids"],
         "wait_times": config.get("direk_wait", [5])
@@ -3891,6 +4711,8 @@ def home():
         zone_ids_json=json.dumps(p["zone_ids"]),
         ad_config_json=json.dumps(ad_config),
         initial_user_json=json.dumps(initial_user),
+        tutorials_json=json.dumps(p["tutorials"]),
+        brand_name_json=json.dumps(config.get("brand_name", "")),
         pkgs=p["pkgs"],
         bot_username=BOT_USERNAME,
         admin_username=config.get("payment_admin", DEFAULT_ADMIN_USERNAME),
@@ -3898,7 +4720,7 @@ def home():
         logo_ver=logo_ver,
         site_name_hash_json=json.dumps(site_name_hash),
         rec_group_link_json=json.dumps(config.get("rec_group_link", "")),
-        has_tutorial_json=json.dumps(bool(tut_vid)),
+        has_tutorial_json=json.dumps(bool(tut_vid or p["tutorials"])),
         tutorial_ver_json=json.dumps(tut_ver),
         marquee_text=config.get("marquee_text", "VLC Player অথবা MX Player দিয়ে চালিয়ে দেখুন। ✅ সাউন্ড/অডিও সমস্যা হলে ভিডিওটি ডাউনলোড করে দেখুন।"),
         ref_coin=config.get("ref_coin", 10)
@@ -3928,6 +4750,7 @@ async def main_bot():
     try:
         commands = [
             BotCommand("start", "বট স্টার্ট করুন"),
+            BotCommand("tutorial", "টিউটোরিয়াল ভিডিও দেখুন"),
             BotCommand("cmd", "সকল কমান্ড ও উদাহরণ (Admin)"),
             BotCommand("stats", "বট স্ট্যাটিস্টিকস (Admin)"),
             BotCommand("movies", "নতুন মুভি এড (Admin)"),
@@ -3940,22 +4763,34 @@ async def main_bot():
             BotCommand("delupcoming", "আপকামিং ডিলিট (Admin)"),
             BotCommand("setcategory", "ক্যাটাগরি এড (Admin)"),
             BotCommand("deletecategory", "ক্যাটাগরি ডিলিট (Admin)"),
+            BotCommand("blar", "১৮+ পোস্টার অটো ব্লার সময় (Admin)"),
+            BotCommand("brand", "পোস্টারে ব্র্যান্ড নাম সেট (Admin)"),
+            BotCommand("delbrand", "ব্র্যান্ড নাম রিমুভ (Admin)"),
             BotCommand("setlanguage", "ভাষা এড (Admin)"),
             BotCommand("deletelanguage", "ভাষা ডিলিট (Admin)"),
             BotCommand("setrecgroup", "Recommendation গ্রুপ সেট (Admin)"),
             BotCommand("delrecgroup", "Recommendation গ্রুপ রিমুভ (Admin)"),
+            BotCommand("strictad", "অ্যাড শেষ না হলে বাতিল (Admin)"),
+            BotCommand("regwait", "রেগুলার অ্যাডের সময় সেকেন্ড (Admin)"),
+            BotCommand("prparadd", "প্রিমিয়াম অ্যাডের সময় সেকেন্ড (Admin)"),
+            BotCommand("taskwait", "স্পিন/টাস্ক অ্যাডের সময় (Admin)"),
+            BotCommand("monetagwait", "Monetag ন্যূনতম সময় (Admin)"),
             BotCommand("addzoonid", "Monetag Zone ID এড (Admin)"),
             BotCommand("deletezoonid", "Zone ID ডিলিট (Admin)"),
             BotCommand("prstep", "প্রিমিয়াম অ্যাড স্টেপ (Admin)"),
             BotCommand("regstep", "রেগুলার অ্যাড স্টেপ (Admin)"),
             BotCommand("taskstep", "টাস্ক ও স্পিন অ্যাড স্টেপ (Admin)"),
             BotCommand("relocktime", "রিলক টাইম সেকেন্ডে সেট (Admin)"),
+            BotCommand("tgtask", "টেলিগ্রাম জয়েন টাস্ক এড (Admin)"),
+            BotCommand("deltgtask", "টেলিগ্রাম টাস্ক ডিলিট (Admin)"),
             BotCommand("addzonetask", "আলাদা Zone ID টাস্ক এড (Admin)"),
             BotCommand("addlinktask", "আলাদা Direct Link টাস্ক এড (Admin)"),
             BotCommand("addredeem", "রিডিম কোড তৈরি (Admin)"),
             BotCommand("premiumuserlist", "প্রিমিয়াম ইউজার লিস্ট (Admin)"),
             BotCommand("deletepremium", "প্রিমিয়াম রিমুভ (Admin)"),
-            BotCommand("settutorial", "টিউটোরিয়াল ভিডিও সেট (Admin)"),
+            BotCommand("addtutorial", "ভাষা অনুযায়ী টিউটোরিয়াল এড (Admin)"),
+            BotCommand("deltutorial", "টিউটোরিয়াল ডিলিট (Admin)"),
+            BotCommand("settutorial", "ডিফল্ট টিউটোরিয়াল সেট (Admin)"),
             BotCommand("setnotice", "স্ক্রলিং নোটিশ সেট (Admin)"),
             BotCommand("cancel", "চলমান প্রসেস বাতিল (Admin)")
         ]
