@@ -4159,14 +4159,12 @@ function isFileLocallyUnlocked(btnKey){
   try{return new Date(exp)>new Date();}catch(e){return false;}
 }
 
-let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdVisHandler=null, activeAdCancelCb=null;
+let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdCleanupList=[], activeAdCancelCb=null;
 
 function cleanupAdWatchers(){
   if(activeAdIv){clearInterval(activeAdIv);activeAdIv=null;}
-  if(activeAdVisHandler){
-    document.removeEventListener('visibilitychange',activeAdVisHandler);
-    window.removeEventListener('focus',activeAdVisHandler);
-    activeAdVisHandler=null;
+  while(activeAdCleanupList.length){
+    try{activeAdCleanupList.pop()();}catch(e){}
   }
 }
 function cancelActiveAd(reasonMsg){
