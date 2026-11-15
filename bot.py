@@ -4713,11 +4713,10 @@ async function runTaskMonetag(zid){
   if(pendingTaskData)renderTaskStepModal();
 }
 
-async function runTaskLink(encLink){
+function runTaskLink(encLink){
   const link=decodeURIComponent(encLink||'');
   const wt=(pendingTaskData&&pendingTaskData.waitT)||10;
   document.getElementById('task-ad-modal').style.display='none';
-  await startServerAdToken('earn',pendingTaskData?pendingTaskData.claimType:'earn','link');
   runAdTimer(link,wt,async()=>{await completeTaskStep();},()=>{if(pendingTaskData)renderTaskStepModal();},{kind:'earn',target:pendingTaskData?pendingTaskData.claimType:'earn'});
 }
 
