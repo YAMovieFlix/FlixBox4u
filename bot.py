@@ -1008,15 +1008,24 @@ async def handle_tut_video_wait(c, m):
 
 @app.on_message(filters.command("deltutorial", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_deltutorial(c, m):
-    await get_db(); ts = await tutorials_col.find().to_list(100)
-    if not ts: return await m.reply("❌ কোনো আলাদা টিউটোরিয়াল এড করা নেই! `/addtutorial` দিয়ে এড করুন।")
-    btns = [[InlineKeyboardButton(f"❌ [{t['lang']}] {t['title'][:24]}", callback_data=f"deltut_{t['_id']}")] for t in ts]
+    await get_db(); conf = await get_config(); ts = await tutorials_col.find().to_list(100)
+    btns = []
+    if conf.get("tutorial_vid"):
+        btns.append([InlineKeyboardButton("❌ [Main / Default] Tutorial Video", callback_data="deltut_main")])
+    for t in ts:
+        btns.append([InlineKeyboardButton(f"❌ [{t['lang']}] {t['title'][:24]}", callback_data=f"deltut_{t['_id']}")])
+    if not btns:
+        return await m.reply("❌ কোনো টিউটোরিয়াল সেট করা নেই!")
     await m.reply("🗑 ডিলিট করতে টিউটোরিয়ালে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex(r"^deltut_") & filters.user(ADMIN_ID) & unique_cb)
 async def deltut_cb(c, q):
     await get_db()
-    await tutorials_col.delete_one({"_id": ObjectId(q.data.split("_", 1)[1])})
+    val = q.data.split("_", 1)[1]
+    if val == "main":
+        await config_col.update_one({"_id": "settings"}, {"$set": {"tutorial_vid": None}})
+    else:
+        await tutorials_col.delete_one({"_id": ObjectId(val)})
     invalidate_home_cache()
     await q.message.edit_text("✅ টিউটোরিয়াল ডিলিট হয়েছে!")
 
