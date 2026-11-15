@@ -4578,9 +4578,19 @@ async function claimEarn(tp,adTok){
 async function redeemCoupon(){const c=document.getElementById('coupon-inp').value.trim();if(!c)return;const d=await(await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,code:c})})).json();alert(d.msg);if(d.status==='success'){document.getElementById('coupon-inp').value='';loadUser();}}
 async function sendMovieRequest(){const n=document.getElementById('req-inp').value.trim();if(!n)return;const d=await(await fetch('/api/request_movie',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,movie_name:n})})).json();alert(d.msg);document.getElementById('req-inp').value='';}
 async function buyWithCoin(pid,cost){if(!confirm(`${cost} কয়েন দিয়ে কিনবেন?`))return;const d=await(await fetch('/api/buy_with_coin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,pkg_id:pid})})).json();alert(d.msg);loadUser();}
-function copyRef(){const i=document.getElementById('ref-inp');i.select();navigator.clipboard.writeText(i.value);alert('✅ Link Copied!');}
-
-hydrateAppFast();
+function switchPkgTab(tp, btn){
+  document.querySelectorAll('.pkg-tab').forEach(b=>b.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+  let cnt=0;
+  document.querySelectorAll('#pkg-list-wrap .pkg-item').forEach(el=>{
+    const show=(el.getAttribute('data-pkg-type')===tp);
+    el.style.display=show?'flex':'none';
+    if(show)cnt++;
+  });
+  const emp=document.getElementById('pkg-empty-msg');
+  if(emp)emp.style.display=cnt===0?'block':'none';
+}
+switchPkgTab('coin', document.querySelector('.pkg-tab.active'));
 </script>
 </body>
 </html>"""
