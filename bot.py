@@ -2901,7 +2901,7 @@ const zoneIds={{ zone_ids_json | safe }};
 const waitTime={{ wait_time }};
 const monetagWait={{ monetag_wait }};
 const strictAd={{ strict_ad_json | safe }};
-let curToken=null, curIv=null, visHandler=null;
+let curToken=null, curIv=null, cleanupList=[];
 
 function showWarn(msg){
   const w=document.getElementById('warn-msg');
@@ -2911,10 +2911,8 @@ function showWarn(msg){
 }
 function cleanupWatchers(){
   if(curIv){clearInterval(curIv);curIv=null;}
-  if(visHandler){
-    document.removeEventListener('visibilitychange',visHandler);
-    window.removeEventListener('focus',visHandler);
-    visHandler=null;
+  while(cleanupList.length){
+    try{cleanupList.pop()();}catch(e){}
   }
 }
 async function startServerAdToken(mode,minSec){
