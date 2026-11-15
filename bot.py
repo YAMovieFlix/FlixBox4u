@@ -4715,7 +4715,7 @@ function doCustomEarnIdx(idx){
   renderTaskStepModal();
 }
 
-function doCustomEarn(id,lk){runAdTimer(lk,10,()=>claimEarn('custom_'+id,curAdToken));}
+function doCustomEarn(id,lk){runAdTimer(lk,10,()=>claimEarn('custom_'+id,curAdToken),null,{kind:'earn',target:'custom_'+id});}
 async function claimEarn(tp,adTok){
   const d=await(await fetch('/api/claim_earn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,type:tp,ad_token:adTok})})).json();
   alert(d.msg);
