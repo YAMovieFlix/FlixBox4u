@@ -4355,11 +4355,12 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
 
   const startTs=Date.now();
   let leftPage=false, leftAt=0, paused=false, completed=false;
+  const tokenPromise=(adMeta&&adMeta.kind)?startServerAdToken(adMeta.kind,adMeta.target||'','link'):Promise.resolve(null);
 
   function openAdNow(){
     if(!link)return true;
     try{
-      if(tg?.openLink){tg.openLink(link);return true;}
+      if(tg?.openLink){tg.openLink(link,{try_instant_view:false});return true;}
       const w=window.open(link,'_blank');
       return w!==null;
     }catch(e){return false;}
@@ -4375,7 +4376,11 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     st.innerText='✅ অ্যাড ভেরিফিকেশন সম্পন্ন হয়েছে! নিচের বাটনে ক্লিক করুন।';
     retryBtn.style.display='none';
     btn.style.display='block';
-    btn.onclick=()=>{
+    btn.onclick=async()=>{
+      btn.disabled=true;
+      const tokRes=await tokenPromise;
+      if(tokRes&&tokRes.token)curAdToken=tokRes.token;
+      btn.disabled=false;
       ov.style.display='none';
       activeAdCancelCb=null;
       onDone();
@@ -4394,14 +4399,7 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     st.innerText=msg||'⏸️ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! টাইমার পজ হয়েছে। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
     btn.style.display='none';
     retryBtn.style.display='block';
-    retryBtn.onclick=async()=>{
-      retryBtn.disabled=true;
-      retryBtn.innerText='⏳ অ্যাড চালু হচ্ছে...';
-      if(adMeta&&adMeta.kind){
-        await startServerAdToken(adMeta.kind,adMeta.target||'','link');
-      }
-      retryBtn.disabled=false;
-      retryBtn.innerText='🔗 পুনরায় অ্যাডে ক্লিক করুন';
+    retryBtn.onclick=()=>{
       runAdTimer(link,sec,onDone,onCancel,adMeta);
     };
   }
