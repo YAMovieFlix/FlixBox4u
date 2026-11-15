@@ -4485,40 +4485,13 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
       finishTimer();
     }
   },200);
-    };
-    const onVis=()=>{if(document.hidden)markLeft();else markReturned();};
-
-    document.addEventListener('visibilitychange',onVis);
-    window.addEventListener('blur',markLeft);
-    window.addEventListener('focus',markReturned);
-    window.addEventListener('pagehide',markLeft);
-    window.addEventListener('pageshow',markReturned);
-    activeAdCleanupList.push(
-      ()=>document.removeEventListener('visibilitychange',onVis),
-      ()=>window.removeEventListener('blur',markLeft),
-      ()=>window.removeEventListener('focus',markReturned),
-      ()=>window.removeEventListener('pagehide',markLeft),
-      ()=>window.removeEventListener('pageshow',markReturned)
-    );
-    if(tg?.onEvent && tg?.offEvent){
-      tg.onEvent('deactivated',markLeft);
-      tg.onEvent('activated',markReturned);
-      activeAdCleanupList.push(
-        ()=>{try{tg.offEvent('deactivated',markLeft);}catch(e){}},
-        ()=>{try{tg.offEvent('activated',markReturned);}catch(e){}}
-      );
-    }
-  }
-
-  activeAdIv=setInterval(()=>{
-    if(paused||completed)return;
-    const el=(Date.now()-startTs)/1000;
-    const rem=Math.max(0,Math.ceil(sec-el));
-    tm.innerText=rem;
     if(el>=sec){
       finishTimer();
     }
-  },400);
+  },200);
+}
+
+function likeCurrent(){if(!curFile.likes)curFile.likes=[];
 }
 
 function likeCurrent(){if(!curFile.likes)curFile.likes=[];if(!curFile.likes.includes(userId)){curFile.likes.push(userId);document.getElementById('det-likes').innerText=curFile.likes.length;document.getElementById('btn-like').innerText='❤️ Liked';fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'like',uid:userId,file_id:curFile._id})});}}
