@@ -3502,6 +3502,9 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 .unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff}
 .step-badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-size:12px;font-weight:700;padding:4px 12px;border-radius:16px;margin-bottom:8px}
 .clr-hist-btn{background:#fee2e2;color:#dc2626;border:none;padding:5px 12px;border-radius:12px;font-size:11.5px;font-weight:700;cursor:pointer}
+.pkg-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
+.pkg-tab{border:1px solid #e2e8f0;background:#f8fafc;color:#475569;padding:9px 4px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer;text-align:center;white-space:nowrap}
+.pkg-tab.active{background:linear-gradient(90deg,#6c5ce7,#4f46e5,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
 </style>
 </head>
 <body>
