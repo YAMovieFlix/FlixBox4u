@@ -4303,7 +4303,7 @@ async function unlockWithAdsterra(){
   const wt=pendingUnlockData.waitT||5;
   document.getElementById('unlock-modal').style.display='none';
   await startServerAdToken('file',pendingUnlockData.sp,'link');
-  runAdTimer(link,wt,async()=>{await completeUnlockStep('adsterra');},()=>{if(pendingUnlockData)renderUnlockStepModal();});
+  runAdTimer(link,wt,async()=>{await completeUnlockStep('adsterra');},()=>{if(pendingUnlockData)renderUnlockStepModal();},{kind:'file',target:pendingUnlockData.sp});
 }
 
 async function directStepWait(){
@@ -4313,39 +4313,127 @@ async function directStepWait(){
   runAdTimer(null,pendingUnlockData.waitT||5,async()=>{await completeUnlockStep('direct');},()=>{if(pendingUnlockData)renderUnlockStepModal();});
 }
 
-function runAdTimer(link,sec,onDone,onCancel){
+function runAdTimer(link,sec,onDone,onCancel,adMeta){
   cleanupAdWatchers();
   activeAdCancelCb=onCancel||null;
-  const ov=document.getElementById('ad-modal'),tm=document.getElementById('ad-timer'),btn=document.getElementById('ad-action-btn');
-  ov.style.display='flex';btn.style.display='none';tm.innerText=sec;
+  const ov=document.getElementById('ad-modal'),
+        tm=document.getElementById('ad-timer'),
+        st=document.getElementById('ad-status-msg'),
+        retryBtn=document.getElementById('ad-retry-btn'),
+        btn=document.getElementById('ad-action-btn');
+
+  ov.style.display='flex';
+  btn.style.display='none';
+  retryBtn.style.display='none';
+  st.style.color='#64748b';
+  st.innerText='সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।';
+  tm.style.color='#e11d48';
+  tm.innerText=sec;
+
   const startTs=Date.now();
-  let leftPage=false;
-  if(link){try{if(tg?.openLink)tg.openLink(link);else window.open(link,'_blank');}catch(e){}}
+  let leftPage=false, leftAt=0, paused=false, completed=false;
+
+  function openAdNow(){
+    if(!link)return true;
+    try{
+      if(tg?.openLink){tg.openLink(link);return true;}
+      const w=window.open(link,'_blank');
+      return w!==null;
+    }catch(e){return false;}
+  }
+
+  function finishTimer(){
+    if(completed||paused)return;
+    completed=true;
+    cleanupAdWatchers();
+    tm.style.color='#059669';
+    tm.innerText='0';
+    st.style.color='#059669';
+    st.innerText='✅ অ্যাড ভেরিফিকেশন সম্পন্ন হয়েছে! নিচের বাটনে ক্লিক করুন।';
+    retryBtn.style.display='none';
+    btn.style.display='block';
+    btn.onclick=()=>{
+      ov.style.display='none';
+      activeAdCancelCb=null;
+      onDone();
+    };
+  }
+
+  function pauseEarly(msg){
+    if(paused||completed)return;
+    paused=true;
+    cleanupAdWatchers();
+    curAdToken=null;
+    const rem=Math.max(1,Math.ceil(sec-((Date.now()-startTs)/1000)));
+    tm.style.color='#f59e0b';
+    tm.innerText=rem+'s ⏸️';
+    st.style.color='#dc2626';
+    st.innerText=msg||'⏸️ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! টাইমার পজ হয়েছে। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
+    btn.style.display='none';
+    retryBtn.style.display='block';
+    retryBtn.onclick=async()=>{
+      retryBtn.disabled=true;
+      retryBtn.innerText='⏳ অ্যাড চালু হচ্ছে...';
+      if(adMeta&&adMeta.kind){
+        await startServerAdToken(adMeta.kind,adMeta.target||'','link');
+      }
+      retryBtn.disabled=false;
+      retryBtn.innerText='🔗 পুনরায় অ্যাডে ক্লিক করুন';
+      runAdTimer(link,sec,onDone,onCancel,adMeta);
+    };
+  }
+
+  const opened=openAdNow();
+  if(link && adConfig.strict_ad && !opened){
+    pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের বাটনে ক্লিক করে পুনরায় অ্যাড ওপেন করুন।');
+    return;
+  }
+
   if(adConfig.strict_ad && link){
-    activeAdVisHandler=()=>{
-      if(document.hidden){leftPage=true;}
-      else if(leftPage){
-        const el=(Date.now()-startTs)/1000;
-        if(el<sec-0.8){
-          cancelActiveAd('❌ অ্যাডের সময় শেষ হওয়ার আগেই ব্যাক করেছেন! কোনো ভিডিও/লিংক/কয়েন পাবেন না। পুনরায় অ্যাড সম্পূর্ণ সময় দেখুন।');
-        }
+    const markLeft=()=>{
+      if(!leftPage){leftPage=true;leftAt=Date.now();}
+    };
+    const markReturned=()=>{
+      if(!leftPage||paused||completed||document.hidden)return;
+      if((Date.now()-leftAt)<350)return;
+      const el=(Date.now()-startTs)/1000;
+      if(el<sec-0.6){
+        pauseEarly();
+      } else {
+        finishTimer();
       }
     };
-    document.addEventListener('visibilitychange',activeAdVisHandler);
-    window.addEventListener('focus',activeAdVisHandler);
+    const onVis=()=>{if(document.hidden)markLeft();else markReturned();};
+
+    document.addEventListener('visibilitychange',onVis);
+    window.addEventListener('blur',markLeft);
+    window.addEventListener('focus',markReturned);
+    window.addEventListener('pagehide',markLeft);
+    window.addEventListener('pageshow',markReturned);
+    activeAdCleanupList.push(
+      ()=>document.removeEventListener('visibilitychange',onVis),
+      ()=>window.removeEventListener('blur',markLeft),
+      ()=>window.removeEventListener('focus',markReturned),
+      ()=>window.removeEventListener('pagehide',markLeft),
+      ()=>window.removeEventListener('pageshow',markReturned)
+    );
+    if(tg?.onEvent && tg?.offEvent){
+      tg.onEvent('deactivated',markLeft);
+      tg.onEvent('activated',markReturned);
+      activeAdCleanupList.push(
+        ()=>{try{tg.offEvent('deactivated',markLeft);}catch(e){}},
+        ()=>{try{tg.offEvent('activated',markReturned);}catch(e){}}
+      );
+    }
   }
+
   activeAdIv=setInterval(()=>{
+    if(paused||completed)return;
     const el=(Date.now()-startTs)/1000;
     const rem=Math.max(0,Math.ceil(sec-el));
     tm.innerText=rem;
     if(el>=sec){
-      cleanupAdWatchers();
-      btn.style.display='block';
-      btn.onclick=()=>{
-        ov.style.display='none';
-        activeAdCancelCb=null;
-        onDone();
-      };
+      finishTimer();
     }
   },400);
 }
