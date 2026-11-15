@@ -2887,8 +2887,9 @@ p{margin:0 0 18px 0;font-size:13.5px;color:#64748b}
   </div>
 
   <div class="timer-box" id="timer-box">
-    <div style="font-size:13px;color:#475569;">অ্যাড ভেরিফিকেশন চলছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
+    <div id="t-status" style="font-size:13px;color:#475569;">অ্যাড ভেরিফিকেশন চলছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
     <div class="timer-num" id="t-num">{{ wait_time }}</div>
+    <button id="t-retry-btn" class="btn btn-link" style="display:none;margin-top:10px;margin-bottom:0;" onclick="verifyLinkAd()">🔗 পুনরায় অ্যাডে ক্লিক করুন</button>
   </div>
 
   <a id="go-btn" class="btn btn-go" href="#">✅ লিংক আনলক হয়েছে — এখানে ক্লিক করুন</a>
