@@ -286,41 +286,15 @@ def get_extra_dbs_sync():
     except: pass
     return dbs
 
-TG_HTTP = requests.Session()
-NON_VIDEO_FILE_IDS = set()
-FILE_DB_IDX_CACHE = {}
-bg_task_ref = None
-
 async def find_file_in_all_dbs(f_id):
-    dbs = await get_extra_dbs_async()
-    key = str(f_id)
-
-    async def _find_in(d):
+    for d in await get_extra_dbs_async():
         try:
             doc = await d["files"].find_one({"_id": f_id})
-            if doc is not None:
-                return doc, d
+            if doc is not None: return doc, d
             if isinstance(f_id, str) and ObjectId.is_valid(f_id):
                 doc = await d["files"].find_one({"_id": ObjectId(f_id)})
-                if doc is not None:
-                    return doc, d
-        except:
-            pass
-        return None, None
-
-    cached_idx = FILE_DB_IDX_CACHE.get(key)
-    if cached_idx is not None and 0 <= cached_idx < len(dbs):
-        doc, d = await _find_in(dbs[cached_idx])
-        if doc is not None:
-            return doc, d
-
-    results = await asyncio.gather(*[_find_in(d) for d in dbs])
-    for idx, (doc, d) in enumerate(results):
-        if doc is not None:
-            if len(FILE_DB_IDX_CACHE) >= 3000:
-                FILE_DB_IDX_CACHE.clear()
-            FILE_DB_IDX_CACHE[key] = idx
-            return doc, d
+                if doc is not None: return doc, d
+        except: pass
     return None, None
 
 async def get_all_files_across_dbs(query_filter=None):
@@ -567,11 +541,8 @@ def get_poster_bytes_sync(file_doc):
     thumb = file_doc.get("thumb_url") or ""
     pid = thumb.split("/poster/", 1)[1].split("?")[0] if "/poster/" in thumb else fid
     if pid and pid != "default":
-        req_v = thumb.split("?v=", 1)[1].split("&")[0] if "?v=" in thumb else ""
         if pid in POSTER_CACHE:
-            c_item = POSTER_CACHE[pid]
-            if not req_v or (len(c_item) > 2 and c_item[2] == req_v):
-                return c_item[0], c_item[1]
+            return POSTER_CACHE[pid][0], POSTER_CACHE[pid][1]
         for d in get_extra_dbs_sync():
             try:
                 pdoc = d["posters"].find_one({"_id": pid})
@@ -601,86 +572,105 @@ def get_poster_bytes_sync(file_doc):
         except: pass
     return None, "image/jpeg"
 
-async def send_post_to_chat(client, chat_id, file_doc, reply_markup, brand_name=""):
-    cap = f"🔥 **New Trending Upload!**\n\n🎬 **{file_doc['title']}**"
-    photo = get_tg_photo(file_doc.get("thumb_url"), file_doc.get("tg_thumb_id"), brand_name=brand_name)
-    if photo:
-        try:
-            return await client.send_photo(chat_id, photo=photo, caption=cap, reply_markup=reply_markup)
-        except Exception as e:
-            print("send_photo fallback to send_message:", e, flush=True)
-    return await client.send_message(chat_id, cap, reply_markup=reply_markup)
+def send_video_with_cover_sync(uid, f_id_send, cap_html, protect, file_doc, brand_name=""):
+    if not BOT_TOKEN or not file_doc:
+        return None
+    brand = (brand_name or "").strip()
+    fid = str(file_doc.get("_id") or "")
+    thumb_ver = str(file_doc.get("thumb_url") or file_doc.get("tg_thumb_id") or "")
+    cache_key = (fid, brand, thumb_ver)
 
-async def notify_new_post(client, file_doc, config):
-    ch_id = config.get("autopost_channel"); markup = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]])
-    bname = config.get("brand_name", "")
-    if ch_id:
-        try: await send_post_to_chat(client, int(ch_id), file_doc, markup, brand_name=bname)
+    if brand and HAS_PIL:
+        cached_cov = BRANDED_COVER_ID_CACHE.get(cache_key)
+        if cached_cov:
+            try:
+                payload = {
+                    "chat_id": uid,
+                    "video": f_id_send,
+                    "cover": cached_cov,
+                    "caption": cap_html,
+                    "parse_mode": "HTML",
+                    "supports_streaming": True,
+                    "protect_content": bool(protect)
+                }
+                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=15).json()
+                if r.get("ok") and r.get("result", {}).get("message_id"):
+                    return r["result"]["message_id"]
+                BRANDED_COVER_ID_CACHE.pop(cache_key, None)
+            except: pass
+
+        b_item = BRANDED_POSTER_CACHE.get(cache_key)
+        if not b_item:
+            raw_bytes, mime = get_poster_bytes_sync(file_doc)
+            if raw_bytes:
+                b_raw, b_mime = apply_brand_watermark_sync(raw_bytes, mime, brand)
+                if len(BRANDED_POSTER_CACHE) >= 150:
+                    try: BRANDED_POSTER_CACHE.pop(next(iter(BRANDED_POSTER_CACHE)))
+                    except: BRANDED_POSTER_CACHE.clear()
+                b_item = (b_raw, b_mime)
+                BRANDED_POSTER_CACHE[cache_key] = b_item
+        if b_item:
+            try:
+                b_raw, b_mime = b_item
+                ext = "png" if b_mime == "image/png" else "jpg"
+                data = {
+                    "chat_id": str(uid),
+                    "video": f_id_send,
+                    "cover": "attach://cover",
+                    "caption": cap_html,
+                    "parse_mode": "HTML",
+                    "supports_streaming": "true",
+                    "protect_content": "true" if protect else "false"
+                }
+                files = {"cover": (f"cover.{ext}", b_raw, b_mime)}
+                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=20).json()
+                if r.get("ok") and r.get("result", {}).get("message_id"):
+                    covers = r.get("result", {}).get("video", {}).get("cover")
+                    if isinstance(covers, list) and covers and covers[-1].get("file_id"):
+                        if len(BRANDED_COVER_ID_CACHE) >= 250:
+                            try: BRANDED_COVER_ID_CACHE.pop(next(iter(BRANDED_COVER_ID_CACHE)))
+                            except: BRANDED_COVER_ID_CACHE.clear()
+                        BRANDED_COVER_ID_CACHE[cache_key] = covers[-1]["file_id"]
+                    return r["result"]["message_id"]
+            except: pass
+        return None
+
+    tg_cover = file_doc.get("tg_thumb_id")
+    if tg_cover:
+        try:
+            payload = {
+                "chat_id": uid,
+                "video": f_id_send,
+                "cover": tg_cover,
+                "caption": cap_html,
+                "parse_mode": "HTML",
+                "supports_streaming": True,
+                "protect_content": bool(protect)
+            }
+            r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=15).json()
+            if r.get("ok") and r.get("result", {}).get("message_id"):
+                return r["result"]["message_id"]
         except: pass
-    await get_db()
-    async for ch in auto_channels_col.find():
+
+    raw_bytes, mime = get_poster_bytes_sync(file_doc)
+    if raw_bytes:
         try:
-            msg = await send_post_to_chat(client, int(ch["chat_id"]), file_doc, markup, brand_name=bname)
-            if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(client, int(ch["chat_id"]), msg.id, ch["delete_min"] * 60))
+            ext = "png" if mime == "image/png" else "jpg"
+            data = {
+                "chat_id": str(uid),
+                "video": f_id_send,
+                "cover": "attach://cover",
+                "caption": cap_html,
+                "parse_mode": "HTML",
+                "supports_streaming": "true",
+                "protect_content": "true" if protect else "false"
+            }
+            files = {"cover": (f"cover.{ext}", raw_bytes, mime)}
+            r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=20).json()
+            if r.get("ok") and r.get("result", {}).get("message_id"):
+                return r["result"]["message_id"]
         except: pass
-
-# ==========================================
-# 3. BACKGROUND TASKS
-# ==========================================
-async def background_tasks():
-    last_av, last_ap, last_cp = time.time(), time.time(), time.time()
-    while True:
-        await asyncio.sleep(60); now = time.time()
-        try:
-            config = await get_config(); live_url = get_live_web_url(config); bname = config.get("brand_name", "")
-            if config.get("autovid_time_min", 0) > 0 and config.get("autovid_msg_id") and (now - last_av) >= (config["autovid_time_min"] * 60):
-                last_av = time.time(); fc = config.get("autovid_chat_id", ADMIN_ID)
-                async for u in users_col.find():
-                    if u.get("last_autovid_msg"):
-                        try: await app.delete_messages(u["_id"], u["last_autovid_msg"])
-                        except: pass
-                    try:
-                        msg = await app.copy_message(u["_id"], fc, config["autovid_msg_id"])
-                        await users_col.update_one({"_id": u["_id"]}, {"$set": {"last_autovid_msg": msg.id}}); await asyncio.sleep(0.05)
-                    except: pass
-
-            if config.get("autopost_time_hr", 0) > 0 and (now - last_ap) >= (config["autopost_time_hr"] * 3600):
-                last_ap = time.time(); af = await get_all_files_across_dbs()
-                if af:
-                    idx = config.get("autopost_idx", 0) % len(af); f = af[idx]
-                    async for u in users_col.find():
-                        try:
-                            btn = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", web_app=WebAppInfo(url=f"{live_url}/?uid={u['_id']}"))]])
-                            photo = get_tg_photo(f.get("thumb_url"), f.get("tg_thumb_id"), brand_name=bname)
-                            if photo:
-                                await app.send_photo(u["_id"], photo=photo, caption=f"🔥 **New Video!**\n\nTitle: {f['title']}", reply_markup=btn)
-                            else:
-                                await app.send_message(u["_id"], f"🔥 **New Video!**\n\nTitle: {f['title']}", reply_markup=btn)
-                            await asyncio.sleep(0.05)
-                        except: pass
-                    await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_idx": idx + 1}})
-
-            if config.get("autopost_channel") and config.get("autopost_minute", 0) > 0 and (now - last_cp) >= (config["autopost_minute"] * 60):
-                last_cp = time.time(); af = await get_all_files_across_dbs()
-                if af:
-                    ci = config.get("autopost_channel_idx", 0) % len(af); f = af[ci]
-                    try:
-                        await send_post_to_chat(app, int(config["autopost_channel"]), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]), brand_name=bname)
-                        await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_channel_idx": ci + 1}})
-                    except: pass
-
-            async for ch in auto_channels_col.find():
-                c_id, c_int = ch.get("chat_id"), ch.get("interval", 0)
-                if not c_id or c_int <= 0 or (now - ch.get("last_post_time", 0)) < (c_int * 60): continue
-                af = await get_all_files_across_dbs()
-                if af:
-                    ci = ch.get("post_idx", 0) % len(af); f = af[ci]
-                    try:
-                        msg = await send_post_to_chat(app, int(c_id), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]), brand_name=bname)
-                        await auto_channels_col.update_one({"_id": ch["_id"]}, {"$set": {"last_post_time": time.time(), "post_idx": ci + 1}})
-                        if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(app, int(c_id), msg.id, ch["delete_min"] * 60))
-                    except: pass
-        except Exception as e: print("BG Task Error:", e)
+    return None
 
 def get_tg_photo(thumb, tg_thumb_id=None, brand_name=""):
     brand = (brand_name or "").strip()
