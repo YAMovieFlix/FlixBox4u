@@ -1,7 +1,12 @@
-import os, sys, re, asyncio, threading, random, string, time, requests, json, base64, socket, io, traceback, gzip, hashlib, secrets
+import os, sys, re, asyncio, threading, random, string, time, requests, json, base64, socket, io, traceback, gzip, hashlib, secrets, html
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from datetime import datetime, timedelta
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 sys.stdout.reconfigure(line_buffering=True)
 loop = asyncio.new_event_loop()
@@ -70,6 +75,8 @@ posters_col, short_links_col, tutorials_col = None, None, None
 sync_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)["NewBot"]
 
 POSTER_CACHE = {}
+BRANDED_POSTER_CACHE = {}
+BRANDED_COVER_ID_CACHE = {}
 EXTRA_URI_CACHE = {"uris": None, "ts": 0}
 HOME_DATA_CACHE = {"data": None, "ts": 0, "ver": 0}
 SHELL_DATA_CACHE = {"data": None, "ts": 0, "ver": 0}
@@ -453,7 +460,249 @@ def make_clean_placeholder_svg():
 </svg>"""
     return svg.encode("utf-8")
 
-def get_tg_photo(thumb, tg_thumb_id=None):
+def _load_brand_font(size):
+    for fp in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    ):
+        if os.path.exists(fp):
+            try: return ImageFont.truetype(fp, size)
+            except: pass
+    try: return ImageFont.load_default(size=size)
+    except: return ImageFont.load_default()
+
+def apply_brand_watermark_sync(raw_bytes, mime, brand_name):
+    text = (brand_name or "").strip()
+    if not raw_bytes or not text or not HAS_PIL:
+        return raw_bytes, mime
+    try:
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+        w, h = img.size
+        if w < 60 or h < 40:
+            return raw_bytes, mime
+
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        margin_x = max(8, int(w * 0.022))
+        margin_y = max(8, int(h * 0.032))
+        font_size = max(14, int(h * 0.045))
+
+        while font_size > 10:
+            font = _load_brand_font(font_size)
+            bbox = od.textbbox((0, 0), text, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            pad_x = max(8, int(font_size * 0.65))
+            dot_r = max(3, int(font_size * 0.22))
+            gap = max(5, int(font_size * 0.42))
+            box_w = pad_x + (dot_r * 2) + gap + tw + pad_x
+            if box_w <= w - (margin_x * 2):
+                break
+            font_size -= 2
+
+        pad_y = max(5, int(font_size * 0.42))
+        box_h = pad_y + th + pad_y
+        x1 = margin_x
+        y2 = h - margin_y
+        y1 = max(2, y2 - box_h)
+        x2 = min(w - 2, x1 + box_w)
+        rad = max(8, int(box_h * 0.45))
+
+        od.rounded_rectangle([x1 - 2, y1 - 2, x2 + 2, y2 + 2], radius=rad + 2, fill=(124, 58, 237, 70))
+        od.rounded_rectangle(
+            [x1, y1, x2, y2],
+            radius=rad,
+            fill=(10, 12, 24, 212),
+            outline=(255, 215, 0, 200),
+            width=max(1, int(font_size * 0.08))
+        )
+
+        dot_cx = x1 + pad_x + dot_r
+        dot_cy = (y1 + y2) // 2
+        od.ellipse([dot_cx - dot_r - 2, dot_cy - dot_r - 2, dot_cx + dot_r + 2, dot_cy + dot_r + 2], fill=(255, 183, 3, 95))
+        od.ellipse([dot_cx - dot_r, dot_cy - dot_r, dot_cx + dot_r, dot_cy + dot_r], fill=(255, 95, 45, 255))
+
+        tx = dot_cx + dot_r + gap - bbox[0]
+        ty = ((y1 + y2 - th) // 2) - bbox[1]
+        od.text((tx, ty), text, font=font, fill=(255, 255, 255, 255))
+
+        out = Image.alpha_composite(img, overlay).convert("RGB")
+        buf = io.BytesIO()
+        out.save(buf, format="JPEG", quality=90)
+        return buf.getvalue(), "image/jpeg"
+    except:
+        return raw_bytes, mime
+
+def get_poster_bytes_sync(file_doc):
+    if not file_doc:
+        return None, "image/jpeg"
+    fid = str(file_doc.get("_id") or "")
+    thumb = file_doc.get("thumb_url") or ""
+    pid = thumb.split("/poster/", 1)[1].split("?")[0] if "/poster/" in thumb else fid
+    if pid and pid != "default":
+        if pid in POSTER_CACHE:
+            return POSTER_CACHE[pid][0], POSTER_CACHE[pid][1]
+        for d in get_extra_dbs_sync():
+            try:
+                pdoc = d["posters"].find_one({"_id": pid})
+                if pdoc and pdoc.get("data"):
+                    raw, mime = decode_b64_to_bytes(pdoc["data"])
+                    if raw:
+                        final_mime = pdoc.get("mime", mime)
+                        poster_cache_put(pid, raw, final_mime, ver=str(pdoc.get("ver", "")))
+                        return raw, final_mime
+            except: pass
+    if thumb.startswith("data:image"):
+        raw, mime = decode_b64_to_bytes(thumb)
+        if raw:
+            return raw, mime
+    if thumb.startswith("http") and "/poster/" not in thumb:
+        try:
+            r = requests.get(thumb, timeout=8)
+            ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if r.status_code == 200 and r.content and ct.startswith("image/"):
+                return r.content, ("image/jpeg" if ct == "image/jpg" else ct)
+        except: pass
+    if file_doc.get("tg_thumb_id") and BOT_TOKEN:
+        try:
+            raw = _bot_api_download_sync(file_doc["tg_thumb_id"])
+            if raw:
+                return raw, "image/jpeg"
+        except: pass
+    return None, "image/jpeg"
+
+def send_video_with_cover_sync(uid, f_id_send, cap_html, protect, file_doc, brand_name=""):
+    if not BOT_TOKEN or not file_doc:
+        return None
+    brand = (brand_name or "").strip()
+    fid = str(file_doc.get("_id") or "")
+    thumb_ver = str(file_doc.get("thumb_url") or file_doc.get("tg_thumb_id") or "")
+    cache_key = (fid, brand, thumb_ver)
+
+    if brand and HAS_PIL:
+        cached_cov = BRANDED_COVER_ID_CACHE.get(cache_key)
+        if cached_cov:
+            try:
+                payload = {
+                    "chat_id": uid,
+                    "video": f_id_send,
+                    "cover": cached_cov,
+                    "caption": cap_html,
+                    "parse_mode": "HTML",
+                    "supports_streaming": True,
+                    "protect_content": bool(protect)
+                }
+                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=15).json()
+                if r.get("ok") and r.get("result", {}).get("message_id"):
+                    return r["result"]["message_id"]
+                BRANDED_COVER_ID_CACHE.pop(cache_key, None)
+            except: pass
+
+        b_item = BRANDED_POSTER_CACHE.get(cache_key)
+        if not b_item:
+            raw_bytes, mime = get_poster_bytes_sync(file_doc)
+            if raw_bytes:
+                b_raw, b_mime = apply_brand_watermark_sync(raw_bytes, mime, brand)
+                if len(BRANDED_POSTER_CACHE) >= 150:
+                    try: BRANDED_POSTER_CACHE.pop(next(iter(BRANDED_POSTER_CACHE)))
+                    except: BRANDED_POSTER_CACHE.clear()
+                b_item = (b_raw, b_mime)
+                BRANDED_POSTER_CACHE[cache_key] = b_item
+        if b_item:
+            try:
+                b_raw, b_mime = b_item
+                ext = "png" if b_mime == "image/png" else "jpg"
+                data = {
+                    "chat_id": str(uid),
+                    "video": f_id_send,
+                    "cover": "attach://cover",
+                    "caption": cap_html,
+                    "parse_mode": "HTML",
+                    "supports_streaming": "true",
+                    "protect_content": "true" if protect else "false"
+                }
+                files = {"cover": (f"cover.{ext}", b_raw, b_mime)}
+                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=20).json()
+                if r.get("ok") and r.get("result", {}).get("message_id"):
+                    covers = r.get("result", {}).get("video", {}).get("cover")
+                    if isinstance(covers, list) and covers and covers[-1].get("file_id"):
+                        if len(BRANDED_COVER_ID_CACHE) >= 250:
+                            try: BRANDED_COVER_ID_CACHE.pop(next(iter(BRANDED_COVER_ID_CACHE)))
+                            except: BRANDED_COVER_ID_CACHE.clear()
+                        BRANDED_COVER_ID_CACHE[cache_key] = covers[-1]["file_id"]
+                    return r["result"]["message_id"]
+            except: pass
+        return None
+
+    tg_cover = file_doc.get("tg_thumb_id")
+    if tg_cover:
+        try:
+            payload = {
+                "chat_id": uid,
+                "video": f_id_send,
+                "cover": tg_cover,
+                "caption": cap_html,
+                "parse_mode": "HTML",
+                "supports_streaming": True,
+                "protect_content": bool(protect)
+            }
+            r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=15).json()
+            if r.get("ok") and r.get("result", {}).get("message_id"):
+                return r["result"]["message_id"]
+        except: pass
+
+    raw_bytes, mime = get_poster_bytes_sync(file_doc)
+    if raw_bytes:
+        try:
+            ext = "png" if mime == "image/png" else "jpg"
+            data = {
+                "chat_id": str(uid),
+                "video": f_id_send,
+                "cover": "attach://cover",
+                "caption": cap_html,
+                "parse_mode": "HTML",
+                "supports_streaming": "true",
+                "protect_content": "true" if protect else "false"
+            }
+            files = {"cover": (f"cover.{ext}", raw_bytes, mime)}
+            r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=20).json()
+            if r.get("ok") and r.get("result", {}).get("message_id"):
+                return r["result"]["message_id"]
+        except: pass
+    return None
+
+def get_tg_photo(thumb, tg_thumb_id=None, brand_name=""):
+    brand = (brand_name or "").strip()
+    if brand and HAS_PIL:
+        raw_bytes, mime = None, "image/jpeg"
+        if thumb and "/poster/" in thumb and not thumb.endswith("/poster/default"):
+            pid = thumb.split("/poster/", 1)[1].split("?")[0]
+            ck = (pid, brand, thumb)
+            if ck in BRANDED_POSTER_CACHE:
+                img = io.BytesIO(BRANDED_POSTER_CACHE[ck][0]); img.name = "thumb.jpg"; return img
+            if pid in POSTER_CACHE:
+                raw_bytes, mime = POSTER_CACHE[pid][0], POSTER_CACHE[pid][1]
+            else:
+                for d in get_extra_dbs_sync():
+                    try:
+                        pdoc = d["posters"].find_one({"_id": pid})
+                        if pdoc and pdoc.get("data"):
+                            r_b, m_b = decode_b64_to_bytes(pdoc["data"])
+                            if r_b:
+                                raw_bytes, mime = r_b, pdoc.get("mime", m_b)
+                                poster_cache_put(pid, raw_bytes, mime, ver=str(pdoc.get("ver", "")))
+                                break
+                    except: pass
+        elif thumb and thumb.startswith("data:image"):
+            raw_bytes, mime = decode_b64_to_bytes(thumb)
+        if not raw_bytes and tg_thumb_id and BOT_TOKEN:
+            try: raw_bytes = _bot_api_download_sync(tg_thumb_id)
+            except: pass
+        if raw_bytes:
+            b_raw, b_mime = apply_brand_watermark_sync(raw_bytes, mime, brand)
+            img = io.BytesIO(b_raw); img.name = "thumb.jpg"; return img
+
     if tg_thumb_id:
         return tg_thumb_id
     if not thumb or thumb.endswith("/poster/default"):
@@ -485,9 +734,9 @@ def get_tg_photo(thumb, tg_thumb_id=None):
         return None
     return thumb
 
-async def send_post_to_chat(client, chat_id, file_doc, reply_markup):
+async def send_post_to_chat(client, chat_id, file_doc, reply_markup, brand_name=""):
     cap = f"🔥 **New Trending Upload!**\n\n🎬 **{file_doc['title']}**"
-    photo = get_tg_photo(file_doc.get("thumb_url"), file_doc.get("tg_thumb_id"))
+    photo = get_tg_photo(file_doc.get("thumb_url"), file_doc.get("tg_thumb_id"), brand_name=brand_name)
     if photo:
         try:
             return await client.send_photo(chat_id, photo=photo, caption=cap, reply_markup=reply_markup)
@@ -497,13 +746,14 @@ async def send_post_to_chat(client, chat_id, file_doc, reply_markup):
 
 async def notify_new_post(client, file_doc, config):
     ch_id = config.get("autopost_channel"); markup = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]])
+    bname = config.get("brand_name", "")
     if ch_id:
-        try: await send_post_to_chat(client, int(ch_id), file_doc, markup)
+        try: await send_post_to_chat(client, int(ch_id), file_doc, markup, brand_name=bname)
         except: pass
     await get_db()
     async for ch in auto_channels_col.find():
         try:
-            msg = await send_post_to_chat(client, int(ch["chat_id"]), file_doc, markup)
+            msg = await send_post_to_chat(client, int(ch["chat_id"]), file_doc, markup, brand_name=bname)
             if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(client, int(ch["chat_id"]), msg.id, ch["delete_min"] * 60))
         except: pass
 
@@ -515,7 +765,7 @@ async def background_tasks():
     while True:
         await asyncio.sleep(60); now = time.time()
         try:
-            config = await get_config(); live_url = get_live_web_url(config)
+            config = await get_config(); live_url = get_live_web_url(config); bname = config.get("brand_name", "")
             if config.get("autovid_time_min", 0) > 0 and config.get("autovid_msg_id") and (now - last_av) >= (config["autovid_time_min"] * 60):
                 last_av = time.time(); fc = config.get("autovid_chat_id", ADMIN_ID)
                 async for u in users_col.find():
@@ -534,7 +784,7 @@ async def background_tasks():
                     async for u in users_col.find():
                         try:
                             btn = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", web_app=WebAppInfo(url=f"{live_url}/?uid={u['_id']}"))]])
-                            photo = get_tg_photo(f.get("thumb_url"), f.get("tg_thumb_id"))
+                            photo = get_tg_photo(f.get("thumb_url"), f.get("tg_thumb_id"), brand_name=bname)
                             if photo:
                                 await app.send_photo(u["_id"], photo=photo, caption=f"🔥 **New Video!**\n\nTitle: {f['title']}", reply_markup=btn)
                             else:
@@ -548,7 +798,7 @@ async def background_tasks():
                 if af:
                     ci = config.get("autopost_channel_idx", 0) % len(af); f = af[ci]
                     try:
-                        await send_post_to_chat(app, int(config["autopost_channel"]), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]))
+                        await send_post_to_chat(app, int(config["autopost_channel"]), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]), brand_name=bname)
                         await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_channel_idx": ci + 1}})
                     except: pass
 
@@ -559,7 +809,7 @@ async def background_tasks():
                 if af:
                     ci = ch.get("post_idx", 0) % len(af); f = af[ci]
                     try:
-                        msg = await send_post_to_chat(app, int(c_id), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]))
+                        msg = await send_post_to_chat(app, int(c_id), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]), brand_name=bname)
                         await auto_channels_col.update_one({"_id": ch["_id"]}, {"$set": {"last_post_time": time.time(), "post_idx": ci + 1}})
                         if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(app, int(c_id), msg.id, ch["delete_min"] * 60))
                     except: pass
@@ -638,20 +888,40 @@ def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_c
 def is_in_step(step_name):
     return filters.create(lambda _, __, m: admin_steps.get(m.from_user.id, {}).get("step") == step_name)
 
-async def deliver_cached_file(client, uid, f_id_send, title, config):
+async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=None):
     msg = await client.send_message(uid, "⏳ আপনার ফাইল পাঠানো হচ্ছে...")
     try:
-        dt = config.get("auto_del_time", 0); cap = f"🎬 **{title}**"
+        dt = config.get("auto_del_time", 0)
+        cap = f"🎬 **{title}**"
+        cap_html = f"🎬 <b>{html.escape(str(title))}</b>"
         if dt > 0:
             mn, sc = divmod(dt, 60)
-            cap += f"\n\n⏳ **ভিডিওটি {f'{mn} মিনিট {sc} সেকেন্ড' if mn > 0 else f'{sc} সেকেন্ড'} পর অটো ডিলিট হয়ে যাবে!**"
-        sm = await client.send_cached_media(chat_id=uid, file_id=f_id_send, caption=cap, protect_content=config.get("frotect", False))
+            del_str = f"{mn} মিনিট {sc} সেকেন্ড" if mn > 0 else f"{sc} সেকেন্ড"
+            cap += f"\n\n⏳ **ভিডিওটি {del_str} পর অটো ডিলিট হয়ে যাবে!**"
+            cap_html += f"\n\n⏳ <b>ভিডিওটি {del_str} পর অটো ডিলিট হয়ে যাবে!</b>"
+
+        sent_msg_id = None
+        if file_doc and BOT_TOKEN:
+            sent_msg_id = await asyncio.to_thread(
+                send_video_with_cover_sync, uid, f_id_send, cap_html, config.get("frotect", False), file_doc, config.get("brand_name", "")
+            )
+
+        if not sent_msg_id:
+            sm = await client.send_cached_media(
+                chat_id=uid,
+                file_id=f_id_send,
+                caption=cap,
+                protect_content=config.get("frotect", False)
+            )
+            sent_msg_id = sm.id
+
         await msg.delete()
-        if dt > 0:
+        if dt > 0 and sent_msg_id:
             w = await client.send_message(uid, f"⚠️ {config.get('autodel_text')}")
-            asyncio.create_task(delete_msg_later(client, uid, sm.id, dt))
+            asyncio.create_task(delete_msg_later(client, uid, sent_msg_id, dt))
             asyncio.create_task(delete_msg_later(client, uid, w.id, dt))
-    except Exception as e: await msg.edit_text(f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
+    except Exception as e:
+        await msg.edit_text(f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
         # ==========================================
 # 5. BOT COMMANDS (START + STATS + SIMPLE CONFIG + STRICT AD + BLUR + BRAND + TUTORIALS)
 # ==========================================
@@ -1112,8 +1382,8 @@ async def start_cmd(client, message):
                 _, f_id, q_idx = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
                 if fd is not None and tdb is not None:
                     await record_daily_unique_view(tdb, f_id, uid); qs = fd.get("qualities", []); qi = int(q_idx)
-                    if 0 <= qi < len(qs): return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}]", config)
-                    elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config)
+                    if 0 <= qi < len(qs): return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}]", config, file_doc=fd)
+                    elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config, file_doc=fd)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
             elif pf_val.startswith("sfile_"):
                 _, f_id, si, ei, qi = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
@@ -1121,7 +1391,7 @@ async def start_cmd(client, message):
                     await record_daily_unique_view(tdb, f_id, uid)
                     try:
                         ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
-                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}]", config)
+                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}]", config, file_doc=fd)
                     except: pass
                 return await message.reply("❌ এপিসোড ফাইল পাওয়া যায়নি!")
             else:
@@ -1129,7 +1399,7 @@ async def start_cmd(client, message):
                 if fd is not None and tdb is not None:
                     await record_daily_unique_view(tdb, f_id, uid)
                     fs = fd.get("file_id") or (fd["qualities"][0]["file_id"] if fd.get("qualities") else None)
-                    if fs: return await deliver_cached_file(client, uid, fs, fd["title"], config)
+                    if fs: return await deliver_cached_file(client, uid, fs, fd["title"], config, file_doc=fd)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
 
         try: await client.set_chat_menu_button(chat_id=uid, menu_button=MenuButtonWebApp(text="Watch Now 🎬", web_app=WebAppInfo(url=f"{live_url}/?uid={uid}")))
@@ -1399,7 +1669,8 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
-    # ==========================================
+
+# ==========================================
 # 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
 async def show_mv_poster_prompt(mo, st, edit=True):
@@ -1766,13 +2037,12 @@ async def handle_edmv_poster_url(c, m):
             if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None}})
         invalidate_home_cache()
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
-
-# ==========================================
+        # ==========================================
 # 8. SERIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
 async def show_sr_poster_prompt(mo, st, edit=True):
@@ -2156,7 +2426,7 @@ async def handle_edsr_poster_url(c, m):
             if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None}})
         invalidate_home_cache()
         await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
     except Exception as e:
@@ -2275,7 +2545,8 @@ async def handle_edsr_qf(c, m):
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
     st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
-    # ==========================================
+
+# ==========================================
 # 9. LEGACY COMMANDS & SEPARATE ZONE / DIRECT LINK TASKS
 # ==========================================
 @app.on_message(filters.command("addfile", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -2508,8 +2779,7 @@ async def legacy_auto_cb(c, q):
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
-
-# ==========================================
+    # ==========================================
 # 10. FLASK WEB API & MONGODB POSTER HOSTING + STRICT AD + TG VERIFY + TUTORIALS
 # ==========================================
 @web.route('/poster/<poster_id>')
@@ -3418,8 +3688,7 @@ def api_home_data():
     resp = jsonify({"files": p["files"], "user": u_state})
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp
-
-# ==========================================
+    # ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -4069,7 +4338,6 @@ function handleDetPosterTap(){
     }
   }
 }
-
 function openDetails(id){
   curFile=allFiles.find(f=>f._id===id); if(!curFile)return;
   if(isAdult(curFile)&&sessionStorage.getItem('age_18_ok')!=='1'){pendingCat=curFile.category;document.getElementById('age-modal').style.display='flex';return;}
@@ -5148,7 +5416,7 @@ async def main_bot():
             BotCommand("strictad", "অ্যাড শেষ না হলে বাতিল (Admin)"),
             BotCommand("regwait", "রেগুলার অ্যাডের সময় সেকেন্ড (Admin)"),
             BotCommand("prparadd", "প্রিমিয়াম অ্যাডের সময় সেকেন্ড (Admin)"),
-            BotCommand("taskwait", "স্পিন/টাস্ক অ্যাডের সময় (Admin)"),
+            BotCommand("taskwait", "স্পিন ও টাস্ক অ্যাডের সময় (Admin)"),
             BotCommand("monetagwait", "Monetag ন্যূনতম সময় (Admin)"),
             BotCommand("addzoonid", "Monetag Zone ID এড (Admin)"),
             BotCommand("deletezoonid", "Zone ID ডিলিট (Admin)"),
