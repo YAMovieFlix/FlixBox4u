@@ -12,3 +12,4 @@ motor
 pymongo
 requests
 tgcrypto
+pillow
