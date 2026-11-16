@@ -2275,8 +2275,7 @@ async def handle_edsr_qf(c, m):
     fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
     st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
-
-# ==========================================
+    # ==========================================
 # 9. LEGACY COMMANDS & SEPARATE ZONE / DIRECT LINK TASKS
 # ==========================================
 @app.on_message(filters.command("addfile", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -2509,7 +2508,8 @@ async def legacy_auto_cb(c, q):
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
-    # ==========================================
+
+# ==========================================
 # 10. FLASK WEB API & MONGODB POSTER HOSTING + STRICT AD + TG VERIFY + TUTORIALS
 # ==========================================
 @web.route('/poster/<poster_id>')
@@ -2786,7 +2786,7 @@ def verify_ad_token(tok, uid):
         elapsed = time.time() - rec["ts"]
         req_sec = max(0, rec["min_sec"] - 1)
         if elapsed < req_sec:
-            return False, "❌ অ্যাড শেষ হওয়ার আগেই ফিরে এসেছেন! পুনরায় অ্যাডটি সম্পূর্ণ দেখুন।"
+            return False, "❌ অ্যাড শেষ হওয়ার আগেই ফিরে এসেছেন! পুনরায় অ্যাড দেখুন।"
         rec["used"] = True
         return True, "ok"
 
@@ -3120,8 +3120,7 @@ def api_verify_short():
         if not ok:
             return jsonify({"status": "error", "msg": msg})
     return jsonify({"status": "success", "url": doc["url"]})
-
-@web.route('/api/rates')
+    @web.route('/api/rates')
 def api_rates():
     try:
         r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=4).json()
@@ -3589,6 +3588,14 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 .pkg-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
 .pkg-tab{border:1px solid #e2e8f0;background:#f8fafc;color:#475569;padding:9px 4px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer;text-align:center;white-space:nowrap}
 .pkg-tab.active{background:linear-gradient(90deg,#6c5ce7,#4f46e5,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
+.inapp-ad-ov{display:none;position:fixed;inset:0;z-index:10050;background:#0f172a;flex-direction:column}
+.inapp-ad-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:#1e293b;color:#fff;border-bottom:1px solid rgba(255,255,255,.12);flex-shrink:0}
+.inapp-back-btn{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.22);padding:6px 12px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer}
+.inapp-ad-ttl{font-size:13px;font-weight:700;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inapp-ad-badge{background:linear-gradient(90deg,#f59e0b,#ef4444);color:#fff;padding:5px 11px;border-radius:14px;font-size:12px;font-weight:800;white-space:nowrap}
+.inapp-ad-body{position:relative;flex:1;width:100%;height:100%;background:#fff;overflow:hidden}
+.inapp-ad-loader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#cbd5e1;font-size:13.5px;font-weight:600;z-index:2;pointer-events:none}
+.inapp-ad-frame{width:100%;height:100%;border:none;display:block;background:#fff}
 </style>
 </head>
 <body>
@@ -3654,6 +3661,18 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
   <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় অ্যাডে ক্লিক করুন</button>
   <button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button>
 </div></div>
+
+<div id="inapp-ad-ov" class="inapp-ad-ov">
+  <div class="inapp-ad-hdr">
+    <button type="button" id="inapp-ad-back" class="inapp-back-btn">❮ Back</button>
+    <div class="inapp-ad-ttl">🔒 WebApp Ad Browser</div>
+    <div id="inapp-ad-badge" class="inapp-ad-badge">⏳ 5s</div>
+  </div>
+  <div class="inapp-ad-body">
+    <div id="inapp-ad-loader" class="inapp-ad-loader">⏳ অ্যাড লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
+    <iframe id="inapp-ad-frame" class="inapp-ad-frame" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+  </div>
+</div>
 
 <div id="tool-modal" class="modal-ov"><div class="modal-card"><button onclick="document.getElementById('tool-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button><h3 id="tool-m-title" style="margin:0 0 10px 0;"></h3><div id="tool-m-body"></div></div></div>
 
@@ -3747,7 +3766,6 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
   <div class="nav-i" data-tab="upcoming" onclick="switchTab('upcoming', this)"><span>📅</span>Upcoming</div>
   <div class="nav-i" data-tab="profile" onclick="switchTab('profile', this)"><div class="av-badge" id="nav-av">U</div>Profile</div>
 </div>
-
 <script>
 const tg=window.Telegram?.WebApp;
 const botUsername="{{ bot_username }}", siteName="{{ site_name }}", recGroupLink={{ rec_group_link_json | safe }};
@@ -4185,11 +4203,20 @@ function isFileLocallyUnlocked(btnKey){
 
 let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdCleanupList=[], activeAdCancelCb=null;
 
+function closeInAppAdBrowser(){
+  const box=document.getElementById('inapp-ad-ov');
+  const fr=document.getElementById('inapp-ad-frame');
+  const ld=document.getElementById('inapp-ad-loader');
+  if(box)box.style.display='none';
+  if(fr){fr.onload=null;fr.src='about:blank';}
+  if(ld)ld.style.display='flex';
+}
 function cleanupAdWatchers(){
   if(activeAdIv){clearInterval(activeAdIv);activeAdIv=null;}
   while(activeAdCleanupList.length){
     try{activeAdCleanupList.pop()();}catch(e){}
   }
+  closeInAppAdBrowser();
 }
 function cancelActiveAd(reasonMsg){
   cleanupAdWatchers();
@@ -4343,7 +4370,12 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
         tm=document.getElementById('ad-timer'),
         st=document.getElementById('ad-status-msg'),
         retryBtn=document.getElementById('ad-retry-btn'),
-        btn=document.getElementById('ad-action-btn');
+        btn=document.getElementById('ad-action-btn'),
+        inappOv=document.getElementById('inapp-ad-ov'),
+        inappBack=document.getElementById('inapp-ad-back'),
+        inappBadge=document.getElementById('inapp-ad-badge'),
+        inappLoader=document.getElementById('inapp-ad-loader'),
+        inappFrame=document.getElementById('inapp-ad-frame');
 
   ov.style.display='flex';
   btn.style.display='none';
@@ -4357,19 +4389,6 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
   let leftPage=false, leftAt=0, paused=false, completed=false;
   const tokenPromise=(adMeta&&adMeta.kind)?startServerAdToken(adMeta.kind,adMeta.target||'','link'):Promise.resolve(null);
 
-  function openAdNow(){
-    if(!link)return true;
-    try{
-      const inTg=!!(tg&&tg.openLink&&tg.platform&&tg.platform!=='unknown');
-      if(inTg){
-        const isAnd=/android/i.test(navigator.userAgent)||tg.platform==='android'||tg.platform==='android_x';
-        tg.openLink(link,isAnd?{try_instant_view:false,try_browser:'chrome'}:{try_instant_view:false});
-        return true;
-      }
-      const w=window.open(link,'_blank');
-      return w!==null;
-    }catch(e){return false;}
-  }
   function finishTimer(){
     if(completed||paused)return;
     completed=true;
@@ -4408,6 +4427,20 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     };
   }
 
+  function handleEarlyBack(){
+    if(paused||completed)return;
+    const el=(Date.now()-startTs)/1000;
+    if(el<sec-0.5){
+      if(adConfig.strict_ad){
+        pauseEarly();
+      } else {
+        closeInAppAdBrowser();
+      }
+    } else {
+      finishTimer();
+    }
+  }
+
   function checkReturnNow(){
     if(!leftPage||paused||completed||document.hidden)return;
     if(tg && tg.isActive===false)return;
@@ -4420,6 +4453,33 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     }
   }
 
+  if(link){
+    inappBadge.innerText='⏳ '+sec+'s';
+    inappBadge.style.background='linear-gradient(90deg,#f59e0b,#ef4444)';
+    inappLoader.style.display='flex';
+    inappFrame.onload=()=>{inappLoader.style.display='none';};
+    const ldTimer=setTimeout(()=>{inappLoader.style.display='none';},2000);
+    inappFrame.src=link;
+    inappOv.style.display='flex';
+    inappBack.onclick=handleEarlyBack;
+    activeAdCleanupList.push(()=>{clearTimeout(ldTimer);inappBack.onclick=null;});
+
+    if(tg?.BackButton){
+      try{
+        tg.BackButton.show();
+        tg.BackButton.onClick(handleEarlyBack);
+        activeAdCleanupList.push(()=>{try{tg.BackButton.offClick(handleEarlyBack);tg.BackButton.hide();}catch(e){}});
+      }catch(e){}
+    } else {
+      try{
+        history.pushState({inappAd:1},'');
+        const onPop=()=>{handleEarlyBack();};
+        window.addEventListener('popstate',onPop);
+        activeAdCleanupList.push(()=>window.removeEventListener('popstate',onPop));
+      }catch(e){}
+    }
+  }
+
   if(adConfig.strict_ad && link){
     const markLeft=()=>{
       if(!leftPage){leftPage=true;leftAt=Date.now();}
@@ -4427,14 +4487,10 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow();};
 
     document.addEventListener('visibilitychange',onVis);
-    window.addEventListener('blur',markLeft);
-    window.addEventListener('focus',checkReturnNow);
     window.addEventListener('pagehide',markLeft);
     window.addEventListener('pageshow',checkReturnNow);
     activeAdCleanupList.push(
       ()=>document.removeEventListener('visibilitychange',onVis),
-      ()=>window.removeEventListener('blur',markLeft),
-      ()=>window.removeEventListener('focus',checkReturnNow),
       ()=>window.removeEventListener('pagehide',markLeft),
       ()=>window.removeEventListener('pageshow',checkReturnNow)
     );
@@ -4446,32 +4502,12 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
         ()=>{try{tg.offEvent('activated',checkReturnNow);}catch(e){}}
       );
     }
-
-    let lastRaf=performance.now(), rafId=0;
-    const rafLoop=(now)=>{
-      if(paused||completed)return;
-      if((now-lastRaf)>850){
-        if(!leftPage){leftPage=true;leftAt=Date.now()-200;}
-        checkReturnNow();
-        if(paused||completed)return;
-      }
-      lastRaf=now;
-      rafId=requestAnimationFrame(rafLoop);
-    };
-    rafId=requestAnimationFrame(rafLoop);
-    activeAdCleanupList.push(()=>cancelAnimationFrame(rafId));
-  }
-
-  const opened=openAdNow();
-  if(link && adConfig.strict_ad && !opened){
-    pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের বাটনে ক্লিক করে পুনরায় অ্যাড ওপেন করুন।');
-    return;
   }
 
   activeAdIv=setInterval(()=>{
     if(paused||completed)return;
     if(adConfig.strict_ad && link){
-      const away=document.hidden || !document.hasFocus() || (tg && tg.isActive===false);
+      const away=document.hidden || (tg && tg.isActive===false);
       if(away){
         if(!leftPage){leftPage=true;leftAt=Date.now();}
       } else if(leftPage){
@@ -4482,12 +4518,12 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     const el=(Date.now()-startTs)/1000;
     const rem=Math.max(0,Math.ceil(sec-el));
     tm.innerText=rem;
+    if(link)inappBadge.innerText=rem>0?('⏳ '+rem+'s'):'✅ 0s';
     if(el>=sec){
       finishTimer();
     }
   },200);
 }
-
 function likeCurrent(){if(!curFile.likes)curFile.likes=[];if(!curFile.likes.includes(userId)){curFile.likes.push(userId);document.getElementById('det-likes').innerText=curFile.likes.length;document.getElementById('btn-like').innerText='❤️ Liked';fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'like',uid:userId,file_id:curFile._id})});}}
 async function saveCurrent(){
   const fid=curFile._id;
