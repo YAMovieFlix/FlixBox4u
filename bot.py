@@ -567,8 +567,11 @@ def get_poster_bytes_sync(file_doc):
     thumb = file_doc.get("thumb_url") or ""
     pid = thumb.split("/poster/", 1)[1].split("?")[0] if "/poster/" in thumb else fid
     if pid and pid != "default":
+        req_v = thumb.split("?v=", 1)[1].split("&")[0] if "?v=" in thumb else ""
         if pid in POSTER_CACHE:
-            return POSTER_CACHE[pid][0], POSTER_CACHE[pid][1]
+            c_item = POSTER_CACHE[pid]
+            if not req_v or (len(c_item) > 2 and c_item[2] == req_v):
+                return c_item[0], c_item[1]
         for d in get_extra_dbs_sync():
             try:
                 pdoc = d["posters"].find_one({"_id": pid})
