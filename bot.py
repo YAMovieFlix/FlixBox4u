@@ -85,6 +85,10 @@ AD_TOKENS_LOCK = threading.Lock()
 WEB_POOL = ThreadPoolExecutor(max_workers=10)
 TUTORIAL_DL_LOCK = threading.Lock()
 HOME_CACHE_LOCK = threading.Lock()
+TG_HTTP = requests.Session()
+NON_VIDEO_FILE_IDS = set()
+FILE_DB_IDX_CACHE = {}
+bg_task_ref = None
 
 def get_db_cache_ver():
     try:
@@ -287,14 +291,35 @@ def get_extra_dbs_sync():
     return dbs
 
 async def find_file_in_all_dbs(f_id):
-    for d in await get_extra_dbs_async():
+    dbs = await get_extra_dbs_async()
+    key = str(f_id)
+
+    async def _find_in(d):
         try:
             doc = await d["files"].find_one({"_id": f_id})
-            if doc is not None: return doc, d
+            if doc is not None:
+                return doc, d
             if isinstance(f_id, str) and ObjectId.is_valid(f_id):
                 doc = await d["files"].find_one({"_id": ObjectId(f_id)})
-                if doc is not None: return doc, d
-        except: pass
+                if doc is not None:
+                    return doc, d
+        except:
+            pass
+        return None, None
+
+    cached_idx = FILE_DB_IDX_CACHE.get(key)
+    if cached_idx is not None and 0 <= cached_idx < len(dbs):
+        doc, d = await _find_in(dbs[cached_idx])
+        if doc is not None:
+            return doc, d
+
+    results = await asyncio.gather(*[_find_in(d) for d in dbs])
+    for idx, (doc, d) in enumerate(results):
+        if doc is not None:
+            if len(FILE_DB_IDX_CACHE) >= 3000:
+                FILE_DB_IDX_CACHE.clear()
+            FILE_DB_IDX_CACHE[key] = idx
+            return doc, d
     return None, None
 
 async def get_all_files_across_dbs(query_filter=None):
@@ -541,8 +566,11 @@ def get_poster_bytes_sync(file_doc):
     thumb = file_doc.get("thumb_url") or ""
     pid = thumb.split("/poster/", 1)[1].split("?")[0] if "/poster/" in thumb else fid
     if pid and pid != "default":
+        req_v = thumb.split("?v=", 1)[1].split("&")[0] if "?v=" in thumb else ""
         if pid in POSTER_CACHE:
-            return POSTER_CACHE[pid][0], POSTER_CACHE[pid][1]
+            c_item = POSTER_CACHE[pid]
+            if not req_v or (len(c_item) > 2 and c_item[2] == req_v):
+                return c_item[0], c_item[1]
         for d in get_extra_dbs_sync():
             try:
                 pdoc = d["posters"].find_one({"_id": pid})
@@ -573,103 +601,103 @@ def get_poster_bytes_sync(file_doc):
     return None, "image/jpeg"
 
 def send_video_with_cover_sync(uid, f_id_send, cap_html, protect, file_doc, brand_name=""):
-    if not BOT_TOKEN or not file_doc:
+    if not BOT_TOKEN or not file_doc or f_id_send in NON_VIDEO_FILE_IDS:
         return None
     brand = (brand_name or "").strip()
     fid = str(file_doc.get("_id") or "")
     thumb_ver = str(file_doc.get("thumb_url") or file_doc.get("tg_thumb_id") or "")
     cache_key = (fid, brand, thumb_ver)
 
-    if brand and HAS_PIL:
-        cached_cov = BRANDED_COVER_ID_CACHE.get(cache_key)
-        if cached_cov:
-            try:
-                payload = {
-                    "chat_id": uid,
-                    "video": f_id_send,
-                    "cover": cached_cov,
-                    "caption": cap_html,
-                    "parse_mode": "HTML",
-                    "supports_streaming": True,
-                    "protect_content": bool(protect)
-                }
-                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=15).json()
-                if r.get("ok") and r.get("result", {}).get("message_id"):
-                    return r["result"]["message_id"]
-                BRANDED_COVER_ID_CACHE.pop(cache_key, None)
-            except: pass
+    def _post_json_cover(cover_id):
+        payload = {
+            "chat_id": uid,
+            "video": f_id_send,
+            "cover": cover_id,
+            "caption": cap_html,
+            "parse_mode": "HTML",
+            "supports_streaming": True,
+            "protect_content": bool(protect)
+        }
+        r = TG_HTTP.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=12).json()
+        if r.get("ok") and r.get("result", {}).get("message_id"):
+            return r["result"]["message_id"], False
+        desc = str(r.get("description", "")).lower()
+        if r.get("error_code") == 400 and any(k in desc for k in ("document", "audio", "wrong", "type", "video")):
+            if "cover" not in desc:
+                NON_VIDEO_FILE_IDS.add(f_id_send)
+                return None, True
+        return None, False
 
+    def _post_multipart_cover(raw_b, mime_t):
+        ext = "png" if mime_t == "image/png" else "jpg"
+        data = {
+            "chat_id": str(uid),
+            "video": f_id_send,
+            "cover": "attach://cover",
+            "caption": cap_html,
+            "parse_mode": "HTML",
+            "supports_streaming": "true",
+            "protect_content": "true" if protect else "false"
+        }
+        files = {"cover": (f"cover.{ext}", raw_b, mime_t)}
+        r = TG_HTTP.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=15).json()
+        if r.get("ok") and r.get("result", {}).get("message_id"):
+            covers = r.get("result", {}).get("video", {}).get("cover")
+            if isinstance(covers, list) and covers and covers[-1].get("file_id"):
+                if len(BRANDED_COVER_ID_CACHE) >= 500:
+                    try: BRANDED_COVER_ID_CACHE.pop(next(iter(BRANDED_COVER_ID_CACHE)))
+                    except: BRANDED_COVER_ID_CACHE.clear()
+                BRANDED_COVER_ID_CACHE[cache_key] = covers[-1]["file_id"]
+            return r["result"]["message_id"]
+        desc = str(r.get("description", "")).lower()
+        if r.get("error_code") == 400 and any(k in desc for k in ("document", "audio", "wrong", "type", "video")):
+            if "cover" not in desc:
+                NON_VIDEO_FILE_IDS.add(f_id_send)
+        return None
+
+    cached_cov = BRANDED_COVER_ID_CACHE.get(cache_key)
+    if cached_cov:
+        try:
+            mid, is_non_vid = _post_json_cover(cached_cov)
+            if mid or is_non_vid:
+                return mid
+            BRANDED_COVER_ID_CACHE.pop(cache_key, None)
+        except:
+            pass
+
+    if brand and HAS_PIL:
         b_item = BRANDED_POSTER_CACHE.get(cache_key)
         if not b_item:
             raw_bytes, mime = get_poster_bytes_sync(file_doc)
             if raw_bytes:
                 b_raw, b_mime = apply_brand_watermark_sync(raw_bytes, mime, brand)
-                if len(BRANDED_POSTER_CACHE) >= 150:
+                if len(BRANDED_POSTER_CACHE) >= 200:
                     try: BRANDED_POSTER_CACHE.pop(next(iter(BRANDED_POSTER_CACHE)))
                     except: BRANDED_POSTER_CACHE.clear()
                 b_item = (b_raw, b_mime)
                 BRANDED_POSTER_CACHE[cache_key] = b_item
         if b_item:
             try:
-                b_raw, b_mime = b_item
-                ext = "png" if b_mime == "image/png" else "jpg"
-                data = {
-                    "chat_id": str(uid),
-                    "video": f_id_send,
-                    "cover": "attach://cover",
-                    "caption": cap_html,
-                    "parse_mode": "HTML",
-                    "supports_streaming": "true",
-                    "protect_content": "true" if protect else "false"
-                }
-                files = {"cover": (f"cover.{ext}", b_raw, b_mime)}
-                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=20).json()
-                if r.get("ok") and r.get("result", {}).get("message_id"):
-                    covers = r.get("result", {}).get("video", {}).get("cover")
-                    if isinstance(covers, list) and covers and covers[-1].get("file_id"):
-                        if len(BRANDED_COVER_ID_CACHE) >= 250:
-                            try: BRANDED_COVER_ID_CACHE.pop(next(iter(BRANDED_COVER_ID_CACHE)))
-                            except: BRANDED_COVER_ID_CACHE.clear()
-                        BRANDED_COVER_ID_CACHE[cache_key] = covers[-1]["file_id"]
-                    return r["result"]["message_id"]
-            except: pass
+                return _post_multipart_cover(b_item[0], b_item[1])
+            except:
+                pass
         return None
 
     tg_cover = file_doc.get("tg_thumb_id")
     if tg_cover:
         try:
-            payload = {
-                "chat_id": uid,
-                "video": f_id_send,
-                "cover": tg_cover,
-                "caption": cap_html,
-                "parse_mode": "HTML",
-                "supports_streaming": True,
-                "protect_content": bool(protect)
-            }
-            r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=15).json()
-            if r.get("ok") and r.get("result", {}).get("message_id"):
-                return r["result"]["message_id"]
-        except: pass
+            mid, is_non_vid = _post_json_cover(tg_cover)
+            if mid or is_non_vid:
+                return mid
+        except:
+            pass
 
     raw_bytes, mime = get_poster_bytes_sync(file_doc)
     if raw_bytes:
         try:
-            ext = "png" if mime == "image/png" else "jpg"
-            data = {
-                "chat_id": str(uid),
-                "video": f_id_send,
-                "cover": "attach://cover",
-                "caption": cap_html,
-                "parse_mode": "HTML",
-                "supports_streaming": "true",
-                "protect_content": "true" if protect else "false"
-            }
-            files = {"cover": (f"cover.{ext}", raw_bytes, mime)}
-            r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=20).json()
-            if r.get("ok") and r.get("result", {}).get("message_id"):
-                return r["result"]["message_id"]
-        except: pass
+            return _post_multipart_cover(raw_bytes, mime)
+        except:
+            pass
     return None
 
 def get_tg_photo(thumb, tg_thumb_id=None, brand_name=""):
@@ -734,9 +762,34 @@ def get_tg_photo(thumb, tg_thumb_id=None, brand_name=""):
         return None
     return thumb
 
+def parse_chat_target(cid):
+    s = str(cid or "").strip()
+    if re.match(r"^-?\d+$", s):
+        return int(s)
+    return s
+
+def parse_minutes_val(val):
+    s = re.sub(r"(?:minutes?|mins?|m)$", "", str(val or "").strip(), flags=re.IGNORECASE).strip()
+    v = float(s)
+    return int(v) if v.is_integer() else v
+
+async def schedule_channel_delete(chat_id, msg_id, delete_min):
+    try:
+        dmin = float(delete_min or 0)
+    except:
+        dmin = 0
+    if dmin <= 0 or not msg_id:
+        return
+    await get_db()
+    await db["pending_deletes"].insert_one({
+        "chat_id": str(chat_id),
+        "msg_id": int(msg_id),
+        "delete_at": time.time() + (dmin * 60.0)
+    })
+
 async def send_post_to_chat(client, chat_id, file_doc, reply_markup, brand_name=""):
     cap = f"🔥 **New Trending Upload!**\n\n🎬 **{file_doc['title']}**"
-    photo = get_tg_photo(file_doc.get("thumb_url"), file_doc.get("tg_thumb_id"), brand_name=brand_name)
+    photo = await asyncio.to_thread(get_tg_photo, file_doc.get("thumb_url"), file_doc.get("tg_thumb_id"), brand_name)
     if photo:
         try:
             return await client.send_photo(chat_id, photo=photo, caption=cap, reply_markup=reply_markup)
@@ -745,17 +798,23 @@ async def send_post_to_chat(client, chat_id, file_doc, reply_markup, brand_name=
     return await client.send_message(chat_id, cap, reply_markup=reply_markup)
 
 async def notify_new_post(client, file_doc, config):
-    ch_id = config.get("autopost_channel"); markup = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]])
+    ch_id = config.get("autopost_channel")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]])
     bname = config.get("brand_name", "")
     if ch_id:
-        try: await send_post_to_chat(client, int(ch_id), file_doc, markup, brand_name=bname)
-        except: pass
+        try:
+            await send_post_to_chat(client, parse_chat_target(ch_id), file_doc, markup, brand_name=bname)
+        except Exception as e:
+            print(f"notify_new_post main channel error: {e}", flush=True)
     await get_db()
     async for ch in auto_channels_col.find():
         try:
-            msg = await send_post_to_chat(client, int(ch["chat_id"]), file_doc, markup, brand_name=bname)
-            if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(client, int(ch["chat_id"]), msg.id, ch["delete_min"] * 60))
-        except: pass
+            target = parse_chat_target(ch["chat_id"])
+            msg = await send_post_to_chat(client, target, file_doc, markup, brand_name=bname)
+            if msg and getattr(msg, "id", None) and float(ch.get("delete_min", 0) or 0) > 0:
+                await schedule_channel_delete(target, msg.id, ch["delete_min"])
+        except Exception as e:
+            print(f"notify_new_post auto_channel ({ch.get('chat_id')}) error: {e}", flush=True)
 
 # ==========================================
 # 3. BACKGROUND TASKS
@@ -763,29 +822,51 @@ async def notify_new_post(client, file_doc, config):
 async def background_tasks():
     last_av, last_ap, last_cp = time.time(), time.time(), time.time()
     while True:
-        await asyncio.sleep(60); now = time.time()
+        await asyncio.sleep(5)
+        if not getattr(app, "is_connected", False):
+            continue
+        now = time.time()
         try:
-            config = await get_config(); live_url = get_live_web_url(config); bname = config.get("brand_name", "")
+            config = await get_config()
+            live_url = get_live_web_url(config)
+            bname = config.get("brand_name", "")
+
+            async for pd in db["pending_deletes"].find({"delete_at": {"$lte": now}}):
+                try:
+                    await app.delete_messages(parse_chat_target(pd["chat_id"]), int(pd["msg_id"]))
+                    await db["pending_deletes"].delete_one({"_id": pd["_id"]})
+                except FloodWait as fw:
+                    await asyncio.sleep(fw.value)
+                    break
+                except Exception as de:
+                    print(f"Auto Delete Error ({pd.get('chat_id')}): {de}", flush=True)
+                    await db["pending_deletes"].delete_one({"_id": pd["_id"]})
+
             if config.get("autovid_time_min", 0) > 0 and config.get("autovid_msg_id") and (now - last_av) >= (config["autovid_time_min"] * 60):
-                last_av = time.time(); fc = config.get("autovid_chat_id", ADMIN_ID)
+                last_av = time.time()
+                fc = config.get("autovid_chat_id", ADMIN_ID)
                 async for u in users_col.find():
                     if u.get("last_autovid_msg"):
                         try: await app.delete_messages(u["_id"], u["last_autovid_msg"])
                         except: pass
                     try:
                         msg = await app.copy_message(u["_id"], fc, config["autovid_msg_id"])
-                        await users_col.update_one({"_id": u["_id"]}, {"$set": {"last_autovid_msg": msg.id}}); await asyncio.sleep(0.05)
+                        await users_col.update_one({"_id": u["_id"]}, {"$set": {"last_autovid_msg": msg.id}})
+                        await asyncio.sleep(0.05)
                     except: pass
 
             if config.get("autopost_time_hr", 0) > 0 and (now - last_ap) >= (config["autopost_time_hr"] * 3600):
-                last_ap = time.time(); af = await get_all_files_across_dbs()
+                last_ap = time.time()
+                af = await get_all_files_across_dbs()
                 if af:
-                    idx = config.get("autopost_idx", 0) % len(af); f = af[idx]
+                    idx = config.get("autopost_idx", 0) % len(af)
+                    f = af[idx]
+                    photo = await asyncio.to_thread(get_tg_photo, f.get("thumb_url"), f.get("tg_thumb_id"), bname)
                     async for u in users_col.find():
                         try:
                             btn = InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", web_app=WebAppInfo(url=f"{live_url}/?uid={u['_id']}"))]])
-                            photo = get_tg_photo(f.get("thumb_url"), f.get("tg_thumb_id"), brand_name=bname)
                             if photo:
+                                if hasattr(photo, "seek"): photo.seek(0)
                                 await app.send_photo(u["_id"], photo=photo, caption=f"🔥 **New Video!**\n\nTitle: {f['title']}", reply_markup=btn)
                             else:
                                 await app.send_message(u["_id"], f"🔥 **New Video!**\n\nTitle: {f['title']}", reply_markup=btn)
@@ -794,26 +875,61 @@ async def background_tasks():
                     await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_idx": idx + 1}})
 
             if config.get("autopost_channel") and config.get("autopost_minute", 0) > 0 and (now - last_cp) >= (config["autopost_minute"] * 60):
-                last_cp = time.time(); af = await get_all_files_across_dbs()
-                if af:
-                    ci = config.get("autopost_channel_idx", 0) % len(af); f = af[ci]
-                    try:
-                        await send_post_to_chat(app, int(config["autopost_channel"]), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]), brand_name=bname)
-                        await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_channel_idx": ci + 1}})
-                    except: pass
-
-            async for ch in auto_channels_col.find():
-                c_id, c_int = ch.get("chat_id"), ch.get("interval", 0)
-                if not c_id or c_int <= 0 or (now - ch.get("last_post_time", 0)) < (c_int * 60): continue
                 af = await get_all_files_across_dbs()
                 if af:
-                    ci = ch.get("post_idx", 0) % len(af); f = af[ci]
+                    ci = config.get("autopost_channel_idx", 0) % len(af)
+                    f = af[ci]
                     try:
-                        msg = await send_post_to_chat(app, int(c_id), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]), brand_name=bname)
-                        await auto_channels_col.update_one({"_id": ch["_id"]}, {"$set": {"last_post_time": time.time(), "post_idx": ci + 1}})
-                        if ch.get("delete_min", 0) > 0: asyncio.create_task(delete_msg_later(app, int(c_id), msg.id, ch["delete_min"] * 60))
-                    except: pass
-        except Exception as e: print("BG Task Error:", e)
+                        await send_post_to_chat(app, parse_chat_target(config["autopost_channel"]), f, InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]), brand_name=bname)
+                        last_cp = now
+                        await config_col.update_one({"_id": "settings"}, {"$set": {"autopost_channel_idx": ci + 1}})
+                    except Exception as e:
+                        print(f"Main autopost error: {e}", flush=True)
+
+            async for ch in auto_channels_col.find():
+                c_id = ch.get("chat_id")
+                try:
+                    c_int = float(ch.get("interval", 0) or 0)
+                except:
+                    c_int = 0
+                if not c_id or c_int <= 0:
+                    continue
+
+                next_post = ch.get("next_post_time")
+                if next_post is None:
+                    last_pt = float(ch.get("last_post_time", 0) or 0)
+                    next_post = (last_pt + (c_int * 60.0)) if last_pt > 0 else 0
+
+                if now < next_post:
+                    continue
+
+                af = await get_all_files_across_dbs()
+                if not af:
+                    continue
+
+                ci = int(ch.get("post_idx", 0) or 0) % len(af)
+                f = af[ci]
+                target = parse_chat_target(c_id)
+                try:
+                    msg = await send_post_to_chat(
+                        app, target, f,
+                        InlineKeyboardMarkup([[InlineKeyboardButton("🍿 WATCH NOW", url=f"https://t.me/{BOT_USERNAME}?start=home")]]),
+                        brand_name=bname
+                    )
+                    next_t = now + (c_int * 60.0)
+                    await auto_channels_col.update_one(
+                        {"_id": ch["_id"]},
+                        {"$set": {"last_post_time": now, "next_post_time": next_t, "post_idx": ci + 1}}
+                    )
+                    d_min = float(ch.get("delete_min", 0) or 0)
+                    if d_min > 0 and msg and getattr(msg, "id", None):
+                        await schedule_channel_delete(target, msg.id, d_min)
+                except FloodWait as fw:
+                    await asyncio.sleep(fw.value)
+                except Exception as e:
+                    print(f"AutoChannel Post Error ({c_id}): {e}", flush=True)
+        except Exception as e:
+            print("BG Task Error:", e, flush=True)
 
 # ==========================================
 # 4. HELPER BUILDERS (100% DYNAMIC MONGODB)
@@ -889,7 +1005,6 @@ def is_in_step(step_name):
     return filters.create(lambda _, __, m: admin_steps.get(m.from_user.id, {}).get("step") == step_name)
 
 async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=None):
-    msg = await client.send_message(uid, "⏳ আপনার ফাইল পাঠানো হচ্ছে...")
     try:
         dt = config.get("auto_del_time", 0)
         cap = f"🎬 **{title}**"
@@ -897,11 +1012,15 @@ async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=No
         if dt > 0:
             mn, sc = divmod(dt, 60)
             del_str = f"{mn} মিনিট {sc} সেকেন্ড" if mn > 0 else f"{sc} সেকেন্ড"
+            warn_txt = config.get("autodel_text") or ""
             cap += f"\n\n⏳ **ভিডিওটি {del_str} পর অটো ডিলিট হয়ে যাবে!**"
             cap_html += f"\n\n⏳ <b>ভিডিওটি {del_str} পর অটো ডিলিট হয়ে যাবে!</b>"
+            if warn_txt:
+                cap += f"\n⚠️ {warn_txt}"
+                cap_html += f"\n⚠️ {html.escape(str(warn_txt))}"
 
         sent_msg_id = None
-        if file_doc and BOT_TOKEN:
+        if file_doc and BOT_TOKEN and f_id_send not in NON_VIDEO_FILE_IDS:
             sent_msg_id = await asyncio.to_thread(
                 send_video_with_cover_sync, uid, f_id_send, cap_html, config.get("frotect", False), file_doc, config.get("brand_name", "")
             )
@@ -915,14 +1034,12 @@ async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=No
             )
             sent_msg_id = sm.id
 
-        await msg.delete()
         if dt > 0 and sent_msg_id:
-            w = await client.send_message(uid, f"⚠️ {config.get('autodel_text')}")
             asyncio.create_task(delete_msg_later(client, uid, sent_msg_id, dt))
-            asyncio.create_task(delete_msg_later(client, uid, w.id, dt))
     except Exception as e:
-        await msg.edit_text(f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
-        # ==========================================
+        await client.send_message(uid, f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
+
+# ==========================================
 # 5. BOT COMMANDS (START + STATS + SIMPLE CONFIG + STRICT AD + BLUR + BRAND + TUTORIALS)
 # ==========================================
 @app.on_message(filters.command("cancel", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -1140,7 +1257,7 @@ async def cmd_setrecgroup(c, m):
     parts = m.text.split(None, 1)
     if len(parts) < 2:
         admin_steps[m.from_user.id] = {"step": "set_rec_group_wait"}
-        return await m.reply("👥 আপনার **Movie Recommendation গ্রুপের লিংক** দিন:\nউদাহরণ: `https://t.me/my_movie_group`")
+        return await m.reply("👥 আপনার **Movie Recommendation গ্রুপের লিংক** দিন:\nউদরণ: `https://t.me/my_movie_group`")
     link = parts[1].strip()
     if not link.startswith("http"):
         link = "https://t.me/" + link.lstrip("@")
@@ -1328,7 +1445,14 @@ async def getut_cb(c, q):
 @app.on_message(filters.command("start", case_sensitive=False) & filters.private & unique_msg)
 async def start_cmd(client, message):
     try:
-        await get_db(); uid = message.from_user.id; args = message.text.split(); config = await get_config()
+        await get_db()
+        uid = message.from_user.id
+        args = message.text.split()
+        config, user, must_join_chs = await asyncio.gather(
+            get_config(),
+            users_col.find_one({"_id": uid}),
+            channels_col.find({"type": "must_join"}).to_list(100)
+        )
         live_url = get_live_web_url(config)
         ref_by, pf = None, None
         if len(args) > 1:
@@ -1356,48 +1480,62 @@ async def start_cmd(client, message):
                 try: p = v.replace("ref", "").split("file"); ref_by, pf = int(p[0]), "file_" + p[1]
                 except: pass
 
-        user = await users_col.find_one({"_id": uid})
         if not user:
-            await users_col.insert_one({"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": [], "favorites": [], "unlocked_files": {}, "spin_count": 0, "task_count": 0, "last_activity_date": None, "custom_tasks_done": [], "daily_viewed": {}})
+            user = {"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": [], "favorites": [], "unlocked_files": {}, "spin_count": 0, "task_count": 0, "last_activity_date": None, "custom_tasks_done": [], "daily_viewed": {}}
+            await users_col.insert_one(user)
             if ref_by and ref_by != uid and config.get("ref_on", True):
                 await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
                 try: await client.send_message(ref_by, f"🎉 রেফার বোনাস! +{config.get('ref_coin', 10)} Coins")
                 except: pass
-            user = await users_col.find_one({"_id": uid})
 
-        if pf: await users_col.update_one({"_id": uid}, {"$set": {"pending_file": pf}}); user["pending_file"] = pf
+        async def _chk_ch(ch):
+            try:
+                await client.get_chat_member(ch["chat_id"], uid)
+                return None
+            except UserNotParticipant:
+                return ch["link"]
+            except:
+                return None
 
         not_joined = []
-        for ch in await channels_col.find({"type": "must_join"}).to_list(100):
-            try: await client.get_chat_member(ch["chat_id"], uid)
-            except UserNotParticipant: not_joined.append(ch["link"])
-            except: pass
+        if must_join_chs:
+            res_ch = await asyncio.gather(*[_chk_ch(ch) for ch in must_join_chs])
+            not_joined = [lnk for lnk in res_ch if lnk]
+
         if not_joined:
+            if pf:
+                await users_col.update_one({"_id": uid}, {"$set": {"pending_file": pf}})
             btns = [[InlineKeyboardButton("📢 Join Channel", url=l)] for l in not_joined] + [[InlineKeyboardButton("✅ Joined", callback_data="check_join")]]
             return await message.reply("❌ আগে আমাদের চ্যানেলগুলোতে জয়েন করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
-        if user.get("pending_file"):
-            pf_val = user["pending_file"]; await users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}})
+        pf_val = pf or user.get("pending_file")
+        if pf_val:
+            if user.get("pending_file"):
+                asyncio.create_task(users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}}))
             if pf_val.startswith("mfile_"):
-                _, f_id, q_idx = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
+                _, f_id, q_idx = pf_val.split("_")
+                fd, tdb = await find_file_in_all_dbs(f_id)
                 if fd is not None and tdb is not None:
-                    await record_daily_unique_view(tdb, f_id, uid); qs = fd.get("qualities", []); qi = int(q_idx)
+                    asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
+                    qs = fd.get("qualities", []); qi = int(q_idx)
                     if 0 <= qi < len(qs): return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}]", config, file_doc=fd)
                     elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config, file_doc=fd)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
             elif pf_val.startswith("sfile_"):
-                _, f_id, si, ei, qi = pf_val.split("_"); fd, tdb = await find_file_in_all_dbs(f_id)
+                _, f_id, si, ei, qi = pf_val.split("_")
+                fd, tdb = await find_file_in_all_dbs(f_id)
                 if fd is not None and tdb is not None:
-                    await record_daily_unique_view(tdb, f_id, uid)
+                    asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
                     try:
                         ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
                         return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}]", config, file_doc=fd)
                     except: pass
                 return await message.reply("❌ এপিসোড ফাইল পাওয়া যায়নি!")
             else:
-                f_id = pf_val.replace("file_", ""); fd, tdb = await find_file_in_all_dbs(f_id)
+                f_id = pf_val.replace("file_", "")
+                fd, tdb = await find_file_in_all_dbs(f_id)
                 if fd is not None and tdb is not None:
-                    await record_daily_unique_view(tdb, f_id, uid)
+                    asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
                     fs = fd.get("file_id") or (fd["qualities"][0]["file_id"] if fd.get("qualities") else None)
                     if fs: return await deliver_cached_file(client, uid, fs, fd["title"], config, file_doc=fd)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
@@ -1669,7 +1807,7 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
-
+    
 # ==========================================
 # 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
@@ -2042,7 +2180,8 @@ async def handle_edmv_poster_url(c, m):
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
-        # ==========================================
+
+# ==========================================
 # 8. SERIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
 # ==========================================
 async def show_sr_poster_prompt(mo, st, edit=True):
@@ -2639,9 +2778,56 @@ async def cmd_legacy_router(c, m):
             return await m.reply(txt)
         if cmd == "lockall": await users_col.update_many({}, {"$set": {"unlocked_files": {}}}); return await m.reply("✅ সবার ভিডিও লক করা হয়েছে!")
         if cmd == "autochannel":
-            if len(parts) < 4: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['autochannel']}")
-            await auto_channels_col.update_one({"chat_id": parts[1]}, {"$set": {"chat_id": parts[1], "interval": int(parts[2]), "delete_min": int(parts[3]), "last_post_time": 0, "post_idx": 0}}, upsert=True); return await m.reply("✅ Auto Channel Added!")
-        if cmd == "delautochannel": chs = await auto_channels_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {ch['chat_id']}", callback_data=f"delautoch_{ch['_id']}")] for ch in chs])) if chs else await m.reply("❌ কোনো অটো চ্যানেল নেই!")
+            if len(parts) < 3:
+                return await m.reply(f"❌ **সঠিক নিয়ম ও উদাহরণ:**\n{LEGACY_EXAMPLES['autochannel']}\n_(প্রথম সংখ্যা = কত মিনিট পরপর পোস্ট, দ্বিতীয় সংখ্যা = কত মিনিট পর অটো ডিলিট; ডিলিট না চাইলে `0` দিন)_")
+            try:
+                interval_min = parse_minutes_val(parts[2])
+                delete_min = parse_minutes_val(parts[3]) if len(parts) >= 4 else 0
+                if interval_min <= 0 or delete_min < 0:
+                    return await m.reply("❌ মিনিট সংখ্যা অবশ্যই `0` এর বেশি হতে হবে! উদাহরণ: `/autochannel -100123456789 30 60`")
+            except:
+                return await m.reply(f"❌ ভুল সংখ্যা! উদাহরণ: {LEGACY_EXAMPLES['autochannel']}")
+
+            target = parse_chat_target(parts[1])
+            try:
+                chat = await c.get_chat(target)
+                real_cid = str(chat.id)
+                ch_title = getattr(chat, "title", None) or real_cid
+                me_mem = await c.get_chat_member(chat.id, "me")
+                if me_mem.status not in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER):
+                    return await m.reply(f"❌ বট **{ch_title}** (`{real_cid}`) চ্যানেলে Admin নয়! আগে বটকে Admin (Post & Delete permission সহ) বানিয়ে তারপর চেষ্টা করুন।")
+            except Exception as e:
+                return await m.reply(f"❌ চ্যানেল পাওয়া যায়নি বা বট Admin নয় (`{parts[1]}`)!\nError: `{e}`")
+
+            await auto_channels_col.update_one(
+                {"chat_id": real_cid},
+                {
+                    "$set": {
+                        "chat_id": real_cid,
+                        "title": ch_title,
+                        "interval": interval_min,
+                        "delete_min": delete_min,
+                        "last_post_time": 0,
+                        "next_post_time": 0
+                    },
+                    "$setOnInsert": {"post_idx": 0}
+                },
+                upsert=True
+            )
+            del_txt = f"`{delete_min}` মিনিট পর অটো ডিলিট" if delete_min > 0 else "অটো ডিলিট **বন্ধ**"
+            return await m.reply(f"✅ **Auto Channel Added!**\n📢 **{ch_title}** (`{real_cid}`)\n⏱ পোস্ট ইন্টারভাল: প্রতি `{interval_min}` মিনিটে\n🗑 ডিলিট টাইম: {del_txt}")
+        if cmd == "delautochannel":
+            chs = await auto_channels_col.find().to_list(100)
+            if not chs:
+                return await m.reply("❌ কোনো অটো চ্যানেল নেই!")
+            btns = [
+                [InlineKeyboardButton(
+                    f"❌ {ch.get('title', ch['chat_id'])[:18]} | ⏱ {ch.get('interval', 0)}m | 🗑 {ch.get('delete_min', 0)}m",
+                    callback_data=f"delautoch_{ch['_id']}"
+                )]
+                for ch in chs
+            ]
+            return await m.reply("🗑 ডিলিট করতে চ্যানেলে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
         if cmd == "spincoin":
             if "-" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['spincoin']}")
             mn, mx = map(int, parts[1].split("-")); await config_col.update_one({"_id": "settings"}, {"$set": {"spin_coin_min": mn, "spin_coin_max": mx}}); invalidate_home_cache(); return await m.reply("✅ Spin Coin Set!")
@@ -2779,7 +2965,8 @@ async def legacy_auto_cb(c, q):
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
-    # ==========================================
+
+# ==========================================
 # 10. FLASK WEB API & MONGODB POSTER HOSTING + STRICT AD + TG VERIFY + TUTORIALS
 # ==========================================
 @web.route('/poster/<poster_id>')
@@ -3688,7 +3875,8 @@ def api_home_data():
     resp = jsonify({"files": p["files"], "user": u_state})
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp
-    # ==========================================
+    
+# ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -5377,7 +5565,7 @@ def run_flask():
     web.run(host="0.0.0.0", port=port, debug=False, threaded=True, use_reloader=False)
 
 async def main_bot():
-    global BOT_USERNAME
+    global BOT_USERNAME, bg_task_ref
     if not BOT_TOKEN:
         print("❌ ERROR: BOT_TOKEN environment variable is NOT set! Bot skipped.", flush=True)
         while True: await asyncio.sleep(3600)
@@ -5442,7 +5630,8 @@ async def main_bot():
         print(f"✅ Menu WebApp URL set to: {live_url}", flush=True)
     except Exception as e:
         print(f"⚠️ Menu/Commands Setup Error: {e}", flush=True)
-    asyncio.create_task(background_tasks())
+    if bg_task_ref is None or bg_task_ref.done():
+        bg_task_ref = asyncio.create_task(background_tasks())
     await idle()
     await app.stop()
 
