@@ -3120,7 +3120,8 @@ def api_verify_short():
         if not ok:
             return jsonify({"status": "error", "msg": msg})
     return jsonify({"status": "success", "url": doc["url"]})
-    @web.route('/api/rates')
+
+@web.route('/api/rates')
 def api_rates():
     try:
         r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=4).json()
