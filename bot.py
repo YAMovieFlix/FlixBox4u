@@ -286,15 +286,41 @@ def get_extra_dbs_sync():
     except: pass
     return dbs
 
+TG_HTTP = requests.Session()
+NON_VIDEO_FILE_IDS = set()
+FILE_DB_IDX_CACHE = {}
+bg_task_ref = None
+
 async def find_file_in_all_dbs(f_id):
-    for d in await get_extra_dbs_async():
+    dbs = await get_extra_dbs_async()
+    key = str(f_id)
+
+    async def _find_in(d):
         try:
             doc = await d["files"].find_one({"_id": f_id})
-            if doc is not None: return doc, d
+            if doc is not None:
+                return doc, d
             if isinstance(f_id, str) and ObjectId.is_valid(f_id):
                 doc = await d["files"].find_one({"_id": ObjectId(f_id)})
-                if doc is not None: return doc, d
-        except: pass
+                if doc is not None:
+                    return doc, d
+        except:
+            pass
+        return None, None
+
+    cached_idx = FILE_DB_IDX_CACHE.get(key)
+    if cached_idx is not None and 0 <= cached_idx < len(dbs):
+        doc, d = await _find_in(dbs[cached_idx])
+        if doc is not None:
+            return doc, d
+
+    results = await asyncio.gather(*[_find_in(d) for d in dbs])
+    for idx, (doc, d) in enumerate(results):
+        if doc is not None:
+            if len(FILE_DB_IDX_CACHE) >= 3000:
+                FILE_DB_IDX_CACHE.clear()
+            FILE_DB_IDX_CACHE[key] = idx
+            return doc, d
     return None, None
 
 async def get_all_files_across_dbs(query_filter=None):
