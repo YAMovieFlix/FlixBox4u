@@ -815,9 +815,6 @@ async def notify_new_post(client, file_doc, config):
                 await schedule_channel_delete(target, msg.id, ch["delete_min"])
         except Exception as e:
             print(f"notify_new_post auto_channel ({ch.get('chat_id')}) error: {e}", flush=True)
-
-📦 PART 2/7
-
 # ==========================================
 # 3. BACKGROUND TASKS
 # ==========================================
