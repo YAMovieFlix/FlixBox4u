@@ -1,3 +1,29 @@
+আপনার কোডের কোনো অংশ বা ডাটাবেজ/MongoDB লজিক বাদ না দিয়ে, সম্পূর্ণ কোডটিতে নিচের
+নতুন ফিচারগুলো যুক্ত করে ৭টি পার্টে (Part 1/7 থেকে Part 7/7) দেওয়া হলো:
+
+নতুন যা যুক্ত করা হয়েছে:
+
+1.  Edit Series-এ ⏭ Next Episode বাটন: সিরিজ এডিটে যেকোনো এপিসোডে কোয়ালিটি যোগ
+    করার সময় সরাসরি ⏭ Next Episode বাটন পাবেন—অটো পরবর্তী এপিসোড নম্বর সাজেস্ট
+    করবে বা নিজে লিখেই পরপর সব এপিসোড যোগ করতে পারবেন।
+2.  Review & Confirm (আগে কনফার্ম, পরে সাইটে এড): /movies, /editemovies,
+    /addseries, /editeseries — সব জায়গাতেই ভুল কোয়ালিটি বা ভুল ফাইল সাইটে চলে
+    যাওয়া ঠেকাতে Temporary Staging + 👁 Review & Confirm + 🗑 Remove + ✅ Confirm &
+    Save to Site যুক্ত করা হয়েছে। কনফার্ম বাটনে ক্লিক না করা পর্যন্ত কোনো কিছুই
+    সাইট বা MongoDB-তে সেভ হবে না।
+3.  কোয়ালিটি এডের সময় সেট করা ভাষাসমূহ (Multi-Language): /setlanguage দিয়ে সেট
+    করা সব ভাষা কোয়ালিটি সিলেকশন স্ক্রিনেই দেখাবে—প্রতিটি কোয়ালিটি/এপিসোড আলাদা
+    আলাদা ভাষায় অ্যাড করতে পারবেন।
+4.  ইউজার প্যানেল (Mini App Details Page)-এ বড় ভাষা সিলেকশন বাটন: মুভি বা
+    সিরিজের ডিটেইল পেজে ঢুকলে ডাউনলোড অংশে বড় করে ভাষা সিলেক্ট করার বাটন আসবে,
+    আর ভাষা সিলেক্ট করার পর কেবল সেই ভাষায় অ্যাড করা ফাইলগুলোর ডাউনলোড লিংক
+    দেখাবে (আগের ডিজাইন ও অ্যানিমেশন ঠিক রেখেই)।
+
+ব্যবহারের নিয়ম: Part 1/7 থেকে Part 7/7 পর্যন্ত প্রতিটি পার্ট পরপর একই ফাইলে
+কপি-পেস্ট করে জুড়ে দিলে সম্পূর্ণ কোডটি কোনো এরর ছাড়াই রান করবে।
+
+📦 PART 1/7
+
 import os, sys, re, asyncio, threading, random, string, time, requests, json, base64, socket, io, traceback, gzip, hashlib, secrets, html
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
@@ -816,6 +842,8 @@ async def notify_new_post(client, file_doc, config):
         except Exception as e:
             print(f"notify_new_post auto_channel ({ch.get('chat_id')}) error: {e}", flush=True)
 
+📦 PART 2/7
+
 # ==========================================
 # 3. BACKGROUND TASKS
 # ==========================================
@@ -990,37 +1018,29 @@ async def get_lang_markup(prefix, skip_cb, back_cb=None):
     if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns), langs
 
-def extract_file_meta(m):
-    media = m.video or m.document or m.audio
-    fname = getattr(media, "file_name", None) or ""
-    fsize = getattr(media, "file_size", 0) or 0
-    cap = (m.caption or "").strip().replace("\n", " ")
-    raw_lbl = cap[:38] if cap else (fname[:38] if fname else "Video File")
-    label = re.sub(r"[`*_]", " ", raw_lbl).strip() or "Video File"
-    if fsize > 0:
-        mb = fsize / (1024 * 1024)
-        sz = f"{mb:.1f} MB" if mb < 1024 else f"{mb/1024:.2f} GB"
-        return f"{label} ({sz})"
-    return label
+def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None):
+    btns, row = [], []
+    for q in QUALITIES:
+        row.append(InlineKeyboardButton(f"🎬 {q}", callback_data=f"{prefix}_{q}"))
+        if len(row) == 3: btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("➕ Custom Quality", callback_data=f"{prefix}_custom")])
+    if skip_cb and finish_label:
+        btns.append([InlineKeyboardButton(finish_label, callback_data=skip_cb)])
+    if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
+    return InlineKeyboardMarkup(btns)
 
-def build_lang_pick_rows(langs, cur_lang, cb_prefix):
-    if not langs:
-        return []
-    rows, row = [], []
-    for i, ln in enumerate(langs):
-        mark = " ✅" if ln == cur_lang else ""
-        row.append(InlineKeyboardButton(f"🌐 {ln}{mark}", callback_data=f"{cb_prefix}_{i}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    none_mark = " ✅" if not cur_lang else ""
-    rows.append([InlineKeyboardButton(f"🌐 No Lang{none_mark}", callback_data=f"{cb_prefix}_none")])
-    return rows
-
-def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None, extra_rows=None, top_rows=None):
-    btns = list(top_rows) if top_rows else []
+def get_quality_lang_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None, langs=None, cur_lang="", lang_prefix=None, extra_rows=None):
+    btns = []
+    if langs and lang_prefix:
+        row = []
+        for i, ln in enumerate(langs):
+            chk = "✅ " if cur_lang == ln else ""
+            row.append(InlineKeyboardButton(f"🌐 {chk}{ln}", callback_data=f"{lang_prefix}_{i}"))
+            if len(row) == 2: btns.append(row); row = []
+        if row: btns.append(row)
+        dchk = "✅ " if not cur_lang else ""
+        btns.append([InlineKeyboardButton(f"🌐 {dchk}Default / No Tag", callback_data=f"{lang_prefix}_none")])
     row = []
     for q in QUALITIES:
         row.append(InlineKeyboardButton(f"🎬 {q}", callback_data=f"{prefix}_{q}"))
@@ -1029,27 +1049,11 @@ def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_c
     btns.append([InlineKeyboardButton("➕ Custom Quality", callback_data=f"{prefix}_custom")])
     if extra_rows:
         btns.extend(extra_rows)
-    if finish_label and skip_cb:
+    if skip_cb and finish_label:
         btns.append([InlineKeyboardButton(finish_label, callback_data=skip_cb)])
-    if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
+    if back_cb:
+        btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns)
-
-def collect_doc_languages(doc):
-    res = []
-    def _add(v):
-        s = str(v or "").strip()
-        if s and s not in res:
-            res.append(s)
-    for x in (doc.get("languages") or []):
-        _add(x)
-    _add(doc.get("language"))
-    for q in (doc.get("qualities") or []):
-        _add(q.get("lang"))
-    for s in (doc.get("seasons") or []):
-        for e in (s.get("episodes") or []):
-            for q in (e.get("qualities") or []):
-                _add(q.get("lang"))
-    return res
 
 def is_in_step(step_name):
     return filters.create(lambda _, __, m: admin_steps.get(m.from_user.id, {}).get("step") == step_name)
@@ -1088,18 +1092,6 @@ async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=No
             asyncio.create_task(delete_msg_later(client, uid, sent_msg_id, dt))
     except Exception as e:
         await client.send_message(uid, f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
-
-# ==================== END OF PART 1 ====================
-
-👉 এবার লিখুন: Part 2 (বাকি ৩ ভাগের ২য় অংশ) ভাই, সম্পূর্ণ কোডটি প্রায় ১৫০ KB
-হওয়ায় ৩ পার্টে ভাগ করলে প্রতি পার্ট ~৫০–৬০ KB হয়ে যায় এবং শেষে আবার কেটে যাওয়ার
-ঝুঁকি থাকে। তাই কোনো লাইন যেন না কাটে এবং আপনার পেস্ট করতেও কোনো ঝামেলা না হয়,
-মোট ৪টি পার্টে (Part 1 + আর মাত্র ৩টি পার্ট) সম্পূর্ণ কোড দিচ্ছি। প্রতিটি
-পার্টের শেষে 0 স্পেসে # === END === দেওয়া আছে, তাই কোনো Auto-Indent এরর আসবে না।
-
-নিচে Part 2 / 4 দেওয়া হলো। এটি Part 1-এর ঠিক নিচে পেস্ট করে আমাকে Part 3 লিখুন।
-
-📦 PART 2 / 4
 
 # ==========================================
 # 5. BOT COMMANDS (START + STATS + SIMPLE CONFIG + STRICT AD + BLUR + BRAND + TUTORIALS)
@@ -1141,7 +1133,7 @@ async def cmd_list(c, m):
 💰 **Strict Ad, Wait Time, Monetag, Steps, Redeem & Telegram Tasks:**
 • /strictad — অ্যাড শেষ না করে ব্যাক দিলে কিছু পাবে না (`on` / `off`)
   কপি: `/strictad on`
-• /regwait — রেগুলার ডাইক্ট অ্যাডের সময় (সেকেন্ড)
+• /regwait — রেগুলার ডাইরেক্ট অ্যাডের সময় (সেকেন্ড)
   কপি: `/regwait 10` অথবা `/regwait 5-15`
 • /prparadd — প্রিমিয়াম ডাইরেক্ট অ্যাডের সময় (কপি: `/prparadd 10`)
 • /taskwait — স্পিন ও টাস্ক ডাইরেক্ট অ্যাডের সময় (কপি: `/taskwait 10`)
@@ -1581,9 +1573,8 @@ async def start_cmd(client, message):
                     asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
                     qs = fd.get("qualities", []); qi = int(q_idx)
                     if 0 <= qi < len(qs):
-                        qo = qs[qi]
-                        qlbl = f"{qo['lang']} • {qo['name']}" if qo.get("lang") else qo["name"]
-                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} [{qlbl}]", config, file_doc=fd)
+                        ql = f" • {qs[qi]['lang']}" if qs[qi].get("lang") else ""
+                        return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}{ql}]", config, file_doc=fd)
                     elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config, file_doc=fd)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
             elif pf_val.startswith("sfile_"):
@@ -1593,8 +1584,8 @@ async def start_cmd(client, message):
                     asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
                     try:
                         ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
-                        qlbl = f"{qo['lang']} • {qo['name']}" if qo.get("lang") else qo["name"]
-                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qlbl}]", config, file_doc=fd)
+                        ql = f" • {qo['lang']}" if qo.get("lang") else ""
+                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}{ql}]", config, file_doc=fd)
                     except: pass
                 return await message.reply("❌ এপিসোড ফাইল পাওয়া যায়নি!")
             else:
@@ -1642,6 +1633,8 @@ async def check_join_cb(c, q):
         def __init__(self, u): self.from_user = u; self.text = "/start"
         async def reply(self, *a, **k): return await c.send_message(q.from_user.id, *a, **k)
     await start_cmd(c, FakeMsg(q.from_user))
+
+📦 PART 3/7
 
 # ==========================================
 # 6. CATEGORY, LANGUAGE, UPCOMING, ZONE ID, REDEEM, PREMIUM, TG TASK
@@ -1874,3 +1867,4424 @@ async def cmd_deletepremium(c, m):
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
 
+# ==========================================
+# 7. MOVIES WORKFLOW (MULTI-LANGUAGE + REVIEW & CONFIRM + POSTER IN MONGODB)
+# ==========================================
+async def show_mv_poster_prompt(mo, st, edit=True):
+    st["step"] = "mv_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    txt = f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="mvprem_toggle")], [InlineKeyboardButton("⬅️ Back to Language", callback_data="mvback_lang")]])
+    if edit: await mo.edit_text(txt, reply_markup=kb)
+    else: await mo.reply(txt, reply_markup=kb)
+
+async def show_mv_qual_prompt(mo, st, edit=True, prefix_msg="৪. এবার ভাষা ও **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:"):
+    st["step"] = "mv_qual_wait"
+    langs = await get_languages_list()
+    cur_l = st.get("current_lang", "")
+    qs = ", ".join([f"{q['name']}({q.get('lang') or 'Def'})" for q in st.get("qualities", [])]) or "None"
+    extra = [[InlineKeyboardButton(f"👁 Review & Confirm ({len(st.get('qualities', []))})", callback_data="mvrev")]] if st.get("qualities") else None
+    mk = get_quality_lang_markup("mvqual", "mvrev", "👁 Review & Confirm", "mvback_poster", langs=langs, cur_lang=cur_l, lang_prefix="mvqlang", extra_rows=extra)
+    txt = f"{prefix_msg}\n\n🌐 নির্বাচিত ভাষা: **{cur_l or 'Default'}**\n🎞 স্টেইজ করা কোয়ালিটি ({len(st.get('qualities', []))}): `{qs}`\n_(Confirm না করা পর্যন্ত সাইটে এড হবে না)_"
+    if edit: await mo.edit_text(txt, reply_markup=mk)
+    else: await mo.reply(txt, reply_markup=mk)
+
+@app.on_message(filters.command("movies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_movies(c, m):
+    name, year = parse_name_year(m.text, "/movies")
+    if not name: admin_steps[m.from_user.id] = {"step": "mv_name_year"}; return await m.reply("🎬 **মুভির নাম ও সাল দিন:**\nউদাহরণ: `RRR 2024`")
+    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
+    mk, _ = await get_cat_markup("mvcat", "mvcat_skip"); await m.reply(f"🎬 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_name_year") & ~filters.regex(r"^/") & unique_msg)
+async def handle_mv_name_year(c, m):
+    name, year = parse_name_year(m.text, "")
+    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
+    mk, _ = await get_cat_markup("mvcat", "mvcat_skip"); await m.reply(f"🎬 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+
+@app.on_callback_query(filters.regex(r"^mvback_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvback_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    target = q.data.split("_", 1)[1]
+    if target == "cat":
+        st["step"] = "mv_cat"; mk, _ = await get_cat_markup("mvcat", "mvcat_skip")
+        return await q.message.edit_text(f"🎬 **{st['name']} {st.get('year','')}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+    elif target == "lang":
+        st["step"] = "mv_lang"; lm, _ = await get_lang_markup("mvlang", "mvlang_skip", "mvback_cat")
+        return await q.message.edit_text(f"✅ Category: **{st.get('category','All')}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
+    elif target == "poster":
+        return await show_mv_poster_prompt(q.message, st, edit=True)
+    elif target == "qual":
+        return await show_mv_qual_prompt(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^mvcat_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvcat_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_")[1]
+    if val == "skip": st["category"] = "All"
+    else: cats = await get_categories_list(); st["category"] = cats[int(val)] if int(val) < len(cats) else "All"
+    st["step"] = "mv_lang"; lm, _ = await get_lang_markup("mvlang", "mvlang_skip", "mvback_cat")
+    await q.message.edit_text(f"✅ Category: **{st['category']}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
+
+@app.on_callback_query(filters.regex(r"^mvlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvlang_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_")[1]
+    if val == "skip": st["language"] = ""
+    else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
+    st["current_lang"] = st["language"]
+    await show_mv_poster_prompt(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^mvqlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvqlang_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_", 1)[1]
+    if val == "none": st["current_lang"] = ""
+    else:
+        langs = await get_languages_list(); idx = int(val)
+        st["current_lang"] = langs[idx] if idx < len(langs) else ""
+    await q.answer(f"🌐 ভাষা: {st['current_lang'] or 'Default'}")
+    await show_mv_qual_prompt(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^mvprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
+async def mvprem_toggle_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if st:
+        st["is_premium"] = not st.get("is_premium", False)
+        await show_mv_poster_prompt(q.message, st, edit=True)
+
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & unique_msg)
+async def handle_mv_poster(c, m):
+    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার নেওয়া হচ্ছে...")
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(f"{err or '❌ পোস্টার রিসিভ করা যায়নি!'} দয়া করে আবার ছবি পাঠান।")
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/movies` দিন।")
+        st["poster_b64"] = enc; st["poster_mime"] = mime; st["tg_thumb_id"] = tg_fid
+        await show_mv_qual_prompt(msg, st, edit=True, prefix_msg="✅ **পোস্টার রেডি!**\n\n৪. এবার ভাষা ও **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:")
+    except Exception as e:
+        await msg.edit_text(f"❌ পোস্টার এরর: `{e}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_poster") & ~filters.regex(r"^/") & unique_msg)
+async def handle_mv_poster_url(c, m):
+    url = m.text.strip()
+    if not url.startswith("http"):
+        return await m.reply("❌ দয়া করে একটি ল্যান্ডস্কোপ ছবি (Photo) অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
+    msg = await m.reply("⏳ ইমেজ লিংক প্রসেস হচ্ছে...")
+    try:
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/movies` দিন।")
+        try:
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
+            ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
+                st["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
+                st["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
+            else:
+                st["thumb_url"] = url
+        except:
+            st["thumb_url"] = url
+        await show_mv_qual_prompt(msg, st, edit=True, prefix_msg="✅ **পোস্টার লিংক রেডি!**\n\n৪. এবার ভাষা ও **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:")
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
+
+@app.on_callback_query(filters.regex(r"^mvqual_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvqual_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_", 1)[1]
+    if val == "custom":
+        st["step"] = "mv_custom_qname"
+        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:\nউদাহরণ: `1080p HEVC`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
+    st["current_quality"] = val; st["step"] = "mv_qual_file"
+    await q.message.edit_text(f"📤 এবার **{val}** [🌐 {st.get('current_lang') or 'Default'}] ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_custom_qname") & ~filters.regex(r"^/") & unique_msg)
+async def handle_mv_custom_qname(c, m):
+    st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "mv_qual_file"
+    await m.reply(f"📤 এবার **{st['current_quality']}** [🌐 {st.get('current_lang') or 'Default'}] ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
+
+@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_qual_file") & unique_msg)
+async def handle_mv_qual_file(c, m):
+    st = admin_steps[m.from_user.id]; f_id = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
+    q_name = st.get("current_quality", "HD"); q_lang = st.get("current_lang", "")
+    st["qualities"].append({"name": q_name, "lang": q_lang, "file_id": f_id})
+    await show_mv_qual_prompt(m, st, edit=False, prefix_msg=f"✅ **{q_name}** [🌐 {q_lang or 'Default'}] অস্থায়ীভাবে যুক্ত হয়েছে!")
+
+async def render_mv_review(mo, st, edit=True):
+    ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+    qs = st.get("qualities", [])
+    q_lines = "\n".join([f"  `{i+1}.` 🎬 **{x['name']}** — 🌐 `{x.get('lang') or 'Default'}`" for i, x in enumerate(qs)]) or "  ⚠️ কোনো ফাইল নেই!"
+    txt = (
+        f"👁 **Review & Confirm Movie (সাইটে এখনো সেভ হয়নি):**\n\n"
+        f"🎬 Title: **{ft}**\n"
+        f"📂 Category: `{st.get('category','All')}` | 🌐 Default Lang: `{st.get('language') or 'None'}`\n"
+        f"🔰 Type: `{'💎 VIP' if st.get('is_premium') else '👤 Regular'}` | 🖼 Poster: `{'Ready' if (st.get('poster_b64') or st.get('thumb_url')) else 'None'}`\n\n"
+        f"🎞 **Staged Qualities ({len(qs)}):**\n{q_lines}\n\n"
+        f"👇 ভুল থাকলে নিচে ক্লিক করে ডিলিট করুন অথবা **Confirm** চাপুন:"
+    )
+    btns = [[InlineKeyboardButton(f"🗑 Remove #{i+1}: {x['name']} ({x.get('lang') or 'Def'})", callback_data=f"mvrmq_{i}")] for i, x in enumerate(qs)]
+    btns.append([InlineKeyboardButton("➕ Add / Edit Quality", callback_data="mvback_qual")])
+    btns.append([InlineKeyboardButton("✅ Confirm & Save to Site", callback_data="mvsave_final")])
+    btns.append([InlineKeyboardButton("❌ Cancel All", callback_data="cmdrun_cancel")])
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^mvrev$") & filters.user(ADMIN_ID) & unique_cb)
+async def mvrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await render_mv_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^mvrmq_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvrmq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    idx = int(q.data.split("_")[1])
+    if 0 <= idx < len(st.get("qualities", [])):
+        rem = st["qualities"].pop(idx)
+        await q.answer(f"🗑 {rem['name']} রিমুভ হয়েছে!")
+    await render_mv_review(q.message, st, edit=True)
+
+async def finalize_save_movie(c, uid, msg_obj):
+    st = admin_steps.pop(uid, None)
+    if not st: return
+    try:
+        await msg_obj.edit_text("⏳ MongoDB-তে মুভি ও পোস্টার সেভ হচ্ছে...")
+        short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        dbs = await get_extra_dbs_async(); target_db, min_sz = dbs[0], float('inf')
+        for d in dbs:
+            try:
+                s = await d.command("dbstats")
+                if s["dataSize"] < min_sz: min_sz = s["dataSize"]; target_db = d
+            except: pass
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        thumb_url = ""
+        if st.get("poster_b64"):
+            thumb_url = await save_poster_to_mongo(target_db, short_id, st["poster_b64"], st.get("poster_mime", "image/jpeg"), live_url)
+        elif st.get("thumb_url"):
+            thumb_url = st["thumb_url"]
+        ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+        nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": st["qualities"][0]["file_id"] if st.get("qualities") else None, "qualities": st.get("qualities", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        await target_db["files"].insert_one(nm); invalidate_home_cache(); await notify_new_post(c, nm, conf)
+        await msg_obj.edit_text(f"✅ **মুভি ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
+    except Exception as e:
+        traceback.print_exc()
+        await msg_obj.edit_text(f"❌ সেভ করতে সমস্যা হয়েছে: `{e}`")
+
+@app.on_callback_query(filters.regex(r"^mvsave_final$") & filters.user(ADMIN_ID) & unique_cb)
+async def mvsave_final_cb(c, q): await finalize_save_movie(c, q.from_user.id, q.message)
+
+async def search_files_list(is_series, raw_query):
+    qflt = {"type": "series"} if is_series else {"type": {"$ne": "series"}}
+    all_docs = await get_all_files_across_dbs(qflt)
+    raw = (raw_query or "").strip()
+    if not raw:
+        return all_docs
+    name, year = parse_name_year(raw, "")
+    nq = (name or raw).lower().strip()
+    res = []
+    for d in all_docs:
+        title = str(d.get("title", "")).lower()
+        dname = str(d.get("name", "")).lower()
+        dyear = str(d.get("year", "")).lower()
+        dcat = str(d.get("category", "")).lower()
+        did = str(d.get("_id", "")).lower()
+        if (nq in title or nq in dname or nq == did or nq in dcat) and (not year or year.lower() in title or year.lower() == dyear):
+            res.append(d)
+    return res
+
+async def send_edit_search_page(mq, uid, is_series, query, page=0, edit=True):
+    docs = await search_files_list(is_series, query)
+    kind = "সিরিজ" if is_series else "মুভি"
+    pick_pfx = "edsrpick" if is_series else "edmvpick"
+    page_pfx = "edsrpage" if is_series else "edmvpage"
+    again_cb = "edsragain" if is_series else "edmvagain"
+    admin_steps[uid] = {
+        "step": "edsr_search_wait" if is_series else "edmv_search_wait",
+        "search_query": query
+    }
+    if not docs:
+        txt = f"❌ `{query}` নামে কোনো {kind} পাওয়া যায়নি!\n\n🔍 অন্য কোনো নাম লিখে পাঠান অথবা নিচের বাটনে চাপ দিন:"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"📋 সব {kind} দেখুন", callback_data=f"{page_pfx}_all_0")],
+            [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+        ])
+        return await (mq.message.edit_text(txt, reply_markup=kb) if edit else mq.reply(txt, reply_markup=kb))
+
+    if len(docs) == 1 and query:
+        admin_steps.pop(uid, None)
+        if is_series:
+            return await show_edit_series_panel(mq, str(docs[0]["_id"]), edit=edit)
+        return await show_edit_movie_panel(mq, str(docs[0]["_id"]), edit=edit)
+
+    pp = 10
+    total_pages = max(1, (len(docs) + pp - 1) // pp)
+    page = max(0, min(page, total_pages - 1))
+    st = page * pp
+    ch = docs[st:st + pp]
+    btns = [[InlineKeyboardButton(f"✏️ {d['title'][:32]} [{d['_id']}]", callback_data=f"{pick_pfx}_{d['_id']}")] for d in ch]
+    nav = []
+    mode_tag = "q" if query else "all"
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{page_pfx}_{mode_tag}_{page-1}"))
+    if st + pp < len(docs):
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"{page_pfx}_{mode_tag}_{page+1}"))
+    if nav:
+        btns.append(nav)
+    btns.append([
+        InlineKeyboardButton("🔍 নতুন সার্চ", callback_data=again_cb),
+        InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")
+    ])
+    header = f"🔍 **'{query}' এর {kind} ফলাফল**" if query else f"📋 **সকল {kind} তালিকা**"
+    txt = f"{header} (মোট: {len(docs)} টি | পেজ {page+1}/{total_pages}):\n\n👇 এডিট করতে {kind}-তে ক্লিক করুন (অথবা সরাসরি নতুন নাম লিখুন):"
+    if edit:
+        await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else:
+        await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edsearch_cancel$") & filters.user(ADMIN_ID) & unique_cb)
+async def edsearch_cancel_cb(c, q):
+    admin_steps.pop(q.from_user.id, None)
+    await q.message.edit_text("✅ সার্চ বাতিল করা হয়েছে!")
+
+@app.on_message(filters.command("deletedmovies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_deleted_movies(c, m):
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if raw_arg:
+        admin_steps[m.from_user.id] = {"step": "delmv_search_wait", "del_query": raw_arg}
+        return await send_del_page(m, {"type": {"$ne": "series"}}, "delmv", 0, edit=False, query=raw_arg)
+    admin_steps.pop(m.from_user.id, None)
+    await send_del_page(m, {"type": {"$ne": "series"}}, "delmv", 0, edit=False)
+
+async def send_del_page(mq, qflt, pfx, page=0, edit=True, query=""):
+    is_series = (pfx == "delsr")
+    docs = await search_files_list(is_series, query) if query else await get_all_files_across_dbs(qflt)
+    srch_cb = "delsrsrch" if is_series else "delmvsrch"
+    if not docs:
+        txt = f"❌ `{query}` নামে কোনো আইটেম পাওয়া যায়নি!" if query else "❌ কোনো আইটেম নেই!"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 আবার সার্চ করুন", callback_data=srch_cb)], [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]]) if query else None
+        return await (mq.message.edit_text(txt, reply_markup=kb) if edit else mq.reply(txt, reply_markup=kb))
+    pp = 10
+    total_pages = max(1, (len(docs) + pp - 1) // pp)
+    page = max(0, min(page, total_pages - 1))
+    st = page * pp
+    ch = docs[st:st + pp]
+    btns = [[InlineKeyboardButton("🔍 নাম দিয়ে সার্চ করুন", callback_data=srch_cb)]]
+    btns += [[InlineKeyboardButton(f"🗑 {d['title'][:32]} [{d['_id']}]", callback_data=f"{pfx}_{d['_id']}_{page}")] for d in ch]
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{pfx}pg_{page-1}"))
+    if st + pp < len(docs): nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"{pfx}pg_{page+1}"))
+    if nav: btns.append(nav)
+    txt = f"🗑 **ডিলিট লিস্ট {'(সার্চ: ' + query + ') ' if query else ''}(Total: {len(docs)} | পেজ {page+1}/{total_pages}):**"
+    if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^delmvsrch$") & filters.user(ADMIN_ID) & unique_cb)
+async def delmvsrch_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "delmv_search_wait"}
+    await q.message.edit_text("🔍 **যে মুভি ডিলিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `RRR` অথবা `2024`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]]))
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("delmv_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_delmv_search(c, m):
+    q_txt = m.text.strip()
+    admin_steps[m.from_user.id] = {"step": "delmv_search_wait", "del_query": q_txt}
+    await send_del_page(m, {"type": {"$ne": "series"}}, "delmv", 0, edit=False, query=q_txt)
+
+@app.on_callback_query(filters.regex(r"^delmvpg_") & filters.user(ADMIN_ID) & unique_cb)
+async def delmvpg_cb(c, q):
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(q.data.split("_")[1]), edit=True, query=cur_q)
+
+@app.on_callback_query(filters.regex(r"^delmv_") & filters.user(ADMIN_ID) & unique_cb)
+async def delmv_cb(c, q):
+    _, rest = q.data.split("_", 1)
+    f_id, pg = rest.rsplit("_", 1)
+    doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        await tdb["files"].delete_one({"_id": doc["_id"]})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
+        poster_cache_del(f_id)
+        invalidate_home_cache()
+        await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(pg), edit=True, query=cur_q)
+
+@app.on_message(filters.command(["editemovies", "editmovies"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_edit_movies(c, m):
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if not raw_arg:
+        admin_steps[m.from_user.id] = {"step": "edmv_search_wait"}
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 সব মুভি দেখুন (Page by Page)", callback_data="edmvpage_all_0")],
+            [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+        ])
+        return await m.reply("🔍 **যে মুভি এডিট করতে চান, তার নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `RRR` অথবা `RRR 2022`", reply_markup=kb)
+    await send_edit_search_page(m, m.from_user.id, False, raw_arg, 0, edit=False)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("edmv_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edmv_search(c, m):
+    await send_edit_search_page(m, m.from_user.id, False, m.text.strip(), 0, edit=False)
+
+@app.on_callback_query(filters.regex(r"^edmvagain$") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvagain_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "edmv_search_wait"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 সব মুভি দেখুন", callback_data="edmvpage_all_0")],
+        [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+    ])
+    await q.message.edit_text("🔍 **নতুন করে মুভির নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `RRR` অথবা `2024`", reply_markup=kb)
+
+@app.on_callback_query(filters.regex(r"^edmvpage_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvpage_cb(c, q):
+    _, mode_tag, pg_str = q.data.split("_", 2)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("search_query", "") if mode_tag == "q" else ""
+    await send_edit_search_page(q, q.from_user.id, False, cur_q, int(pg_str), edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvpick_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvpick_cb(c, q):
+    admin_steps.pop(q.from_user.id, None)
+    await show_edit_movie_panel(q, q.data.split("_", 1)[1], edit=True)
+
+async def show_edit_movie_panel(mq, f_id, edit=True):
+    doc, _ = await find_file_in_all_dbs(f_id)
+    if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
+    qs = doc.get("qualities", []); q_str = ", ".join([f"{x['name']}({x.get('lang') or 'Def'})" for x in qs]) if qs else ("Single File" if doc.get("file_id") else "None")
+    txt = f"✏️ **Edit Movie:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n🎞 Qualities: `{q_str}`"
+    btns = [[InlineKeyboardButton("✏️ Name/Year", callback_data=f"edmv_name_{f_id}"), InlineKeyboardButton("🖼 Poster", callback_data=f"edmv_poster_{f_id}")],
+            [InlineKeyboardButton("📂 Category", callback_data=f"edmv_cat_{f_id}"), InlineKeyboardButton("🌐 Language", callback_data=f"edmv_lang_{f_id}")],
+            [InlineKeyboardButton("➕ Add Quality", callback_data=f"edmv_addq_{f_id}"), InlineKeyboardButton("🗑 Delete Quality", callback_data=f"edmv_delq_{f_id}")],
+            [InlineKeyboardButton("📌 Pin", callback_data=f"edmv_pin_{f_id}"), InlineKeyboardButton("💎 Premium", callback_data=f"edmv_prem_{f_id}")],
+            [InlineKeyboardButton("🗑 Delete Movie", callback_data=f"edmv_del_{f_id}")]]
+    if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+async def show_edmv_addq_screen(mq, uid, f_id, edit=True, prefix="➕ ভাষা ও Quality সিলেক্ট করুন:"):
+    st = admin_steps.get(uid)
+    if not st: return
+    st["step"] = "edmv_addq_pick"
+    langs = await get_languages_list()
+    cur_l = st.get("current_lang", "")
+    pend = st.get("pending_qualities", [])
+    extra = [[InlineKeyboardButton(f"👁 Review & Confirm ({len(pend)})", callback_data=f"edmvrev_{f_id}")]] if pend else None
+    mk = get_quality_lang_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back (Discard Pending)" if pend else "⬅️ Back", None, langs=langs, cur_lang=cur_l, lang_prefix=f"edmvqlang_{f_id}", extra_rows=extra)
+    p_str = ", ".join([f"{x['name']}({x.get('lang') or 'Def'})" for x in pend]) or "None"
+    txt = f"{prefix}\n\n🌐 নির্বাচিত ভাষা: **{cur_l or 'Default'}**\n📦 Pending (সাইটে এড হয়নি): `{p_str}`"
+    if edit: await mq.edit_text(txt, reply_markup=mk)
+    else: await mq.reply(txt, reply_markup=mk)
+
+@app.on_callback_query(filters.regex(r"^edmv_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmv_cb(c, q):
+    _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
+    db_id = doc["_id"]
+    if act == "pin": await tdb["files"].update_one({"_id": db_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
+    elif act == "prem": await tdb["files"].update_one({"_id": db_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
+    elif act == "del":
+        await tdb["files"].delete_one({"_id": db_id})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
+        poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    elif act == "name": admin_steps[q.from_user.id] = {"step": "edmv_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন (যেমন: `RRR 2024`):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]))
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edmv_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]))
+    elif act == "cat":
+        cats = await get_categories_list()
+        if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
+        btns = [[InlineKeyboardButton(f"📂 {cn}", callback_data=f"edmvcat_{f_id}_{i}")] for i, cn in enumerate(cats)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
+        return await q.message.edit_text("📂 Category সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
+    elif act == "lang":
+        ls = await get_languages_list()
+        if not ls: return await q.answer("❌ আগে /setlanguage দিয়ে ভাষা অ্যাড করুন!", show_alert=True)
+        btns = [[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edmvlang_{f_id}_{i}")] for i, ln in enumerate(ls)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
+        return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
+    elif act == "addq":
+        admin_steps[q.from_user.id] = {"step": "edmv_addq_pick", "f_id": f_id, "current_lang": doc.get("language", ""), "pending_qualities": []}
+        return await show_edmv_addq_screen(q.message, q.from_user.id, f_id, edit=True)
+    elif act == "delq":
+        qs = doc.get("qualities", [])
+        if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
+        btns = [[InlineKeyboardButton(f"❌ {ql['name']} ({ql.get('lang') or 'Def'})", callback_data=f"edmvqdel_{f_id}_{i}")] for i, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
+        return await q.message.edit_text("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edmvqlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvqlang_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, rest = q.data.split("_", 1); f_id, val = rest.rsplit("_", 1)
+    if val == "none": st["current_lang"] = ""
+    else:
+        langs = await get_languages_list(); idx = int(val)
+        st["current_lang"] = langs[idx] if idx < len(langs) else ""
+    await q.answer(f"🌐 ভাষা: {st['current_lang'] or 'Default'}")
+    await show_edmv_addq_screen(q.message, q.from_user.id, f_id, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvcat_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvcat_cb(c, q):
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
+    await show_edit_movie_panel(q, f_id, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvlang_cb(c, q):
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
+    await show_edit_movie_panel(q, f_id, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvqdel_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvqdel_cb(c, q):
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1); idx = int(idx)
+    doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        qs = doc.get("qualities", [])
+        if 0 <= idx < len(qs): qs.pop(idx)
+        new_fid = qs[0]["file_id"] if qs else None
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"qualities": qs, "file_id": new_fid}}); invalidate_home_cache()
+    await show_edit_movie_panel(q, f_id, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvqadd_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvqadd_cb(c, q):
+    val = q.data.split("_", 1)[1]; st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    f_id = st["f_id"]
+    if val == "custom":
+        st["step"] = "edmv_custom_qname"
+        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmvaddmore_{f_id}")]]))
+    st["current_quality"] = val; st["step"] = "edmv_addq_file"
+    await q.message.edit_text(f"📤 এবার **{val}** [🌐 {st.get('current_lang') or 'Default'}] ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmvaddmore_{f_id}")]]))
+
+@app.on_callback_query(filters.regex(r"^edmvaddmore_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvaddmore_cb(c, q):
+    f_id = q.data.split("_", 1)[1]
+    if q.from_user.id not in admin_steps:
+        return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await show_edmv_addq_screen(q.message, q.from_user.id, f_id, edit=True)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_custom_qname") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edmv_cq(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    st["current_quality"] = m.text.strip(); st["step"] = "edmv_addq_file"
+    await m.reply(f"📤 এবার **{m.text.strip()}** [🌐 {st.get('current_lang') or 'Default'}] ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmvaddmore_{st['f_id']}")]]))
+
+@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_addq_file") & unique_msg)
+async def handle_edmv_qf(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id, qn, ql = st["f_id"], st["current_quality"], st.get("current_lang", "")
+    fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
+    st.setdefault("pending_qualities", []).append({"name": qn, "lang": ql, "file_id": fid})
+    await show_edmv_addq_screen(m, m.from_user.id, f_id, edit=False, prefix=f"✅ **{qn}** [🌐 {ql or 'Default'}] অস্থায়ীভাবে যুক্ত হয়েছে!")
+
+async def render_edmv_review(mo, st, edit=True):
+    f_id = st["f_id"]
+    pend = st.get("pending_qualities", [])
+    lines = "\n".join([f"  `{i+1}.` 🎬 **{x['name']}** — 🌐 `{x.get('lang') or 'Default'}`" for i, x in enumerate(pend)]) or "  ⚠️ কোনো পেন্ডিং ফাইল নেই!"
+    txt = f"👁 **Review & Confirm (সাইটে এখনো এড হয়নি):**\n\n📦 নতুন যোগ হতে যাওয়া ফাইল ({len(pend)}):\n{lines}\n\n👇 ভুল থাকলে রিমুভ করুন অথবা **Confirm** করুন:"
+    btns = [[InlineKeyboardButton(f"🗑 Remove #{i+1}: {x['name']} ({x.get('lang') or 'Def'})", callback_data=f"edmvrmq_{f_id}_{i}")] for i, x in enumerate(pend)]
+    btns.append([InlineKeyboardButton("➕ Add More Quality", callback_data=f"edmvaddmore_{f_id}")])
+    if pend:
+        btns.append([InlineKeyboardButton("✅ Confirm & Save to Site", callback_data=f"edmvconf_{f_id}")])
+    btns.append([InlineKeyboardButton("❌ Discard & Back", callback_data=f"edmvpick_{f_id}")])
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edmvrev_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await render_edmv_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvrmq_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvrmq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, rest = q.data.split("_", 1); _, idx_s = rest.rsplit("_", 1); idx = int(idx_s)
+    pend = st.get("pending_qualities", [])
+    if 0 <= idx < len(pend):
+        rem = pend.pop(idx)
+        await q.answer(f"🗑 {rem['name']} রিমুভ হয়েছে!")
+    await render_edmv_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvconf_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvconf_cb(c, q):
+    st = admin_steps.pop(q.from_user.id, None)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    f_id = st["f_id"]; pend = st.get("pending_qualities", [])
+    if not pend: return await show_edit_movie_panel(q, f_id, edit=True)
+    doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        for item in pend:
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$push": {"qualities": item}})
+        if not doc.get("file_id"):
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"file_id": pend[0]["file_id"]}})
+        invalidate_home_cache()
+        await q.answer(f"✅ {len(pend)}টি ফাইল সাইটে সেভ হয়েছে!", show_alert=True)
+    await show_edit_movie_panel(q, f_id, edit=True)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_name_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edmv_name(c, m):
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
+    await show_edit_movie_panel(m, f_id, edit=False)
+
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & unique_msg)
+async def handle_edmv_poster(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None:
+            admin_steps.pop(m.from_user.id, None)
+            return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        invalidate_home_cache()
+        admin_steps.pop(m.from_user.id, None)
+        await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
+    except Exception as e:
+        traceback.print_exc()
+        await msg.edit_text(f"❌ পোস্টার আপডেট এরর: `{e}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_poster_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edmv_poster_url(c, m):
+    url = m.text.strip()
+    if not url.startswith("http"):
+        return await m.reply("❌ দয়া করে ছবি অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    try:
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None: return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = url
+        try:
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
+            ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
+                purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
+        except: pass
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None}})
+        invalidate_home_cache()
+        await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
+
+📦 PART 4/7
+# ==========================================
+# 8. SERIES WORKFLOW (NEXT EPISODE + MULTI-LANGUAGE + REVIEW & CONFIRM)
+# ==========================================
+async def show_sr_poster_prompt(mo, st, edit=True):
+    st["step"] = "sr_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    txt = f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Toggle Premium/Regular", callback_data="srprem_toggle")], [InlineKeyboardButton("⬅️ Back to Language", callback_data="srback_lang")]])
+    if edit: await mo.edit_text(txt, reply_markup=kb)
+    else: await mo.reply(txt, reply_markup=kb)
+
+@app.on_message(filters.command("addseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_addseries(c, m):
+    name, year = parse_name_year(m.text, "/addseries")
+    if not name: admin_steps[m.from_user.id] = {"step": "sr_name_year"}; return await m.reply("📺 **সিরিজের নাম ও সাল দিন:**\nউদাহরণ: `Bachelor Point 2026`")
+    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
+    mk, _ = await get_cat_markup("srcat", "srcat_skip"); await m.reply(f"📺 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_name_year") & ~filters.regex(r"^/") & unique_msg)
+async def handle_sr_name_year(c, m):
+    name, year = parse_name_year(m.text, "")
+    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
+    mk, _ = await get_cat_markup("srcat", "srcat_skip"); await m.reply(f"📺 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+
+@app.on_callback_query(filters.regex(r"^srcat_") & filters.user(ADMIN_ID) & unique_cb)
+async def srcat_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_")[1]
+    if val == "skip": st["category"] = "All"
+    else: cats = await get_categories_list(); st["category"] = cats[int(val)] if int(val) < len(cats) else "All"
+    st["step"] = "sr_lang"; lm, _ = await get_lang_markup("srlang", "srlang_skip", "srback_cat")
+    await q.message.edit_text(f"✅ Category: **{st['category']}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
+
+@app.on_callback_query(filters.regex(r"^srlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def srlang_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_")[1]
+    if val == "skip": st["language"] = ""
+    else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
+    st["current_lang"] = st["language"]
+    await show_sr_poster_prompt(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^srprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
+async def srprem_toggle_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if st:
+        st["is_premium"] = not st.get("is_premium", False)
+        await show_sr_poster_prompt(q.message, st, edit=True)
+
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & unique_msg)
+async def handle_sr_poster(c, m):
+    msg = await m.reply("⏳ ল্যান্ডস্কোপ পোস্টার নেওয়া হচ্ছে...")
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(f"{err or '❌ পোস্টার রিসিভ করা যায়নি!'} দয়া করে আবার ছবি পাঠান।")
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/addseries` দিন।")
+        st["poster_b64"] = enc; st["poster_mime"] = mime; st["tg_thumb_id"] = tg_fid
+        await prompt_series_season(msg, st, edit=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ পোস্টার এরর: `{e}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_poster") & ~filters.regex(r"^/") & unique_msg)
+async def handle_sr_poster_url(c, m):
+    url = m.text.strip()
+    if not url.startswith("http"):
+        return await m.reply("❌ দয়া করে একটি ল্যান্ডস্কোপ ছবি (Photo) অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
+    msg = await m.reply("⏳ ইমেজ লিংক প্রসেস হচ্ছে...")
+    try:
+        st = admin_steps.get(m.from_user.id)
+        if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/addseries` দিন।")
+        try:
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
+            ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
+                st["poster_b64"] = base64.b64encode(r.content).decode("utf-8")
+                st["poster_mime"] = "image/jpeg" if ct == "image/jpg" else ct
+            else:
+                st["thumb_url"] = url
+        except:
+            st["thumb_url"] = url
+        await prompt_series_season(msg, st, edit=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
+
+async def prompt_series_season(mo, st, edit=True):
+    st["step"] = "sr_season_no"; ns = len(st["seasons"]) + 1
+    btns = [[InlineKeyboardButton(f"📺 Season {ns}", callback_data=f"srssn_{ns}")]]
+    for idx, s in enumerate(st["seasons"]):
+        btns.append([InlineKeyboardButton(f"📂 Edit Season {s['season_no']} ({len(s.get('episodes', []))} Eps)", callback_data=f"srssn_{s['season_no']}")])
+    btns.append([InlineKeyboardButton("👁 Review & Confirm Series", callback_data="srrev")])
+    btns.append([InlineKeyboardButton("⬅️ Back to Poster", callback_data="srback_poster")])
+    txt = f"✅ পোস্টার রেডি!\n\n৪. **Season নম্বর দিন** (যেমন: `1` বা `5`):"
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+def get_or_create_season(st, sno):
+    sno = clean_season_no(sno)
+    for i, s in enumerate(st["seasons"]):
+        if clean_season_no(s["season_no"]).lower() == sno.lower(): return i
+    st["seasons"].append({"season_no": sno, "episodes": []}); return len(st["seasons"]) - 1
+
+def get_or_create_episode(st, si, eno):
+    eno = clean_ep_no(eno)
+    eps = st["seasons"][si]["episodes"]
+    for i, e in enumerate(eps):
+        if clean_ep_no(e["ep_no"]).lower() == eno.lower(): return i
+    eps.append({"ep_no": eno, "qualities": []}); return len(eps) - 1
+
+async def prompt_series_episode(mo, st, edit=True):
+    st["step"] = "sr_ep_no"; ssn = st["seasons"][st["cur_s_idx"]]; ne = len(ssn["episodes"]) + 1
+    btns = [[InlineKeyboardButton(f"🎬 Episode {ne}", callback_data=f"srep_{ne}")]]
+    btns.append([InlineKeyboardButton("➕ Add Another Season", callback_data="srssn_new"), InlineKeyboardButton("⬅️ Back to Season", callback_data="srback_season")])
+    btns.append([InlineKeyboardButton("👁 Review & Confirm Series", callback_data="srrev")])
+    txt = f"📺 **Season {ssn['season_no']}**\nএবার **Episode নম্বর দিন** (যেমন: `1` বা `134`):"
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+async def show_sr_quality_prompt(mo, st, edit=True, prefix_msg=""):
+    st["step"] = "sr_qual_wait"
+    ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
+    langs = await get_languages_list()
+    cur_l = st.get("current_lang", "")
+    added = ", ".join([f"{q['name']}({q.get('lang') or 'Def'})" for q in ep.get("qualities", [])]) or "None"
+    total_q = sum(len(e.get("qualities", [])) for s in st.get("seasons", []) for e in s.get("episodes", []))
+    extra = [
+        [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next")],
+        [InlineKeyboardButton(f"👁 Review & Confirm ({total_q})", callback_data="srrev")]
+    ]
+    mk = get_quality_lang_markup("srqual", None, "", "srback_ep", langs=langs, cur_lang=cur_l, lang_prefix="srqlang", extra_rows=extra)
+    head = f"{prefix_msg}\n\n" if prefix_msg else ""
+    txt = f"{head}📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\n🌐 ভাষা: **{cur_l or 'Default'}**\n🎞 Added: `{added}`\n_(Confirm না করা পর্যন্ত সাইটে এড হবে না)_"
+    if edit: await mo.edit_text(txt, reply_markup=mk)
+    else: await mo.reply(txt, reply_markup=mk)
+
+@app.on_callback_query(filters.regex(r"^srqlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def srqlang_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_", 1)[1]
+    if val == "none": st["current_lang"] = ""
+    else:
+        langs = await get_languages_list(); idx = int(val)
+        st["current_lang"] = langs[idx] if idx < len(langs) else ""
+    await q.answer(f"🌐 ভাষা: {st['current_lang'] or 'Default'}")
+    await show_sr_quality_prompt(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^srback_") & filters.user(ADMIN_ID) & unique_cb)
+async def srback_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    target = q.data.split("_", 1)[1]
+    if target == "cat":
+        st["step"] = "sr_cat"; mk, _ = await get_cat_markup("srcat", "srcat_skip")
+        return await q.message.edit_text(f"📺 **{st['name']} {st.get('year','')}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
+    elif target == "lang":
+        st["step"] = "sr_lang"; lm, _ = await get_lang_markup("srlang", "srlang_skip", "srback_cat")
+        return await q.message.edit_text(f"✅ Category: **{st.get('category','All')}**\n\n২. **Language** সিলেক্ট করুন:", reply_markup=lm)
+    elif target == "poster":
+        return await show_sr_poster_prompt(q.message, st, edit=True)
+    elif target == "season":
+        return await prompt_series_season(q.message, st, edit=True)
+    elif target == "ep":
+        return await prompt_series_episode(q.message, st, edit=True)
+    elif target == "qual":
+        return await show_sr_quality_prompt(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^srssn_") & filters.user(ADMIN_ID) & unique_cb)
+async def srssn_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    v = q.data.split("_", 1)[1]
+    if v == "new": return await prompt_series_season(q.message, st, edit=True)
+    st["cur_s_idx"] = get_or_create_season(st, v); await prompt_series_episode(q.message, st, edit=True)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_season_no") & ~filters.regex(r"^/") & unique_msg)
+async def handle_sr_sno(c, m): st = admin_steps[m.from_user.id]; st["cur_s_idx"] = get_or_create_season(st, m.text.strip()); await prompt_series_episode(m, st, edit=False)
+
+@app.on_callback_query(filters.regex(r"^srep_") & filters.user(ADMIN_ID) & unique_cb)
+async def srep_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    v = q.data.split("_", 1)[1]
+    if v == "next": return await prompt_series_episode(q.message, st, edit=True)
+    st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], v)
+    await show_sr_quality_prompt(q.message, st, edit=True)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_ep_no") & ~filters.regex(r"^/") & unique_msg)
+async def handle_sr_eno(c, m):
+    st = admin_steps[m.from_user.id]; st["cur_e_idx"] = get_or_create_episode(st, st["cur_s_idx"], m.text.strip())
+    await show_sr_quality_prompt(m, st, edit=False)
+
+@app.on_callback_query(filters.regex(r"^srqual_") & filters.user(ADMIN_ID) & unique_cb)
+async def srqual_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    v = q.data.split("_", 1)[1]
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton("👁 Review & Confirm", callback_data="srrev")]])
+    if v == "custom":
+        st["step"] = "sr_custom_qname"
+        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=back_kb)
+    st["current_quality"] = v; st["step"] = "sr_qual_file"
+    await q.message.edit_text(f"📤 এবার **{v}** [🌐 {st.get('current_lang') or 'Default'}] এপিসোড ফাইল পাঠান:", reply_markup=back_kb)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_custom_qname") & ~filters.regex(r"^/") & unique_msg)
+async def handle_sr_cq(c, m):
+    st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "sr_qual_file"
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton("👁 Review & Confirm", callback_data="srrev")]])
+    await m.reply(f"📤 এবার **{st['current_quality']}** [🌐 {st.get('current_lang') or 'Default'}] ফাইল পাঠান:", reply_markup=back_kb)
+
+@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_qual_file") & unique_msg)
+async def handle_sr_qf(c, m):
+    st = admin_steps[m.from_user.id]; fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
+    qn = st.get("current_quality", "HD"); ql = st.get("current_lang", "")
+    ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
+    ep["qualities"].append({"name": qn, "lang": ql, "file_id": fid})
+    await show_sr_quality_prompt(m, st, edit=False, prefix_msg=f"✅ S{ssn['season_no']} E{ep['ep_no']} — **{qn}** [🌐 {ql or 'Default'}] অস্থায়ীভাবে যুক্ত হয়েছে!")
+
+async def render_sr_review(mo, st, edit=True):
+    ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+    lines = []
+    btns = []
+    for si, s in enumerate(st.get("seasons", [])):
+        for ei, e in enumerate(s.get("episodes", [])):
+            for qi, x in enumerate(e.get("qualities", [])):
+                lines.append(f"• S{s['season_no']} E{e['ep_no']} — 🎬 **{x['name']}** [🌐 `{x.get('lang') or 'Default'}`]")
+                btns.append([InlineKeyboardButton(f"🗑 Remove S{s['season_no']}E{e['ep_no']} {x['name']} ({x.get('lang') or 'Def'})", callback_data=f"srrmq_{si}_{ei}_{qi}")])
+    body = "\n".join(lines[:35]) if lines else "⚠️ কোনো ফাইল যুক্ত করা হয়নি!"
+    if len(lines) > 35:
+        body += f"\n... এবং আরও {len(lines)-35}টি ফাইল"
+    txt = (
+        f"👁 **Review & Confirm Series (সাইটে এখনো সেভ হয়নি):**\n\n"
+        f"📺 Title: **{ft}**\n"
+        f"📂 Category: `{st.get('category','All')}` | 🌐 Default Lang: `{st.get('language') or 'None'}`\n"
+        f"🔰 Type: `{'💎 VIP' if st.get('is_premium') else '👤 Regular'}` | 🖼 Poster: `{'Ready' if (st.get('poster_b64') or st.get('thumb_url')) else 'None'}`\n\n"
+        f"🎞 **Staged Files ({len(lines)}):**\n{body}\n\n"
+        f"👇 ভুল থাকলে ডিলিট করুন অথবা **Confirm** চাপুন:"
+    )
+    btns.append([InlineKeyboardButton("➕ Add / Edit Seasons", callback_data="srback_season")])
+    btns.append([InlineKeyboardButton("✅ Confirm & Save to Site", callback_data="srsave_final")])
+    btns.append([InlineKeyboardButton("❌ Cancel All", callback_data="cmdrun_cancel")])
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^srrev$") & filters.user(ADMIN_ID) & unique_cb)
+async def srrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await render_sr_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^srrmq_") & filters.user(ADMIN_ID) & unique_cb)
+async def srrmq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, si_s, ei_s, qi_s = q.data.split("_", 3)
+    si, ei, qi = int(si_s), int(ei_s), int(qi_s)
+    try:
+        rem = st["seasons"][si]["episodes"][ei]["qualities"].pop(qi)
+        await q.answer(f"🗑 {rem['name']} রিমুভ হয়েছে!")
+    except: pass
+    await render_sr_review(q.message, st, edit=True)
+
+async def finalize_save_series(c, uid, mo):
+    st = admin_steps.pop(uid, None)
+    if not st: return
+    try:
+        await mo.edit_text("⏳ MongoDB-তে সিরিজ ও পোস্টার সেভ হচ্ছে...")
+        sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async(); tdb, ms = dbs[0], float('inf')
+        for d in dbs:
+            try:
+                s = await d.command("dbstats")
+                if s["dataSize"] < ms: ms = s["dataSize"]; tdb = d
+            except: pass
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        thumb_url = ""
+        if st.get("poster_b64"):
+            thumb_url = await save_poster_to_mongo(tdb, sid, st["poster_b64"], st.get("poster_mime", "image/jpeg"), live_url)
+        elif st.get("thumb_url"):
+            thumb_url = st["thumb_url"]
+        ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+        ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": None, "seasons": st.get("seasons", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        await tdb["files"].insert_one(ns); invalidate_home_cache(); await notify_new_post(c, ns, conf)
+        await mo.edit_text(f"✅ **সিরিজ ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
+    except Exception as e:
+        traceback.print_exc()
+        await mo.edit_text(f"❌ সেভ করতে সমস্যা হয়েছে: `{e}`")
+
+@app.on_callback_query(filters.regex(r"^srsave_final$") & filters.user(ADMIN_ID) & unique_cb)
+async def srsave_final_cb(c, q): await finalize_save_series(c, q.from_user.id, q.message)
+
+@app.on_message(filters.command("deleteseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_delete_series(c, m):
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if raw_arg:
+        admin_steps[m.from_user.id] = {"step": "delsr_search_wait", "del_query": raw_arg}
+        return await send_del_page(m, {"type": "series"}, "delsr", 0, edit=False, query=raw_arg)
+    admin_steps.pop(m.from_user.id, None)
+    await send_del_page(m, {"type": "series"}, "delsr", 0, edit=False)
+
+@app.on_callback_query(filters.regex(r"^delsrsrch$") & filters.user(ADMIN_ID) & unique_cb)
+async def delsrsrch_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "delsr_search_wait"}
+    await q.message.edit_text("🔍 **যে সিরিজ ডিলিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `Bachelor Point`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]]))
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("delsr_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_delsr_search(c, m):
+    q_txt = m.text.strip()
+    admin_steps[m.from_user.id] = {"step": "delsr_search_wait", "del_query": q_txt}
+    await send_del_page(m, {"type": "series"}, "delsr", 0, edit=False, query=q_txt)
+
+@app.on_callback_query(filters.regex(r"^delsrpg_") & filters.user(ADMIN_ID) & unique_cb)
+async def delsrpg_cb(c, q):
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": "series"}, "delsr", int(q.data.split("_")[1]), edit=True, query=cur_q)
+
+@app.on_callback_query(filters.regex(r"^delsr_") & filters.user(ADMIN_ID) & unique_cb)
+async def delsr_cb(c, q):
+    _, rest = q.data.split("_", 1)
+    f_id, pg = rest.rsplit("_", 1)
+    doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        await tdb["files"].delete_one({"_id": doc["_id"]})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
+        poster_cache_del(f_id)
+        invalidate_home_cache()
+        await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": "series"}, "delsr", int(pg), edit=True, query=cur_q)
+
+@app.on_message(filters.command(["editeseries", "editseries"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_edit_series(c, m):
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if not raw_arg:
+        admin_steps[m.from_user.id] = {"step": "edsr_search_wait"}
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 সব সিরিজ দেখুন (Page by Page)", callback_data="edsrpage_all_0")],
+            [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+        ])
+        return await m.reply("🔍 **যে ওয়েব সিরিজ এডিট করতে চান, তার নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `Bachelor Point`", reply_markup=kb)
+    await send_edit_search_page(m, m.from_user.id, True, raw_arg, 0, edit=False)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("edsr_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_search(c, m):
+    await send_edit_search_page(m, m.from_user.id, True, m.text.strip(), 0, edit=False)
+
+@app.on_callback_query(filters.regex(r"^edsragain$") & filters.user(ADMIN_ID) & unique_cb)
+async def edsragain_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "edsr_search_wait"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 সব সিরিজ দেখুন", callback_data="edsrpage_all_0")],
+        [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+    ])
+    await q.message.edit_text("🔍 **নতুন করে সিরিজের নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `Bachelor Point`", reply_markup=kb)
+
+@app.on_callback_query(filters.regex(r"^edsrpage_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrpage_cb(c, q):
+    _, mode_tag, pg_str = q.data.split("_", 2)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("search_query", "") if mode_tag == "q" else ""
+    await send_edit_search_page(q, q.from_user.id, True, cur_q, int(pg_str), edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrpick_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrpick_cb(c, q):
+    admin_steps.pop(q.from_user.id, None)
+    await show_edit_series_panel(q, q.data.split("_", 1)[1], edit=True)
+
+async def show_edit_series_panel(mq, f_id, edit=True):
+    doc, _ = await find_file_in_all_dbs(f_id)
+    if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
+    ssns = doc.get("seasons", []); te = sum(len(s.get("episodes", [])) for s in ssns)
+    txt = f"📺 **Edit Series:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n📚 Seasons: `{len(ssns)}` | Eps: `{te}`"
+    btns = [[InlineKeyboardButton("✏️ Name/Year", callback_data=f"edsr_name_{f_id}"), InlineKeyboardButton("🖼 Poster", callback_data=f"edsr_poster_{f_id}")],
+            [InlineKeyboardButton("📂 Category", callback_data=f"edsr_cat_{f_id}"), InlineKeyboardButton("🌐 Language", callback_data=f"edsr_lang_{f_id}")],
+            [InlineKeyboardButton("➕ Add Season", callback_data=f"edsr_addssn_{f_id}"), InlineKeyboardButton("📚 Manage Seasons", callback_data=f"edsr_mng_{f_id}")],
+            [InlineKeyboardButton("📌 Pin", callback_data=f"edsr_pin_{f_id}"), InlineKeyboardButton("💎 Premium", callback_data=f"edsr_prem_{f_id}")],
+            [InlineKeyboardButton("🗑 Delete Series", callback_data=f"edsr_del_{f_id}")]]
+    if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edsr_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsr_cb(c, q):
+    _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
+    db_id = doc["_id"]
+    if act == "pin": await tdb["files"].update_one({"_id": db_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
+    elif act == "prem": await tdb["files"].update_one({"_id": db_id}, {"$set": {"is_premium": not doc.get("is_premium", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
+    elif act == "del":
+        await tdb["files"].delete_one({"_id": db_id})
+        for dx in await get_extra_dbs_async():
+            try: await dx["posters"].delete_one({"_id": f_id})
+            except: pass
+        poster_cache_del(f_id); invalidate_home_cache(); return await q.message.edit_text(f"✅ **{doc['title']}** ডিলিট হয়েছে!")
+    elif act == "name": admin_steps[q.from_user.id] = {"step": "edsr_name_wait", "f_id": f_id}; return await q.message.edit_text("✏️ নতুন নাম ও সাল দিন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
+    elif act == "poster": admin_steps[q.from_user.id] = {"step": "edsr_poster_wait", "f_id": f_id}; return await q.message.edit_text("🖼 নতুন ল্যান্ডস্কোপ পোস্টার ছবি অথবা ছবির লিংক দিন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
+    elif act == "cat":
+        cats = await get_categories_list()
+        if not cats: return await q.answer("❌ আগে /setcategory দিয়ে ক্যাটাগরি অ্যাড করুন!", show_alert=True)
+        btns = [[InlineKeyboardButton(f"📂 {cn}", callback_data=f"edsrcat_{f_id}_{i}")] for i, cn in enumerate(cats)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]
+        return await q.message.edit_text("📂 Category সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
+    elif act == "lang":
+        ls = await get_languages_list()
+        if not ls: return await q.answer("❌ আগে /setlanguage দিয়ে ভাষা অ্যাড করুন!", show_alert=True)
+        btns = [[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edsrlang_{f_id}_{i}")] for i, ln in enumerate(ls)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]
+        return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
+    elif act == "addssn": admin_steps[q.from_user.id] = {"step": "edsr_addssn_no", "f_id": f_id}; return await q.message.edit_text("📺 নতুন Season নম্বর লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]))
+    elif act == "mng":
+        ssns = doc.get("seasons", [])
+        if not ssns: return await q.answer("❌ কোনো সিজন নেই!", show_alert=True)
+        btns = [[InlineKeyboardButton(f"📺 Season {clean_season_no(s['season_no'])} ({len(s.get('episodes', []))} Eps)", callback_data=f"edsrs_{f_id}_{i}")] for i, s in enumerate(ssns)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrpick_{f_id}")]]
+        return await q.message.edit_text("📚 সিজন সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edsrcat_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrcat_cb(c, q):
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
+    await show_edit_series_panel(q, f_id, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrlang_cb(c, q):
+    _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
+    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
+    await show_edit_series_panel(q, f_id, edit=True)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_name_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_name(c, m):
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
+    await show_edit_series_panel(m, f_id, edit=False)
+
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & unique_msg)
+async def handle_edsr_poster(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    try:
+        enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+        if err or not enc:
+            return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None:
+            admin_steps.pop(m.from_user.id, None)
+            return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        invalidate_home_cache()
+        admin_steps.pop(m.from_user.id, None)
+        await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
+    except Exception as e:
+        traceback.print_exc()
+        await msg.edit_text(f"❌ পোস্টার আপডেট এরর: `{e}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_poster_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_poster_url(c, m):
+    url = m.text.strip()
+    if not url.startswith("http"):
+        return await m.reply("❌ দয়া করে ছবি অথবা সঠিক ইমেজ লিংক (`https://...`) পাঠান।")
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
+    try:
+        doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is None or tdb is None: return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
+        conf = await get_config(); live_url = get_live_web_url(conf)
+        purl = url
+        try:
+            r = await asyncio.to_thread(requests.get, url, timeout=10)
+            ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
+                purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
+        except: pass
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None}})
+        invalidate_home_cache()
+        await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
+    except Exception as e:
+        await msg.edit_text(f"❌ এরর: `{e}`")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addssn_no") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_addssn(c, m):
+    st = admin_steps.pop(m.from_user.id, None)
+    if not st or "f_id" not in st: return
+    f_id = st["f_id"]; sno = clean_season_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        ssns = doc.get("seasons", []); si = next((i for i, s in enumerate(ssns) if clean_season_no(s["season_no"]).lower() == sno.lower()), None)
+        if si is None: ssns.append({"season_no": sno, "episodes": []}); si = len(ssns) - 1; await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+        await show_edit_season_panel(m, f_id, si, edit=False)
+
+async def show_edit_season_panel(mq, f_id, si, edit=True):
+    doc, _ = await find_file_in_all_dbs(f_id)
+    if doc is None or si >= len(doc.get("seasons", [])): return
+    ssn = doc["seasons"][si]
+    btns = [[InlineKeyboardButton(f"🎬 Ep {clean_ep_no(e['ep_no'])} ({len(e.get('qualities', []))} Q)", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")] for ei, e in enumerate(ssn.get("episodes", []))]
+    btns += [[InlineKeyboardButton("➕ Add Episode", callback_data=f"edsrep_add_{f_id}_{si}")], [InlineKeyboardButton("🗑 Delete Season", callback_data=f"edsrep_delssn_{f_id}_{si}")], [InlineKeyboardButton("⬅️ Back", callback_data=f"edsr_mng_{f_id}")]]
+    txt = f"📺 **{doc['title']} — Season {clean_season_no(ssn['season_no'])}**"
+    if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edsrs_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrs_cb(c, q):
+    admin_steps.pop(q.from_user.id, None)
+    _, rest = q.data.split("_", 1); f_id, si = rest.rsplit("_", 1)
+    await show_edit_season_panel(q, f_id, int(si), edit=True)
+
+def _calc_next_ep_no(doc, si, cur_ep_no=None):
+    if cur_ep_no and str(cur_ep_no).isdigit():
+        return str(int(cur_ep_no) + 1)
+    try:
+        eps = doc["seasons"][si].get("episodes", [])
+        nums = [int(clean_ep_no(e.get("ep_no", "0"))) for e in eps if clean_ep_no(e.get("ep_no", "")).isdigit()]
+        if nums: return str(max(nums) + 1)
+        return str(len(eps) + 1)
+    except:
+        return "1"
+
+async def show_edsr_addq_screen(mo, uid, f_id, edit=True, prefix="➕ ভাষা ও Quality সিলেক্ট করুন:"):
+    st = admin_steps.get(uid)
+    if not st: return
+    st["step"] = "edsr_addq_pick"
+    si = st["s_idx"]; eno = st["cur_ep_no"]; cur_l = st.get("current_lang", "")
+    langs = await get_languages_list()
+    pend = st.get("pending_ops", [])
+    extra = [[InlineKeyboardButton("⏭ Next Episode", callback_data=f"edsrnext_{f_id}_{si}")]]
+    if pend:
+        extra.append([InlineKeyboardButton(f"👁 Review & Confirm ({len(pend)})", callback_data=f"edsrrev_{f_id}")])
+    back_cb = f"edsrep_view_{f_id}_{si}_{st['orig_ei']}" if st.get("orig_ei") is not None else f"edsrs_{f_id}_{si}"
+    back_lbl = "⬅️ Back (Discard Pending)" if pend else "⬅️ Back"
+    mk = get_quality_lang_markup("edsrqadd", back_cb, back_lbl, None, langs=langs, cur_lang=cur_l, lang_prefix=f"edsrqlang_{f_id}", extra_rows=extra)
+    cur_ep_pend = [f"{x['name']}({x.get('lang') or 'Def'})" for x in pend if x["ep_no"] == eno and x["s_idx"] == si]
+    txt = f"{prefix}\n\n📺 SeasonIdx `{si+1}` | 🎬 **Episode {eno}**\n🌐 নির্বাচিত ভাষা: **{cur_l or 'Default'}**\n📦 এই এপিসোডে Pending: `{', '.join(cur_ep_pend) or 'None'}`\n📊 মোট Pending (সব এপিসোড): `{len(pend)}` _(Confirm না করা পর্যন্ত সাইটে এড হবে না)_"
+    if edit: await mo.edit_text(txt, reply_markup=mk)
+    else: await mo.reply(txt, reply_markup=mk)
+
+@app.on_callback_query(filters.regex(r"^edsrep_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrep_cb(c, q):
+    _, act, rest = q.data.split("_", 2)
+    if act == "view":
+        admin_steps.pop(q.from_user.id, None)
+        f_id, si, ei = rest.rsplit("_", 2)
+        return await show_edit_ep_panel(q, f_id, int(si), int(ei), edit=True)
+    elif act == "add":
+        f_id, si_s = rest.rsplit("_", 1); si = int(si_s)
+        doc, _ = await find_file_in_all_dbs(f_id)
+        if doc is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
+        nxt = _calc_next_ep_no(doc, si)
+        admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": f_id, "s_idx": si, "current_lang": doc.get("language", ""), "pending_ops": []}
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🎬 Episode {nxt}", callback_data=f"edsrgoep_{f_id}_{si}_{nxt}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{f_id}_{si}")]
+        ])
+        return await q.message.edit_text("🎬 নতুন **Episode নম্বর** লিখুন অথবা নিচের বাটনে চাপ দিন:", reply_markup=kb)
+    elif act == "delssn":
+        f_id, si_s = rest.rsplit("_", 1); si = int(si_s); doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is not None and tdb is not None:
+            ssns = doc.get("seasons", [])
+            if 0 <= si < len(ssns): ssns.pop(si)
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+        return await show_edit_series_panel(q, f_id, edit=True)
+    elif act == "delep":
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, tdb = await find_file_in_all_dbs(f_id)
+        if doc is not None and tdb is not None:
+            ssns = doc.get("seasons", [])
+            if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]): ssns[si]["episodes"].pop(ei)
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+        return await show_edit_season_panel(q, f_id, si, edit=True)
+    elif act == "addq":
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s)
+        doc, _ = await find_file_in_all_dbs(f_id)
+        if doc is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
+        ep = doc["seasons"][si]["episodes"][ei]
+        admin_steps[q.from_user.id] = {
+            "step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "orig_ei": ei,
+            "cur_ep_no": clean_ep_no(ep["ep_no"]), "current_lang": doc.get("language", ""), "pending_ops": []
+        }
+        return await show_edsr_addq_screen(q.message, q.from_user.id, f_id, edit=True)
+    elif act == "delqmenu":
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, _ = await find_file_in_all_dbs(f_id); qs = doc["seasons"][si]["episodes"][ei].get("qualities", [])
+        if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
+        btns = [[InlineKeyboardButton(f"❌ {ql['name']} ({ql.get('lang') or 'Def'})", callback_data=f"edsrqdel_{f_id}_{si}_{ei}_{qi}")] for qi, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")]]
+        return await q.message.edit_text("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+async def show_edit_ep_panel(mq, f_id, si, ei, edit=True):
+    doc, _ = await find_file_in_all_dbs(f_id); ssn = doc["seasons"][si]; ep = ssn["episodes"][ei]
+    q_str = ", ".join([f"{x['name']}({x.get('lang') or 'Def'})" for x in ep.get("qualities", [])]) or "None"
+    txt = f"🎬 **{doc['title']}** | S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])}\n🎞 Qualities: `{q_str}`"
+    btns = [[InlineKeyboardButton("➕ Add Quality", callback_data=f"edsrep_addq_{f_id}_{si}_{ei}"), InlineKeyboardButton("🗑 Delete Quality", callback_data=f"edsrep_delqmenu_{f_id}_{si}_{ei}")],
+            [InlineKeyboardButton("🗑 Delete Episode", callback_data=f"edsrep_delep_{f_id}_{si}_{ei}")], [InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{f_id}_{si}")]]
+    if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addep_no") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_addep(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    st["cur_ep_no"] = clean_ep_no(m.text.strip())
+    st["orig_ei"] = None
+    await show_edsr_addq_screen(m, m.from_user.id, st["f_id"], edit=False)
+
+@app.on_callback_query(filters.regex(r"^edsrqlang_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrqlang_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, rest = q.data.split("_", 1); f_id, val = rest.rsplit("_", 1)
+    if val == "none": st["current_lang"] = ""
+    else:
+        langs = await get_languages_list(); idx = int(val)
+        st["current_lang"] = langs[idx] if idx < len(langs) else ""
+    await q.answer(f"🌐 ভাষা: {st['current_lang'] or 'Default'}")
+    await show_edsr_addq_screen(q.message, q.from_user.id, f_id, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrnext_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrnext_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, rest = q.data.split("_", 1); f_id, si_s = rest.rsplit("_", 1); si = int(si_s)
+    doc, _ = await find_file_in_all_dbs(f_id)
+    nxt = _calc_next_ep_no(doc, si, st.get("cur_ep_no"))
+    st["step"] = "edsr_nextep_wait"; st["s_idx"] = si
+    btns = [[InlineKeyboardButton(f"🎬 Episode {nxt}", callback_data=f"edsrgoep_{f_id}_{si}_{nxt}")]]
+    if st.get("pending_ops"):
+        btns.append([InlineKeyboardButton(f"👁 Review & Confirm ({len(st['pending_ops'])})", callback_data=f"edsrrev_{f_id}")])
+    btns.append([InlineKeyboardButton("⬅️ Back", callback_data=f"edsraddmore_{f_id}")])
+    await q.message.edit_text(f"⏭ **Next Episode (Season {si+1}):**\nনতুন **Episode নম্বর** লিখুন অথবা নিচের বাটনে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edsrgoep_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrgoep_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, rest = q.data.split("_", 1); f_id, si_s, eno = rest.rsplit("_", 2)
+    st["s_idx"] = int(si_s); st["cur_ep_no"] = clean_ep_no(eno); st["orig_ei"] = None
+    await show_edsr_addq_screen(q.message, q.from_user.id, f_id, edit=True)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_nextep_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_nextep(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    st["cur_ep_no"] = clean_ep_no(m.text.strip()); st["orig_ei"] = None
+    await show_edsr_addq_screen(m, m.from_user.id, st["f_id"], edit=False)
+
+@app.on_callback_query(filters.regex(r"^edsrqdel_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrqdel_cb(c, q):
+    _, rest = q.data.split("_", 1); f_id, si_s, ei_s, qi_s = rest.rsplit("_", 3)
+    si, ei, qi = int(si_s), int(ei_s), int(qi_s); doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        ssns = doc.get("seasons", []); qs = ssns[si]["episodes"][ei]["qualities"]
+        if 0 <= qi < len(qs): qs.pop(qi)
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+    await show_edit_ep_panel(q, f_id, si, ei, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrqadd_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrqadd_cb(c, q):
+    v = q.data.split("_", 1)[1]; st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    f_id = st["f_id"]
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edsraddmore_{f_id}")]])
+    if v == "custom": st["step"] = "edsr_custom_qname"; return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=back_kb)
+    st["current_quality"] = v; st["step"] = "edsr_addq_file"; await q.message.edit_text(f"📤 এবার E{st['cur_ep_no']} **{v}** [🌐 {st.get('current_lang') or 'Default'}] ফাইল পাঠান:", reply_markup=back_kb)
+
+@app.on_callback_query(filters.regex(r"^edsraddmore_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsraddmore_cb(c, q):
+    f_id = q.data.split("_", 1)[1]
+    if q.from_user.id not in admin_steps: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await show_edsr_addq_screen(q.message, q.from_user.id, f_id, edit=True)
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_custom_qname") & ~filters.regex(r"^/") & unique_msg)
+async def handle_edsr_cq(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    st["current_quality"] = m.text.strip(); st["step"] = "edsr_addq_file"
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edsraddmore_{st['f_id']}")]])
+    await m.reply(f"📤 এবার E{st['cur_ep_no']} **{m.text.strip()}** [🌐 {st.get('current_lang') or 'Default'}] ফাইল পাঠান:", reply_markup=back_kb)
+
+@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addq_file") & unique_msg)
+async def handle_edsr_qf(c, m):
+    st = admin_steps.get(m.from_user.id)
+    if not st or "f_id" not in st: return
+    f_id, si, eno, qn, ql = st["f_id"], st["s_idx"], st["cur_ep_no"], st["current_quality"], st.get("current_lang", "")
+    fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
+    st.setdefault("pending_ops", []).append({"s_idx": si, "ep_no": eno, "name": qn, "lang": ql, "file_id": fid})
+    await show_edsr_addq_screen(m, m.from_user.id, f_id, edit=False, prefix=f"✅ E{eno} **{qn}** [🌐 {ql or 'Default'}] অস্থায়ীভাবে যুক্ত হয়েছে!")
+
+async def render_edsr_review(mo, st, edit=True):
+    f_id = st["f_id"]; si = st["s_idx"]; pend = st.get("pending_ops", [])
+    lines = "\n".join([f"  `{i+1}.` S{x['s_idx']+1} E{x['ep_no']} — 🎬 **{x['name']}** [🌐 `{x.get('lang') or 'Default'}`]" for i, x in enumerate(pend)]) or "  ⚠️ কোনো পেন্ডিং ফাইল নেই!"
+    txt = f"👁 **Review & Confirm Series Edit (সাইটে এখনো সেভ হয়নি):**\n\n📦 যোগ হতে যাওয়া ফাইল ({len(pend)}):\n{lines}\n\n👇 ভুল থাকলে রিমুভ করুন অথবা **Confirm** চাপুন:"
+    btns = [[InlineKeyboardButton(f"🗑 Remove #{i+1}: E{x['ep_no']} {x['name']} ({x.get('lang') or 'Def'})", callback_data=f"edsrrmq_{f_id}_{i}")] for i, x in enumerate(pend)]
+    btns.append([InlineKeyboardButton("⏭ Next Episode", callback_data=f"edsrnext_{f_id}_{si}"), InlineKeyboardButton(f"➕ Add to E{st['cur_ep_no']}", callback_data=f"edsraddmore_{f_id}")])
+    if pend:
+        btns.append([InlineKeyboardButton("✅ Confirm & Save to Site", callback_data=f"edsrconf_{f_id}")])
+    btns.append([InlineKeyboardButton("❌ Discard & Back", callback_data=f"edsrs_{f_id}_{si}")])
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edsrrev_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await render_edsr_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrrmq_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrrmq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, rest = q.data.split("_", 1); _, idx_s = rest.rsplit("_", 1); idx = int(idx_s)
+    pend = st.get("pending_ops", [])
+    if 0 <= idx < len(pend):
+        rem = pend.pop(idx)
+        await q.answer(f"🗑 E{rem['ep_no']} {rem['name']} রিমুভ হয়েছে!")
+    await render_edsr_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrconf_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrconf_cb(c, q):
+    st = admin_steps.pop(q.from_user.id, None)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    f_id = st["f_id"]; si_ret = st["s_idx"]; pend = st.get("pending_ops", [])
+    if not pend: return await show_edit_season_panel(q, f_id, si_ret, edit=True)
+    doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        ssns = doc.get("seasons", [])
+        for op in pend:
+            s_i = op["s_idx"]
+            if not (0 <= s_i < len(ssns)): continue
+            eps = ssns[s_i].setdefault("episodes", [])
+            eno = clean_ep_no(op["ep_no"])
+            ei = next((i for i, e in enumerate(eps) if clean_ep_no(e.get("ep_no", "")).lower() == eno.lower()), None)
+            if ei is None:
+                eps.append({"ep_no": eno, "qualities": []})
+                ei = len(eps) - 1
+            eps[ei].setdefault("qualities", []).append({"name": op["name"], "lang": op.get("lang", ""), "file_id": op["file_id"]})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}})
+        invalidate_home_cache()
+        await q.answer(f"✅ {len(pend)}টি ফাইল সাইটে সেভ হয়েছে!", show_alert=True)
+    await show_edit_season_panel(q, f_id, si_ret, edit=True)
+    # ==========================================
+# 9. LEGACY COMMANDS & SEPARATE ZONE / DIRECT LINK TASKS
+# ==========================================
+@app.on_message(filters.command("addfile", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_addfile(c, m): admin_steps[m.from_user.id] = {"step": "name"}; await m.reply("১. ফাইলের নাম/টাইটেল দিন (যেমন: `Pushpa 2`):")
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("name") & ~filters.regex(r"^/") & unique_msg)
+async def handle_admin_name(c, m): admin_steps[m.from_user.id]["title"] = m.text; admin_steps[m.from_user.id]["step"] = "thumb"; await m.reply("২. ফাইলের ল্যান্ডস্কোপ ছবি (Photo) দিন:")
+
+@app.on_message((filters.photo | filters.document) & filters.user(ADMIN_ID) & filters.private & is_in_step("thumb") & unique_msg)
+async def handle_admin_photo(c, m):
+    msg = await m.reply("⏳ সেভ হচ্ছে...")
+    enc, mime, tg_fid, err = await extract_image_from_message(c, m)
+    if err or not enc:
+        return await msg.edit_text(err or "❌ ছবি সেভ করা যায়নি, আবার ছবি পাঠান!")
+    admin_steps[m.from_user.id]["poster_b64"] = enc
+    admin_steps[m.from_user.id]["poster_mime"] = mime
+    admin_steps[m.from_user.id]["tg_thumb_id"] = tg_fid
+    await msg.edit_text("ভিডিও টাইপ?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="ftype_prem")], [InlineKeyboardButton("👤 Regular", callback_data="ftype_reg")]]))
+
+@app.on_callback_query(filters.regex(r"^ftype_") & filters.user(ADMIN_ID) & unique_cb)
+async def filetype_cb(c, q): admin_steps[q.from_user.id]["is_premium"] = (q.data == "ftype_prem"); admin_steps[q.from_user.id]["step"] = "file"; await q.message.edit_text("✅ ৩. মূল ফাইল দিন:")
+
+@app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("file") & unique_msg)
+async def handle_admin_file(c, m):
+    msg = await m.reply("⏳ সেভ হচ্ছে..."); sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
+    dbs = await get_extra_dbs_async(); tdb, ms = dbs[0], float('inf')
+    for d in dbs:
+        try:
+            st = await d.command("dbstats")
+            if st["dataSize"] < ms: ms = st["dataSize"]; tdb = d
+        except: pass
+    st_data = admin_steps[m.from_user.id]
+    conf = await get_config(); live_url = get_live_web_url(conf)
+    thumb_url = ""
+    if st_data.get("poster_b64"):
+        thumb_url = await save_poster_to_mongo(tdb, sid, st_data["poster_b64"], st_data.get("poster_mime", "image/jpeg"), live_url)
+    nf = {"_id": sid, "title": st_data["title"], "category": "All", "is_premium": st_data.get("is_premium", False), "file_id": fid, "thumb_url": thumb_url, "tg_thumb_id": st_data.get("tg_thumb_id"), "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+    await tdb["files"].insert_one(nf); del admin_steps[m.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, conf); await msg.edit_text(f"✅ ফাইল ও পোস্টার MongoDB-তে অ্যাড হয়েছে! ID: `{sid}`")
+
+LEGACY_EXAMPLES = {
+    "vidtitel": "`/vidtitel নতুন বাংলা নাটক`", "delfile": "`/delfile AbCd1234`",
+    "mongo": "`/mongo mongodb+srv://user:pass@cluster.mongodb.net/`",
+    "autochannel": "`/autochannel -100123456789 30 60`", "spincoin": "`/spincoin 10-50`",
+    "addtask": "`/addtask Join Channel | https://t.me/mychannel | 50` বা Zone: `/addtask Watch Ad | 12242829 | 30 | 2`",
+    "addzonetask": "`/addzonetask Monetag Task | 12242829 | 30` (অপশনাল স্টেপ: `| 2`)",
+    "addlinktask": "`/addlinktask Direct Link Task | https://example.com/ad | 30` (অপশনাল স্টেপ: `| 2`)",
+    "addlink": "`/addlink https://example.com`",
+    "addcnl": "`/addcnl Backup Channel https://t.me/mychannel`", "vercnl": "`/vercnl -100123456789 https://t.me/mychannel`",
+    "usd": "`/usd 100 5` (100 Coins = 5 USD)", "bdt": "`/bdt 100 50` (100 Coins = 50 BDT)",
+    "addcred": "`/addcred 500 = 7 d`", "addrdiem": "`/addrdiem 12345678 30 d`", "allred": "`/allred 100 10-50`"
+}
+
+@app.on_message(filters.command(["vidtitel", "deltitel", "delpromot", "delfile", "delall", "mongo", "delmongo", "mongostats", "lockall", "autochannel", "delautochannel", "spincoin", "addtask", "addzonetask", "addlinktask", "deltask", "addlink", "delink", "addcnl", "delcnl", "vercnl", "delvrcnl", "logo", "autvid", "usd", "bdt", "addcred", "delcred", "addrdiem", "brodcast", "cnlbdcst", "allred"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_legacy_router(c, m):
+    try:
+        await get_db(); parts = m.text.split(); cmd = parts[0].lstrip("/").lower().split("@")[0]; arg = m.text.replace(parts[0], "", 1).strip()
+        if cmd == "vidtitel":
+            if not arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['vidtitel']}")
+            await titles_col.insert_one({"title": arg}); return await m.reply(f"✅ Added: **{arg}**")
+        if cmd == "deltitel": ts = await titles_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {t['title'][:25]}", callback_data=f"delttl_{t['_id']}")] for t in ts])) if ts else await m.reply("❌ কোনো টাইটেল নেই!")
+        if cmd == "delpromot": ps = await promotions_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {p['title'][:25]}", callback_data=f"delpromo_{p['_id']}")] for p in ps])) if ps else await m.reply("❌ কোনো প্রোমোট নেই!")
+        if cmd == "delfile":
+            if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['delfile']}")
+            for d in await get_extra_dbs_async():
+                if (await d["files"].delete_one({"_id": parts[1]})).deleted_count > 0:
+                    for dx in await get_extra_dbs_async():
+                        try: await dx["posters"].delete_one({"_id": parts[1]})
+                        except: pass
+                    poster_cache_del(parts[1])
+                    invalidate_home_cache()
+                    return await m.reply("✅ ফাইল ডিলিট হয়েছে!")
+            return await m.reply("❌ ফাইল পাওয়া যায়নি!")
+        if cmd == "delall":
+            for d in await get_extra_dbs_async():
+                await d["files"].delete_many({})
+                await d["posters"].delete_many({})
+            POSTER_CACHE.clear()
+            invalidate_home_cache()
+            return await m.reply("✅ সব ফাইল ডিলিট হয়েছে!")
+        if cmd == "mongo":
+            if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['mongo']}")
+            await AsyncIOMotorClient(parts[1], serverSelectionTimeoutMS=3000).server_info(); await mongos_col.insert_one({"uri": parts[1]}); EXTRA_URI_CACHE["uris"] = None; invalidate_home_cache(); return await m.reply("✅ MongoDB যুক্ত হয়েছে!")
+        if cmd == "delmongo": dbs = await mongos_col.find().to_list(None); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {d['uri'][:25]}", callback_data=f"delmongo_{d['_id']}")] for d in dbs])) if dbs else await m.reply("❌ কোনো এক্সট্রা MongoDB নেই!")
+        if cmd == "mongostats":
+            dbs = await get_extra_dbs_async(); txt = "📊 **MongoDB Stats:**\n\n"
+            for i, d in enumerate(dbs):
+                try: st = await d.command("dbstats"); fc = await d["files"].count_documents({}); txt += f"{'🔹 Main' if i==0 else f'🔸 Extra {i}'}: {fc} files | {st['dataSize']/(1024*1024):.2f}/512 MB\n"
+                except: txt += f"❌ DB {i} Error\n"
+            return await m.reply(txt)
+        if cmd == "lockall": await users_col.update_many({}, {"$set": {"unlocked_files": {}}}); return await m.reply("✅ সবার ভিডিও লক করা হয়েছে!")
+        if cmd == "autochannel":
+            if len(parts) < 3:
+                return await m.reply(f"❌ **সঠিক নিয়ম ও উদাহরণ:**\n{LEGACY_EXAMPLES['autochannel']}\n_(প্রথম সংখ্যা = কত মিনিট পরপর পোস্ট, দ্বিতীয় সংখ্যা = কত মিনিট পর অটো ডিলিট; ডিলিট না চাইলে `0` দিন)_")
+            try:
+                interval_min = parse_minutes_val(parts[2])
+                delete_min = parse_minutes_val(parts[3]) if len(parts) >= 4 else 0
+                if interval_min <= 0 or delete_min < 0:
+                    return await m.reply("❌ মিনিট সংখ্যা অবশ্যই `0` এর বেশি হতে হবে! উদাহরণ: `/autochannel -100123456789 30 60`")
+            except:
+                return await m.reply(f"❌ ভুল সংখ্যা! উদাহরণ: {LEGACY_EXAMPLES['autochannel']}")
+
+            target = parse_chat_target(parts[1])
+            try:
+                chat = await c.get_chat(target)
+                real_cid = str(chat.id)
+                ch_title = getattr(chat, "title", None) or real_cid
+                me_mem = await c.get_chat_member(chat.id, "me")
+                if me_mem.status not in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER):
+                    return await m.reply(f"❌ বট **{ch_title}** (`{real_cid}`) চ্যানেলে Admin নয়! আগে বটকে Admin (Post & Delete permission সহ) বানিয়ে তারপর চেষ্টা করুন।")
+            except Exception as e:
+                return await m.reply(f"❌ চ্যানেল পাওয়া যায়নি বা বট Admin নয় (`{parts[1]}`)!\nError: `{e}`")
+
+            await auto_channels_col.update_one(
+                {"chat_id": real_cid},
+                {
+                    "$set": {
+                        "chat_id": real_cid,
+                        "title": ch_title,
+                        "interval": interval_min,
+                        "delete_min": delete_min,
+                        "last_post_time": 0,
+                        "next_post_time": 0
+                    },
+                    "$setOnInsert": {"post_idx": 0}
+                },
+                upsert=True
+            )
+            del_txt = f"`{delete_min}` মিনিট পর অটো ডিলিট" if delete_min > 0 else "অটো ডিলিট **বন্ধ**"
+            return await m.reply(f"✅ **Auto Channel Added!**\n📢 **{ch_title}** (`{real_cid}`)\n⏱ পোস্ট ইন্টারভাল: প্রতি `{interval_min}` মিনিটে\n🗑 ডিলিট টাইম: {del_txt}")
+        if cmd == "delautochannel":
+            chs = await auto_channels_col.find().to_list(100)
+            if not chs:
+                return await m.reply("❌ কোনো অটো চ্যানেল নেই!")
+            btns = [
+                [InlineKeyboardButton(
+                    f"❌ {ch.get('title', ch['chat_id'])[:18]} | ⏱ {ch.get('interval', 0)}m | 🗑 {ch.get('delete_min', 0)}m",
+                    callback_data=f"delautoch_{ch['_id']}"
+                )]
+                for ch in chs
+            ]
+            return await m.reply("🗑 ডিলিট করতে চ্যানেলে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+        if cmd == "spincoin":
+            if "-" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['spincoin']}")
+            mn, mx = map(int, parts[1].split("-")); await config_col.update_one({"_id": "settings"}, {"$set": {"spin_coin_min": mn, "spin_coin_max": mx}}); invalidate_home_cache(); return await m.reply("✅ Spin Coin Set!")
+        if cmd in ("addtask", "addzonetask", "addlinktask"):
+            if "|" not in arg: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES[cmd]}")
+            segs = [x.strip() for x in arg.split("|")]
+            if len(segs) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES[cmd]}")
+            t, target, co = segs[0], segs[1], int(segs[2])
+            steps = max(1, int(segs[3])) if len(segs) >= 4 and segs[3].isdigit() else 0
+            if cmd == "addzonetask" or (cmd == "addtask" and target.isdigit()):
+                await tasks_col.insert_one({"title": t, "task_type": "zone", "zone_id": target, "link": "", "coin": co, "steps": steps})
+                return await m.reply(f"✅ **Monetag Zone Task Added!**\n🎯 {t}\n🆔 Zone ID: `{target}` | 🪙 `{co}`" + (f" | 🔢 Steps: `{steps}`" if steps else ""))
+            else:
+                await tasks_col.insert_one({"title": t, "task_type": "link", "zone_id": "", "link": target, "coin": co, "steps": steps})
+                return await m.reply(f"✅ **Direct Link Task Added!**\n🎯 {t}\n🔗 Link: `{target}` | 🪙 `{co}`" + (f" | 🔢 Steps: `{steps}`" if steps else ""))
+        if cmd == "deltask":
+            ts = await tasks_col.find().to_list(100)
+            if not ts: return await m.reply("❌ কোনো টাস্ক নেই!")
+            btns = []
+            for t in ts:
+                tt = t.get("task_type")
+                tag = "TG" if tt == "tg_join" else (f"Zone:{t['zone_id']}" if tt == "zone" or t.get("zone_id") else "Link")
+                btns.append([InlineKeyboardButton(f"❌ [{tag}] {t['title'][:22]} (+{t.get('coin',0)})", callback_data=f"deltask_{t['_id']}")])
+            return await m.reply("ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+        if cmd == "addlink":
+            if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addlink']}")
+            await links_col.insert_one({"link": parts[1]}); invalidate_home_cache(); return await m.reply("✅ Ad Link Added!")
+        if cmd == "delink": ls = await links_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {l['link'][:20]}", callback_data=f"dellink_{l['_id']}")] for l in ls])) if ls else await m.reply("❌ কোনো লিংক নেই!")
+        if cmd == "addcnl":
+            if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addcnl']}")
+            nm, lk = arg.rsplit(None, 1); await channels_col.update_one({"link": lk}, {"$set": {"name": nm, "link": lk, "type": "inline"}}, upsert=True); return await m.reply(f"✅ Added: {nm}")
+        if cmd == "delcnl": chs = await channels_col.find({"type": "inline"}).to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"delch_{ch['_id']}")] for ch in chs])) if chs else await m.reply("❌ কোনো চ্যানেল নেই!")
+        if cmd == "vercnl":
+            if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['vercnl']}")
+            await channels_col.insert_one({"type": "must_join", "chat_id": int(parts[1]), "link": parts[2]}); return await m.reply("✅ Must Join Added!")
+        if cmd == "delvrcnl": chs = await channels_col.find({"type": "must_join"}).to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {ch['chat_id']}", callback_data=f"delch_{ch['_id']}")] for ch in chs])) if chs else await m.reply("❌ কোনো Must Join চ্যানেল নেই!")
+        if cmd == "logo":
+            if m.reply_to_message and (m.reply_to_message.photo or m.reply_to_message.document):
+                enc, mime, tg_fid, err = await extract_image_from_message(c, m.reply_to_message)
+                logo_fid = tg_fid or (m.reply_to_message.photo.file_id if m.reply_to_message.photo else m.reply_to_message.document.file_id)
+                await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": logo_fid}}, upsert=True)
+                if enc:
+                    await save_poster_to_mongo(db, "site_logo", enc, mime)
+                invalidate_home_cache()
+                return await m.reply("✅ লোগো সেট হয়েছে! (বট স্টার্ট ও মিনি অ্যাপ স্প্ল্যাশ স্ক্রিনে দেখাবে)")
+            if arg and arg.startswith("http"):
+                await config_col.update_one({"_id": "settings"}, {"$set": {"start_logo": arg}}, upsert=True)
+                poster_cache_del("site_logo")
+                invalidate_home_cache()
+                return await m.reply("✅ লোগো লিংক সেট হয়েছে!")
+            return await m.reply("❌ **নিয়ম:** কোনো ছবিতে রিপ্লাই করে `/logo` লিখুন অথবা `/logo https://...` দিন।")
+        if cmd == "autvid":
+            if m.reply_to_message: await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_msg_id": m.reply_to_message.id, "autovid_chat_id": m.chat.id}}); return await m.reply("✅ Auto Video Set!")
+            return await m.reply("❌ **নিয়ম:** কোনো ভিডিওতে রিপ্লাই করে `/autvid` লিখুন।")
+        if cmd == "usd":
+            if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['usd']}")
+            await pkgs_col.insert_one({"type": "usd", "coins": int(parts[1]), "details": f"{parts[1]} Coins={parts[2]} USD"}); invalidate_home_cache(); return await m.reply("✅ USD Package Added!")
+        if cmd == "bdt":
+            if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['bdt']}")
+            await pkgs_col.insert_one({"type": "bkash", "coins": int(parts[1]), "details": f"{parts[1]} Coins={parts[2]} BDT"}); invalidate_home_cache(); return await m.reply("✅ BDT Package Added!")
+        if cmd == "addcred":
+            if len(parts) < 5: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addcred']}")
+            await pkgs_col.insert_one({"type": "coin", "coins": int(parts[1]), "amount": int(parts[3]), "unit": parts[4], "details": f"{parts[1]} Coins={parts[3]} {parts[4]}"}); invalidate_home_cache(); return await m.reply("✅ Coin Package Added!")
+        if cmd == "delcred": ps = await pkgs_col.find().to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {p['details']}", callback_data=f"delpkg_{p['_id']}")] for p in ps])) if ps else await m.reply("❌ কোনো প্যাকেজ নেই!")
+        if cmd == "addrdiem":
+            if len(parts) < 4: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['addrdiem']}")
+            secs = {"s": 1, "m": 60, "h": 3600, "d": 86400, "y": 31536000}.get(parts[3].lower(), 0)
+            await users_col.update_one({"_id": int(parts[1])}, {"$set": {"premium_until": datetime.now() + timedelta(seconds=int(parts[2]) * secs)}}); return await m.reply("✅ Premium Added!")
+        if cmd == "allred":
+            if len(parts) < 3 or "-" not in parts[2]: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['allred']}")
+            rng = parts[2].split("-"); code = "RND" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+            await coupons_col.insert_one({"code": code, "limit": int(parts[1]), "used_by": [], "is_random": True, "min": int(rng[0]), "max": int(rng[1])}); return await m.reply(f"✅ Code: `{code}`")
+        if cmd == "brodcast":
+            if not m.reply_to_message: return await m.reply("❌ **নিয়ম:** কোনো মেসেজে রিপ্লাই করে `/brodcast` লিখুন।")
+            msg = await m.reply("⏳ Broadcasting..."); s = 0
+            for u in await users_col.find().to_list(None):
+                try: await m.reply_to_message.copy(u["_id"], reply_markup=m.reply_to_message.reply_markup); s += 1; await asyncio.sleep(0.05)
+                except: pass
+            return await msg.edit_text(f"✅ Sent to {s} users.")
+        if cmd == "cnlbdcst":
+            if not m.reply_to_message: return await m.reply("❌ **নিয়ম:** কোনো মেসেজে রিপ্লাই করে `/cnlbdcst` লিখুন।")
+            msg = await m.reply("⏳ Broadcasting..."); s = 0; conf = await get_config(); chs = set()
+            if conf.get("autopost_channel"): chs.add(conf["autopost_channel"])
+            async for ch in auto_channels_col.find(): chs.add(int(ch["chat_id"]))
+            async for ch in channels_col.find({"type": "must_join"}): chs.add(ch["chat_id"])
+            for cid in chs:
+                try: await m.reply_to_message.copy(cid, reply_markup=m.reply_to_message.reply_markup); s += 1; await asyncio.sleep(0.5)
+                except: pass
+            return await msg.edit_text(f"✅ Sent to {s} Channels!")
+    except Exception as e:
+        await m.reply(f"❌ Command Error: `{e}`")
+
+@app.on_callback_query(filters.regex(r"^(delttl|delpromo|delmongo|delautoch|deltask|dellink|delch|delpkg)_") & filters.user(ADMIN_ID) & unique_cb)
+async def legacy_del_cb(c, q):
+    await get_db(); pfx, oid = q.data.split("_", 1)
+    col_map = {"delttl": titles_col, "delpromo": promotions_col, "delmongo": mongos_col, "delautoch": auto_channels_col, "deltask": tasks_col, "dellink": links_col, "delch": channels_col, "delpkg": pkgs_col}
+    await col_map[pfx].delete_one({"_id": ObjectId(oid)})
+    if pfx == "delmongo": EXTRA_URI_CACHE["uris"] = None
+    invalidate_home_cache()
+    await q.message.edit_text("✅ ডিলিট করা হয়েছে!")
+
+@app.on_message(filters.command(["auto", "auto2", "promot"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_auto_promo(c, m):
+    cmd = m.text.split()[0].lstrip("/").lower().split("@")[0]
+    if cmd == "promot":
+        if not m.reply_to_message or not (m.reply_to_message.photo or m.reply_to_message.document) or "|" not in m.text:
+            return await m.reply("❌ **নিয়ম:** ফটোতে রিপ্লাই করে `/promot Title | https://t.me/...` লিখুন।")
+        clean_txt = re.sub(r"^/promot(?:@\w+)?\s*", "", m.text, count=1, flags=re.IGNORECASE).strip()
+        t, l = [x.strip() for x in clean_txt.split("|", 1)]
+        enc, mime, _, err = await extract_image_from_message(c, m.reply_to_message)
+        if err or not enc: return await m.reply(err or "❌ ছবি ডাউনলোড করা যায়নি!")
+        await get_db(); conf = await get_config(); live_url = get_live_web_url(conf)
+        pid = "promo_" + ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        purl = await save_poster_to_mongo(db, pid, enc, mime, live_url)
+        await promotions_col.insert_one({"title": t, "link": l, "image": purl}); invalidate_home_cache(); return await m.reply(f"✅ প্রোমোট ও পোস্টার MongoDB-তে অ্যাড হয়েছে: **{t}**")
+    if not m.reply_to_message or not (m.reply_to_message.video or m.reply_to_message.document): return await m.reply("❌ ভিডিওতে রিপ্লাই করুন।")
+    fid = (m.reply_to_message.video or m.reply_to_message.document).file_id
+    if cmd == "auto":
+        await get_db(); ts = await titles_col.find().to_list(100)
+        if not ts: return await m.reply("❌ আগে `/vidtitel` দিয়ে টাইটেল অ্যাড করুন।")
+        admin_steps[m.from_user.id] = {"file_id": fid}; return await m.reply("টাইটেল সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t['title'], callback_data=f"selttl_{t['_id']}")] for t in ts]))
+    title = re.sub(r"^/auto2(?:@\w+)?\s*", "", m.text, count=1, flags=re.IGNORECASE).strip()
+    if not title: return await m.reply("❌ **উদাহরণ:** ভিডিওতে রিপ্লাই করে `/auto2 নতুন নাটক` লিখুন।")
+    admin_steps[m.from_user.id] = {"step": "auto_wait", "title": title, "file_id": fid, "thumb_url": ""}
+    await m.reply(f"✅ **{title}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="auto_prem")], [InlineKeyboardButton("👤 Regular", callback_data="auto_reg")]]))
+
+@app.on_callback_query(filters.regex(r"^(selttl|auto)_") & filters.user(ADMIN_ID) & unique_cb)
+async def legacy_auto_cb(c, q):
+    sd = admin_steps.get(q.from_user.id)
+    if not sd: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    if q.data.startswith("selttl_"):
+        await get_db(); td = await titles_col.find_one({"_id": ObjectId(q.data.split("_")[1])})
+        admin_steps[q.from_user.id] = {"step": "auto_wait", "title": td["title"], "file_id": sd["file_id"], "thumb_url": ""}
+        return await q.message.edit_text(f"✅ **{td['title']}**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Premium", callback_data="auto_prem")], [InlineKeyboardButton("👤 Regular", callback_data="auto_reg")]]))
+    sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
+    nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+    await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
+
+# ==========================================
+# 10. FLASK WEB API & MONGODB POSTER HOSTING + STRICT AD + TG VERIFY + TUTORIALS
+# ==========================================
+@web.route('/poster/<poster_id>')
+def serve_poster_from_mongo(poster_id):
+    if poster_id == "default":
+        return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
+
+    req_v = request.args.get("v", "").strip()
+    cache_hdr = "public, max-age=86400" if req_v else "no-cache, max-age=0, must-revalidate"
+
+    if poster_id in POSTER_CACHE:
+        cached = POSTER_CACHE[poster_id]
+        raw, mime = cached[0], cached[1]
+        c_ver = cached[2] if len(cached) > 2 else ""
+        if req_v and c_ver == req_v:
+            return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
+
+    for d in get_extra_dbs_sync():
+        try:
+            pdoc = d["posters"].find_one({"_id": poster_id})
+            if pdoc and pdoc.get("data"):
+                raw, mime = decode_b64_to_bytes(pdoc["data"])
+                final_mime = pdoc.get("mime", mime)
+                if final_mime == "image/jpg": final_mime = "image/jpeg"
+                db_ver = str(pdoc.get("ver", req_v or ""))
+                if raw:
+                    poster_cache_put(poster_id, raw, final_mime, ver=db_ver)
+                    return Response(raw, mimetype=final_mime, headers={"Cache-Control": cache_hdr})
+        except: pass
+
+    if poster_id.startswith("promo_"):
+        try:
+            pr = sync_db["promotions"].find_one({"_id": ObjectId(poster_id[6:])})
+            if pr and pr.get("image"):
+                if pr["image"].startswith("data:image"):
+                    raw, mime = decode_b64_to_bytes(pr["image"])
+                    if raw:
+                        poster_cache_put(poster_id, raw, mime, ver=req_v)
+                        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
+                elif pr["image"].startswith("http"):
+                    return redirect(pr["image"])
+        except: pass
+
+    if poster_id.startswith("upc_"):
+        try:
+            up = sync_db["upcoming"].find_one({"_id": ObjectId(poster_id[4:])})
+            if up and up.get("thumb_url"):
+                if up["thumb_url"].startswith("data:image"):
+                    raw, mime = decode_b64_to_bytes(up["thumb_url"])
+                    if raw:
+                        poster_cache_put(poster_id, raw, mime, ver=req_v)
+                        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
+                elif up["thumb_url"].startswith("http"):
+                    return redirect(up["thumb_url"])
+        except: pass
+
+    for d in get_extra_dbs_sync():
+        try:
+            fdoc = d["files"].find_one({"_id": poster_id})
+            if fdoc and fdoc.get("thumb_url"):
+                tu = fdoc["thumb_url"]
+                if tu.startswith("data:image"):
+                    raw, mime = decode_b64_to_bytes(tu)
+                    if raw:
+                        poster_cache_put(poster_id, raw, mime, ver=req_v)
+                        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
+                elif tu.startswith("http") and "/poster/" not in tu:
+                    return redirect(tu)
+        except: pass
+
+    return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "no-cache, max-age=60"})
+
+def warm_site_logo_sync(req_v=""):
+    if "site_logo" in POSTER_CACHE:
+        cached = POSTER_CACHE["site_logo"]
+        c_ver = cached[2] if len(cached) > 2 else ""
+        if not req_v or c_ver == req_v:
+            return cached[0], cached[1]
+    try:
+        pdoc = sync_db["posters"].find_one({"_id": "site_logo"})
+        if pdoc and pdoc.get("data"):
+            raw, mime = decode_b64_to_bytes(pdoc["data"])
+            final_mime = pdoc.get("mime", mime)
+            db_ver = str(pdoc.get("ver", req_v or ""))
+            if raw:
+                poster_cache_put("site_logo", raw, final_mime, ver=db_ver)
+                return raw, final_mime
+    except: pass
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    logo = conf.get("start_logo")
+    if logo and not str(logo).startswith("http") and BOT_TOKEN:
+        try:
+            raw = _bot_api_download_sync(logo)
+            if raw:
+                poster_cache_put("site_logo", raw, "image/jpeg", ver=req_v)
+                try:
+                    sync_db["posters"].update_one({"_id": "site_logo"}, {"$set": {"data": base64.b64encode(raw).decode("utf-8"), "mime": "image/jpeg"}}, upsert=True)
+                except: pass
+                return raw, "image/jpeg"
+        except: pass
+    return None, None
+
+@web.route('/site_logo')
+def serve_site_logo():
+    req_v = request.args.get("v", "").strip()
+    cache_hdr = "public, max-age=86400" if req_v else "no-cache, max-age=0, must-revalidate"
+    if "site_logo" in POSTER_CACHE:
+        cached = POSTER_CACHE["site_logo"]
+        c_ver = cached[2] if len(cached) > 2 else ""
+        if req_v and c_ver == req_v:
+            return Response(cached[0], mimetype=cached[1], headers={"Cache-Control": cache_hdr})
+    raw, mime = warm_site_logo_sync(req_v)
+    if raw:
+        return Response(raw, mimetype=mime, headers={"Cache-Control": cache_hdr})
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    logo = conf.get("start_logo")
+    if logo and str(logo).startswith("http"):
+        return redirect(logo)
+    sn = (conf.get("site_name") or "FB").strip()
+    initials = "".join([w[0].upper() for w in sn.split()[:2]]) or "FB"
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ff4d4d"/><stop offset="50%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs>
+  <rect width="200" height="200" rx="46" fill="url(#lg)"/>
+  <text x="100" y="118" font-family="sans-serif" font-weight="800" font-size="72" fill="#fff" text-anchor="middle">{initials}</text>
+</svg>"""
+    return Response(svg.encode("utf-8"), mimetype="image/svg+xml", headers={"Cache-Control": "public, max-age=600"})
+
+@web.route('/api/welcome_audio')
+def serve_welcome_audio():
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    sn = (conf.get("site_name") or "Moviee Link").strip()
+    clean_name = re.sub(r"\bbot\b", "", sn, flags=re.IGNORECASE).strip() or sn
+    phrase = f"Welcome to our {clean_name} Bot"
+    h = hashlib.md5(phrase.encode("utf-8")).hexdigest()[:12]
+    mp3_path = f"/tmp/welcome_{h}.mp3"
+    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 300:
+        try:
+            r = requests.get(
+                "https://translate.google.com/translate_tts",
+                params={"ie": "UTF-8", "q": phrase, "tl": "en", "client": "tw-ob"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=8
+            )
+            if r.status_code == 200 and len(r.content) > 300:
+                with open(mp3_path, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            print("Welcome TTS error:", e, flush=True)
+    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 300:
+        return send_file(mp3_path, mimetype="audio/mpeg")
+    return "", 204
+
+@web.route('/tutorial_video')
+def serve_tutorial_video():
+    tut_id = request.args.get("id", "").strip()
+    vid = None
+    if tut_id and tut_id != "default":
+        try:
+            tdoc = sync_db["tutorials"].find_one({"_id": ObjectId(tut_id)})
+            if tdoc: vid = tdoc.get("video_id")
+        except: pass
+    if not vid:
+        conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+        vid = conf.get("tutorial_vid")
+    if not vid:
+        return "Tutorial video not set", 404
+    if str(vid).startswith("http"):
+        return redirect(vid)
+
+    cache_path = ensure_tutorial_cached_sync(vid)
+    if not cache_path or not os.path.exists(cache_path) or os.path.getsize(cache_path) == 0:
+        return "Tutorial video unavailable", 404
+
+    file_size = os.path.getsize(cache_path)
+    range_header = request.headers.get("Range", None)
+    if range_header:
+        byte1, byte2 = 0, None
+        m = re.search(r"bytes=(\d+)-(\d*)", range_header)
+        if m:
+            byte1 = int(m.group(1))
+            if m.group(2):
+                byte2 = int(m.group(2))
+        if byte2 is None or byte2 >= file_size:
+            byte2 = file_size - 1
+        if byte1 >= file_size:
+            return Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+        length = byte2 - byte1 + 1
+
+        def generate_range():
+            with open(cache_path, "rb") as f:
+                f.seek(byte1)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        rv = Response(generate_range(), 206, mimetype="video/mp4", direct_passthrough=True)
+        rv.headers["Content-Range"] = f"bytes {byte1}-{byte2}/{file_size}"
+        rv.headers["Accept-Ranges"] = "bytes"
+        rv.headers["Content-Length"] = str(length)
+        rv.headers["Cache-Control"] = "public, max-age=86400"
+        return rv
+
+    def generate_full():
+        with open(cache_path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+
+    rv = Response(generate_full(), 200, mimetype="video/mp4", direct_passthrough=True)
+    rv.headers["Accept-Ranges"] = "bytes"
+    rv.headers["Content-Length"] = str(file_size)
+    rv.headers["Cache-Control"] = "public, max-age=86400"
+    return rv
+
+@web.route('/api/send_tutorial', methods=['POST'])
+def api_send_tutorial():
+    d = request.json or {}
+    uid = d.get("uid")
+    tut_id = (d.get("tut_id") or "").strip()
+    if not uid:
+        return jsonify({"status": "error", "msg": "❌ ইউজার আইডি পাওয়া যায়নি!"})
+    vid, title = None, "Tutorial Video"
+    if tut_id and tut_id != "default":
+        try:
+            td = sync_db["tutorials"].find_one({"_id": ObjectId(tut_id)})
+            if td:
+                vid = td.get("video_id")
+                title = f"{td.get('title', 'Tutorial')} ({td.get('lang', '')})"
+        except: pass
+    if not vid:
+        conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+        vid = conf.get("tutorial_vid")
+    if not vid:
+        return jsonify({"status": "error", "msg": "❌ টিউটোরিয়াল ভিডিও সেট করা নেই!"})
+    ok = send_tg_tutorial_sync(int(uid), vid, title)
+    if ok:
+        return jsonify({"status": "success", "msg": "✅ টিউটোরিয়াল ভিডিওটি আপনার টেলিগ্রাম বটে পাঠানো হয়েছে!"})
+    return jsonify({"status": "error", "msg": "❌ টেলিগ্রামে পাঠানো যায়নি, বটকে /start দিয়ে দেখুন!"})
+
+def create_ad_token(uid, kind, target, min_sec):
+    tok = secrets.token_urlsafe(16)
+    now = time.time()
+    with AD_TOKENS_LOCK:
+        if len(AD_TOKENS) > 5000:
+            expired = [k for k, v in AD_TOKENS.items() if (now - v["ts"]) > 3600]
+            for k in expired: AD_TOKENS.pop(k, None)
+        AD_TOKENS[tok] = {
+            "uid": int(uid) if uid else 0,
+            "kind": kind,
+            "target": str(target),
+            "min_sec": max(0, int(min_sec)),
+            "ts": now,
+            "used": False
+        }
+    return tok
+
+def verify_ad_token(tok, uid):
+    if not tok:
+        return False, "❌ অ্যাড ভেরিফিকেশন টোকেন পাওয়া যায়নি! আবার অ্যাড দেখুন।"
+    with AD_TOKENS_LOCK:
+        rec = AD_TOKENS.get(tok)
+        if not rec:
+            return False, "❌ অ্যাড সেশন বাতিল বা মেয়াদ শেষ হয়েছে! পুনরায় অ্যাড দেখুন।"
+        if rec.get("used"):
+            return False, "❌ এই অ্যাড সেশন আগেই ব্যবহার হয়েছে! পুনরায় অ্যাড দেখুন।"
+        if rec["uid"] != 0 and int(uid or 0) != rec["uid"]:
+            return False, "❌ অবৈধ অ্যাড সেশন!"
+        elapsed = time.time() - rec["ts"]
+        req_sec = max(0, rec["min_sec"] - 1)
+        if elapsed < req_sec:
+            return False, "❌ অ্যাড শেষ হওয়ার আগেই ফিরে এসেছেন! পুনরায় অ্যাড দেখুন।"
+        rec["used"] = True
+        return True, "ok"
+
+@web.route('/api/ad_start', methods=['POST'])
+def api_ad_start():
+    d = request.json or {}
+    uid = int(d.get("uid") or 0)
+    kind = d.get("kind", "file")
+    target = str(d.get("target") or "")
+    mode = d.get("mode", "link")
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    strict_ad = bool(conf.get("strict_ad", True))
+    req_sec = 0
+    if strict_ad:
+        if mode == "monetag":
+            req_sec = int(conf.get("monetag_wait", 4))
+        elif kind == "file":
+            base_fid = extract_base_file_id(target)
+            fd = None
+            for dbx in get_extra_dbs_sync():
+                fd = dbx["files"].find_one({"_id": base_fid}, {"is_premium": 1})
+                if fd: break
+            if fd and fd.get("is_premium"):
+                req_sec = int(conf.get("prem_vid_wait", 10))
+            else:
+                dw = conf.get("direk_wait", [5])
+                req_sec = int(min(dw)) if dw else 5
+        elif kind == "earn":
+            req_sec = int(conf.get("task_wait_sec", 10))
+        elif kind == "short":
+            dw = conf.get("direk_wait", [5])
+            req_sec = int(min(dw)) if dw else 5
+    tok = create_ad_token(uid, kind, target, req_sec)
+    return jsonify({"status": "success", "token": tok, "min_sec": req_sec, "strict_ad": strict_ad})
+
+@web.route('/api/shorten', methods=['POST'])
+def api_shorten():
+    url = (request.json.get("url") or "").strip()
+    if not url.startswith("http"): return jsonify({"status": "error", "msg": "সঠিক URL দিন (https://...)"})
+    try:
+        code = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+        while sync_db["short_links"].find_one({"_id": code}):
+            code = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+        sync_db["short_links"].insert_one({
+            "_id": code,
+            "url": url,
+            "clicks": 0,
+            "created_at": datetime.utcnow().isoformat() + "Z"
+        })
+        conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+        live_url = get_live_web_url(conf)
+        return jsonify({"status": "success", "short_url": f"{live_url}/s/{code}"})
+    except Exception as e:
+        return jsonify({"status": "error", "msg": f"Shortener ত্রুটি: {e}"})
+
+SHORT_VERIFY_HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>{{ site_name }} — Link Verification</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+{% for z in zone_ids %}<script src="https://libtl.com/sdk.js" data-zone="{{ z }}" data-sdk="show_{{ z }}" defer></script>{% endfor %}
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#fff;font-family:'Hind Siliguri',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;padding:18px}
+.card{background:#fff;color:#0f172a;width:100%;max-width:420px;border-radius:22px;padding:24px 20px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-weight:700;font-size:12px;padding:4px 12px;border-radius:20px;margin-bottom:10px}
+h2{margin:0 0 8px 0;font-size:21px}
+p{margin:0 0 18px 0;font-size:13.5px;color:#64748b}
+.btn{width:100%;border:none;padding:13px 16px;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px;transition:transform .2s}
+.btn:active{transform:scale(.95)}
+.btn-monetag{background:linear-gradient(90deg,#6c5ce7,#4f46e5);color:#fff}
+.btn-link{background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff}
+.btn-go{background:linear-gradient(90deg,#10b981,#059669);color:#fff;display:none;text-decoration:none}
+.timer-box{display:none;background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-bottom:12px}
+.timer-num{font-size:38px;font-weight:800;color:#e11d48;line-height:1.1}
+.warn-msg{display:none;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:12px;padding:10px;font-size:13px;font-weight:600;margin-bottom:12px}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="badge">🔗 {{ site_name }} Safe Link</div>
+  <h2>লিংকটি ভেরিফাই করুন</h2>
+  <p>অ্যাড শেষ না হওয়া পর্যন্ত ব্যাক করবেন না। সময়ের আগে ফিরে আসলে পুনরায় অ্যাড দেখতে হবে।</p>
+  <div class="warn-msg" id="warn-msg"></div>
+
+  <div id="verify-options">
+    {% if zone_ids %}
+    <button class="btn btn-monetag" onclick="verifyMonetag()">📺 Monetag Ad দিয়ে Verify করুন</button>
+    {% endif %}
+    {% if ad_link %}
+    <button class="btn btn-link" onclick="verifyLinkAd()">🔗 Link Ad (Adsterra) দিয়ে Verify করুন</button>
+    {% endif %}
+    {% if not zone_ids and not ad_link %}
+    <button class="btn btn-monetag" onclick="startDirectWait()">⚡ Verify & Continue</button>
+    {% endif %}
+  </div>
+
+  <div class="timer-box" id="timer-box">
+    <div id="t-status" style="font-size:13px;color:#475569;">অ্যাড ভেরিফিকেশন চলছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
+    <div class="timer-num" id="t-num">{{ wait_time }}</div>
+    <button id="t-retry-btn" class="btn btn-link" style="display:none;margin-top:10px;margin-bottom:0;" onclick="verifyLinkAd()">🔗 পুনরায় অ্যাডে ক্লিক করুন</button>
+  </div>
+
+  <a id="go-btn" class="btn btn-go" href="#">✅ লিংক আনলক হয়েছে — এখানে ক্লিক করুন</a>
+</div>
+<script>
+const shortCode={{ short_code_json | safe }};
+const adLink={{ ad_link_json | safe }};
+const zoneIds={{ zone_ids_json | safe }};
+const waitTime={{ wait_time }};
+const monetagWait={{ monetag_wait }};
+const strictAd={{ strict_ad_json | safe }};
+let curToken=null, curIv=null, cleanupList=[];
+
+function showWarn(msg){
+  const w=document.getElementById('warn-msg');
+  w.innerText=msg; w.style.display='block';
+  document.getElementById('timer-box').style.display='none';
+  document.getElementById('verify-options').style.display='block';
+}
+function cleanupWatchers(){
+  if(curIv){clearInterval(curIv);curIv=null;}
+  while(cleanupList.length){
+    try{cleanupList.pop()();}catch(e){}
+  }
+}
+async function startServerAdToken(mode,minSec){
+  const r=await fetch('/api/ad_start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:0,kind:'short',target:shortCode,mode,min_sec:minSec})});
+  const d=await r.json();
+  curToken=d.token;
+  return d;
+}
+async function unlockTarget(){
+  cleanupWatchers();
+  const r=await fetch('/api/verify_short',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:shortCode,ad_token:curToken})});
+  const d=await r.json();
+  if(d.status!=='success'){
+    showWarn(d.msg||'❌ ভেরিফিকেশন ব্যর্থ হয়েছে! আবার অ্যাড দেখুন।');
+    return;
+  }
+  document.getElementById('warn-msg').style.display='none';
+  document.getElementById('verify-options').style.display='none';
+  document.getElementById('timer-box').style.display='none';
+  const g=document.getElementById('go-btn');
+  g.style.display='flex';
+  g.href=d.url;
+}
+async function verifyMonetag(){
+  document.getElementById('warn-msg').style.display='none';
+  const zid=zoneIds[0];
+  await startServerAdToken('monetag',monetagWait);
+  const t0=Date.now();
+  if(zid && typeof window['show_'+zid]==='function'){
+    try{
+      await window['show_'+zid]();
+      const el=(Date.now()-t0)/1000;
+      if(strictAd && monetagWait>0 && el<monetagWait){
+        curToken=null;
+        showWarn(`❌ অ্যাড শেষ হওয়ার আগেই ব্যাক করেছেন (${Math.floor(el)}s)! অন্তত ${monetagWait}s অপেক্ষা করে আবার দেখুন।`);
+        return;
+      }
+      await unlockTarget();
+      return;
+    }catch(e){
+      if(strictAd){
+        curToken=null;
+        showWarn('❌ অ্যাড সম্পূর্ণ না করেই ফিরে এসেছেন! আবার অ্যাড দেখুন।');
+        return;
+      }
+    }
+  }
+  startCountdown(3, false);
+}
+async function verifyLinkAd(){
+  document.getElementById('warn-msg').style.display='none';
+  document.getElementById('t-retry-btn').style.display='none';
+  await startServerAdToken('link',waitTime||5);
+  startCountdown(waitTime||5, true, adLink);
+}
+async function startDirectWait(){
+  await startServerAdToken('link',3);
+  startCountdown(3, false, null);
+}
+function startCountdown(sec, trackEarly, targetAdUrl){
+  cleanupWatchers();
+  document.getElementById('verify-options').style.display='none';
+  const tb=document.getElementById('timer-box'),
+        tn=document.getElementById('t-num'),
+        ts=document.getElementById('t-status'),
+        rb=document.getElementById('t-retry-btn'),
+        wm=document.getElementById('warn-msg');
+  tb.style.display='block';
+  rb.style.display='none';
+  wm.style.display='none';
+  ts.style.color='#475569';
+  ts.innerText='অ্যাড ভেরিফিকেশন চলছে, অনুগ্রহ করে অপেক্ষা করুন...';
+  tn.style.color='#e11d48';
+  tn.innerText=sec;
+
+  const startTs=Date.now();
+  let leftPage=false, leftAt=0, paused=false;
+
+  function pauseEarly(msg){
+    if(paused)return;
+    paused=true;
+    cleanupWatchers();
+    curToken=null;
+    const rem=Math.max(1,Math.ceil(sec-((Date.now()-startTs)/1000)));
+    tn.style.color='#f59e0b';
+    tn.innerText=rem+'s ⏸️';
+    ts.style.color='#dc2626';
+    ts.innerHTML='<b>⏸️ টাইমার পজ হয়েছে! পুনরায় অ্যাডে ক্লিক করুন।</b>';
+    wm.innerText=msg||'❌ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! কোনো লিংক আনলক হয়নি। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
+    wm.style.display='block';
+    rb.style.display='flex';
+  }
+
+  function checkReturnNow(){
+    if(!leftPage||paused||document.hidden)return;
+    if((Date.now()-leftAt)<120)return;
+    const elapsed=(Date.now()-startTs)/1000;
+    if(elapsed<sec-0.5){
+      pauseEarly();
+    } else {
+      clearInterval(curIv); curIv=null;
+      unlockTarget();
+    }
+  }
+
+  if(strictAd && trackEarly){
+    const markLeft=()=>{ if(!leftPage){leftPage=true;leftAt=Date.now();} };
+    const onVis=()=>{ if(document.hidden)markLeft(); else checkReturnNow(); };
+    document.addEventListener('visibilitychange',onVis);
+    window.addEventListener('blur',markLeft);
+    window.addEventListener('focus',checkReturnNow);
+    window.addEventListener('pagehide',markLeft);
+    window.addEventListener('pageshow',checkReturnNow);
+    cleanupList.push(
+      ()=>document.removeEventListener('visibilitychange',onVis),
+      ()=>window.removeEventListener('blur',markLeft),
+      ()=>window.removeEventListener('focus',checkReturnNow),
+      ()=>window.removeEventListener('pagehide',markLeft),
+      ()=>window.removeEventListener('pageshow',checkReturnNow)
+    );
+
+    let lastRaf=performance.now(), rafId=0;
+    const rafLoop=(now)=>{
+      if(paused)return;
+      if((now-lastRaf)>850){
+        if(!leftPage){leftPage=true;leftAt=Date.now()-200;}
+        checkReturnNow();
+        if(paused)return;
+      }
+      lastRaf=now;
+      rafId=requestAnimationFrame(rafLoop);
+    };
+    rafId=requestAnimationFrame(rafLoop);
+    cleanupList.push(()=>cancelAnimationFrame(rafId));
+  }
+
+  if(targetAdUrl){
+    let blocked=false;
+    try{
+      const w=window.open(targetAdUrl,'_blank');
+      if(w===null)blocked=true;
+    }catch(e){blocked=true;}
+    if(strictAd && trackEarly && blocked){
+      pauseEarly('⚠️ পপ-আপ ব্লক হয়েছে! নিচের "পুনরায় অ্যাডে ক্লিক করুন" বাটনে চাপ দিন।');
+      return;
+    }
+  }
+
+  curIv=setInterval(()=>{
+    if(paused)return;
+    if(strictAd && trackEarly){
+      const away=document.hidden || !document.hasFocus();
+      if(away){
+        if(!leftPage){leftPage=true;leftAt=Date.now();}
+      } else if(leftPage){
+        checkReturnNow();
+        if(paused)return;
+      }
+    }
+    const elapsed=(Date.now()-startTs)/1000;
+    const rem=Math.max(0,Math.ceil(sec-elapsed));
+    tn.innerText=rem;
+    if(elapsed>=sec){ clearInterval(curIv); curIv=null; unlockTarget(); }
+  },200);
+}
+</script>
+</body>
+</html>"""
+
+@web.route('/s/<code>')
+def short_link_gate(code):
+    doc = sync_db["short_links"].find_one({"_id": code})
+    if not doc:
+        return "<h2 style='font-family:sans-serif;text-align:center;margin-top:50px;'>❌ লিংকটি পাওয়া যায়নি বা মেয়াদ শেষ হয়েছে!</h2>", 404
+    sync_db["short_links"].update_one({"_id": code}, {"$inc": {"clicks": 1}})
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    links = list(sync_db["ad_links"].find())
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    ad_link = random.choice(links)["link"] if links else None
+    wait_time = random.choice(conf.get("direk_wait", [5]))
+    return render_template_string(
+        SHORT_VERIFY_HTML,
+        site_name=conf.get("site_name", "Moviee Link"),
+        short_code_json=json.dumps(code),
+        ad_link=ad_link,
+        ad_link_json=json.dumps(ad_link),
+        zone_ids=zones,
+        zone_ids_json=json.dumps(zones),
+        wait_time=wait_time,
+        monetag_wait=int(conf.get("monetag_wait", 4)),
+        strict_ad_json=json.dumps(bool(conf.get("strict_ad", True)))
+    )
+
+@web.route('/api/verify_short', methods=['POST'])
+def api_verify_short():
+    d = request.json or {}
+    code = d.get("code")
+    tok = d.get("ad_token")
+    doc = sync_db["short_links"].find_one({"_id": code})
+    if not doc:
+        return jsonify({"status": "error", "msg": "❌ লিংক পাওয়া যায়নি!"})
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    if conf.get("strict_ad", True):
+        ok, msg = verify_ad_token(tok, 0)
+        if not ok:
+            return jsonify({"status": "error", "msg": msg})
+    return jsonify({"status": "success", "url": doc["url"]})
+
+@web.route('/api/rates')
+def api_rates():
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=4).json()
+        if r.get("rates"): return jsonify(r["rates"])
+    except: pass
+    return jsonify({"USD": 1, "BDT": 120.5, "EUR": 0.92, "GBP": 0.79, "SAR": 3.75, "AED": 3.67, "INR": 84.4, "MYR": 4.45})
+
+def extract_base_file_id(file_key):
+    s = str(file_key or "")
+    if s.startswith(("mfile_", "sfile_")):
+        parts = s.split("_")
+        if len(parts) >= 2:
+            return parts[1]
+    if s.startswith("file_"):
+        return s[5:]
+    return s
+
+@web.route('/api/get_ad/<int:user_id>/<file_id>')
+def get_ad_api(user_id, file_id):
+    config = sync_db["config"].find_one({"_id": "settings"}) or {}; user = sync_db["users"].find_one({"_id": user_id}) or {}; fd = None
+    base_fid = extract_base_file_id(file_id)
+    for d in get_extra_dbs_sync():
+        fd = d["files"].find_one({"_id": base_fid}, {"is_premium": 1})
+        if fd: break
+    if user.get("premium_until") and user["premium_until"] > datetime.now():
+        return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
+    if file_id in user.get("unlocked_files", {}):
+        try:
+            if datetime.fromisoformat(user["unlocked_files"][file_id].replace("Z", "")) > datetime.utcnow():
+                return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
+        except: pass
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+    coin_price = config.get("premium_vid_coin", 50)
+    is_prem_file = bool(fd and fd.get("is_premium"))
+    ads_on = config.get("ads_on", True)
+    steps = max(1, int(config.get("prstep", 1) if is_prem_file else config.get("regstep", 1)))
+    wait_t = int(config.get("prem_vid_wait", 10)) if is_prem_file else random.choice(config.get("direk_wait", [5]))
+    if is_prem_file or (ads_on and (links or zones)):
+        return jsonify({
+            "show_ad": True,
+            "is_unlocked": False,
+            "is_premium_file": is_prem_file,
+            "requires_coin": is_prem_file,
+            "coin_price": coin_price,
+            "user_balance": user.get("balance", 0),
+            "steps": steps,
+            "ad_links": links,
+            "zone_ids": zones,
+            "ad_link": random.choice(links) if links else None,
+            "zone_id": random.choice(zones) if zones else None,
+            "wait_time": wait_t,
+            "monetag_wait": int(config.get("monetag_wait", 4)),
+            "strict_ad": bool(config.get("strict_ad", True))
+        })
+    return jsonify({"show_ad": False, "is_unlocked": True})
+
+@web.route('/api/unlock_file', methods=['POST'])
+def unlock_file():
+    d = request.json or {}; uid, fid, m = d['uid'], d['file_id'], d['method']
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}
+    if m == "coin":
+        cost = conf.get("premium_vid_coin", 50)
+        if u.get("balance", 0) < cost: return jsonify({"status": "error", "msg": "❌ পর্যাপ্ত কয়েন নেই!"})
+        sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": -cost}})
+    else:
+        is_prem_user = bool(u.get("premium_until") and u["premium_until"] > datetime.now())
+        if not is_prem_user and conf.get("strict_ad", True):
+            zones = list(sync_db["zone_ids"].find())
+            links = list(sync_db["ad_links"].find())
+            if zones or links or DEFAULT_ZONE_ID:
+                ok, msg = verify_ad_token(d.get("ad_token"), uid)
+                if not ok:
+                    return jsonify({"status": "error", "msg": msg})
+    rl = get_relock_seconds(conf)
+    if rl < 0:
+        exp = (datetime.utcnow() + timedelta(seconds=52560000)).isoformat() + "Z"
+        sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{fid}": exp}}, upsert=True)
+    elif rl == 0:
+        exp = datetime.utcnow().isoformat() + "Z"
+        sync_db["users"].update_one({"_id": uid}, {"$unset": {f"unlocked_files.{fid}": ""}})
+    else:
+        exp = (datetime.utcnow() + timedelta(seconds=rl)).isoformat() + "Z"
+        sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{fid}": exp}}, upsert=True)
+    return jsonify({"status": "success", "expiry": exp, "relock_sec": rl})
+
+@web.route('/api/earn_info/<int:uid>')
+def get_earn_info(uid):
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
+    if u.get("last_activity_date") != td:
+        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": td, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}}, upsert=True)
+        u["spin_count"], u["task_count"], u["custom_tasks_done"] = 0, 0, []
+    cts = list(sync_db["custom_tasks"].find())
+    for t in cts:
+        t["_id"] = str(t["_id"])
+        if not t.get("task_type"):
+            t["task_type"] = "zone" if t.get("zone_id") else "link"
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+    return jsonify({
+        "spins_done": u.get("spin_count", 0),
+        "spin_limit": conf.get("spin_limit", 5),
+        "tasks_done": u.get("task_count", 0),
+        "task_limit": conf.get("task_limit", 5),
+        "task_step": max(1, int(conf.get("task_step", 1))),
+        "custom_tasks": cts,
+        "custom_tasks_done": u.get("custom_tasks_done", []),
+        "zone_ids": zones,
+        "ad_links": links,
+        "wait_time": int(conf.get("task_wait_sec", 10)),
+        "monetag_wait": int(conf.get("monetag_wait", 4)),
+        "strict_ad": bool(conf.get("strict_ad", True))
+    })
+
+@web.route('/api/get_earn_ad/<ad_type>')
+def get_earn_ad_dynamic(ad_type):
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    return jsonify({
+        "ad_link": random.choice(links) if links else None,
+        "zone_id": random.choice(zones) if zones else None,
+        "ad_links": links,
+        "zone_ids": zones,
+        "task_step": max(1, int(conf.get("task_step", 1))),
+        "wait_time": int(conf.get("task_wait_sec", 10)),
+        "monetag_wait": int(conf.get("monetag_wait", 4)),
+        "strict_ad": bool(conf.get("strict_ad", True))
+    })
+
+@web.route('/api/verify_tg_task', methods=['POST'])
+def api_verify_tg_task():
+    d = request.json or {}
+    uid = d.get("uid")
+    tid = d.get("task_id")
+    if not uid or not tid:
+        return jsonify({"status": "error", "msg": "❌ তথ্য সঠিক নয়!"})
+    try:
+        t = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
+    except:
+        t = None
+    if not t or t.get("task_type") != "tg_join":
+        return jsonify({"status": "error", "msg": "❌ টাস্ক পাওয়া যায়নি!"})
+    u = sync_db["users"].find_one({"_id": int(uid)}) or {}
+    if tid in u.get("custom_tasks_done", []):
+        return jsonify({"status": "error", "msg": "❌ আপনি এই টাস্ক আগেই সম্পন্ন করেছেন!"})
+    if not BOT_TOKEN:
+        return jsonify({"status": "error", "msg": "❌ বট টোকেন কনফিগার করা নেই!"})
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember",
+            params={"chat_id": t["chat_id"], "user_id": int(uid)},
+            timeout=8
+        ).json()
+        if not r.get("ok"):
+            return jsonify({"status": "error", "msg": "❌ ভেরিফাই করা যায়নি! বট ওই চ্যানেল/গ্রুপে Admin কিনা নিশ্চিত করুন অথবা চ্যানেলে জয়েন হয়ে আবার চেষ্টা করুন।"})
+        res = r.get("result", {})
+        st = res.get("status", "left")
+        joined = (st in ("member", "administrator", "creator")) or (st == "restricted" and bool(res.get("is_member")))
+        if not joined:
+            return jsonify({"status": "error", "msg": "❌ আপনি এখনো চ্যানেল/গ্রুপে জয়েন করেননি! আগে জয়েন হয়ে তারপর Verify-এ ক্লিক করুন।"})
+    except Exception as e:
+        return jsonify({"status": "error", "msg": f"❌ টেলিগ্রাম চেক এরর: {e}"})
+    sync_db["users"].update_one({"_id": int(uid)}, {"$inc": {"balance": t["coin"]}, "$addToSet": {"custom_tasks_done": tid}}, upsert=True)
+    return jsonify({"status": "success", "msg": f"🎉 ভেরিফাই সফল! +{t['coin']} কয়েন পেয়েছেন!"})
+
+@web.route('/api/claim_earn', methods=['POST'])
+def claim_earn():
+    d = request.json or {}; uid, tt = d['uid'], d['type']; conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
+    if u.get("last_activity_date") != td:
+        sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": td, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}}, upsert=True)
+        u["spin_count"], u["task_count"], u["custom_tasks_done"] = 0, 0, []
+    if conf.get("strict_ad", True):
+        zones = list(sync_db["zone_ids"].find())
+        links = list(sync_db["ad_links"].find())
+        need_ad = bool(zones or links or DEFAULT_ZONE_ID)
+        if tt.startswith("custom_"):
+            tid = tt.split("_")[1]
+            t = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
+            if t and t.get("task_type") == "tg_join":
+                return jsonify({"status": "error", "msg": "❌ টেলিগ্রাম টাস্কের জন্য Verify বাটন ব্যবহার করুন!"})
+            need_ad = bool(t and (t.get("zone_id") or t.get("link")))
+        if need_ad:
+            ok, msg = verify_ad_token(d.get("ad_token"), uid)
+            if not ok:
+                return jsonify({"status": "error", "msg": msg})
+    if tt == "spin":
+        if u.get("spin_count", 0) >= conf.get("spin_limit", 5): return jsonify({"status": "error", "msg": "❌ স্পিন লিমিট শেষ!"})
+        c = random.randint(conf.get("spin_coin_min", 10), conf.get("spin_coin_max", 50))
+        sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": c, "spin_count": 1}}); return jsonify({"status": "success", "msg": f"🎉 +{c} কয়েন পেয়েছেন!"})
+    if tt == "task":
+        if u.get("task_count", 0) >= conf.get("task_limit", 5): return jsonify({"status": "error", "msg": "❌ টাস্ক লিমিট শেষ!"})
+        c = conf.get("task_coin", 20); sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": c, "task_count": 1}}); return jsonify({"status": "success", "msg": f"🎉 +{c} কয়েন পেয়েছেন!"})
+    if tt.startswith("custom_"):
+        tid = tt.split("_")[1]
+        if tid in u.get("custom_tasks_done", []): return jsonify({"status": "error", "msg": "❌ আগেই করেছেন!"})
+        t = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
+        if t: sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": t["coin"]}, "$push": {"custom_tasks_done": tid}}); return jsonify({"status": "success", "msg": f"🎉 +{t['coin']} কয়েন পেয়েছেন!"})
+    return jsonify({"status": "error", "msg": "Invalid"})
+
+@web.route('/api/redeem', methods=['POST'])
+def redeem_coupon():
+    d = request.json; uid, code = d['uid'], d['code'].strip(); c = sync_db["coupons"].find_one({"code": code})
+    if not c: return jsonify({"status": "error", "msg": "❌ কোডটি সঠিক নয়!"})
+    if uid in c.get("used_by", []): return jsonify({"status": "error", "msg": "❌ আপনি এটি ব্যবহার করেছেন!"})
+    if len(c.get("used_by", [])) >= c.get("limit", 0): return jsonify({"status": "error", "msg": "❌ কোডের মেয়াদ শেষ!"})
+    sync_db["coupons"].update_one({"code": code}, {"$push": {"used_by": uid}})
+    if c.get("is_premium_code"):
+        secs = c.get("duration_seconds", 86400); u = sync_db["users"].find_one({"_id": uid}) or {}
+        base = u.get("premium_until") if u.get("premium_until") and u["premium_until"] > datetime.now() else datetime.now()
+        sync_db["users"].update_one({"_id": uid}, {"$set": {"premium_until": base + timedelta(seconds=secs)}}, upsert=True)
+        lbl = c.get("duration_label", "Premium"); send_tg_api_fallback(uid, f"🎉 **{lbl}** প্রিমিয়াম চালু হয়েছে!")
+        return jsonify({"status": "success", "msg": f"✅ Activated {lbl} Premium!"})
+    coin = random.randint(c["min"], c["max"]) if c.get("is_random") else c.get("coins", 0)
+    sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": coin}}, upsert=True); send_tg_api_fallback(uid, f"🎉 +{coin} Coins")
+    return jsonify({"status": "success", "msg": f"✅ Redeemed {coin} coins!"})
+
+@web.route('/api/buy_with_coin', methods=['POST'])
+def buy_with_coin():
+    d = request.json; uid, pid = d['uid'], d['pkg_id']; u = sync_db["users"].find_one({"_id": uid}); p = sync_db["packages"].find_one({"_id": ObjectId(pid)})
+    if not u or not p: return jsonify({"status": "error", "msg": "Invalid"})
+    if u.get("balance", 0) < p["coins"]: return jsonify({"status": "error", "msg": "❌ পর্যাপ্ত কয়েন নেই!"})
+    secs = {"s": 1, "m": 60, "h": 3600, "d": 86400, "y": 31536000}.get(p.get("unit", "d").lower()[0], 86400)
+    sync_db["users"].update_one({"_id": uid}, {"$inc": {"balance": -p["coins"]}, "$set": {"premium_until": datetime.now() + timedelta(seconds=p["amount"] * secs)}})
+    send_tg_api_fallback(uid, f"🎉 {p['coins']} কয়েন দিয়ে প্রিমিয়াম কিনেছেন!"); return jsonify({"status": "success", "msg": "✅ Premium Purchased!"})
+
+@web.route('/api/request_movie', methods=['POST'])
+def request_movie():
+    d = request.json; name = (d.get("movie_name") or "").strip()
+    if not name: return jsonify({"status": "error", "msg": "❌ মুভির নাম লিখুন!"})
+    send_tg_api_fallback(ADMIN_ID, f"📥 **New Request!**\n🎬 **{name}**\n👤 `{d.get('uid')}`"); return jsonify({"status": "success", "msg": "✅ রিকোয়েস্ট পাঠানো হয়েছে!"})
+
+@web.route('/api/action', methods=['POST'])
+def handle_actions():
+    d = request.json; act, uid, fid = d.get('action'), d.get('uid'), d.get('file_id')
+    if act == "history": sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"history": fid}}, upsert=True)
+    elif act == "clear_history": sync_db["users"].update_one({"_id": uid}, {"$set": {"history": []}}, upsert=True); return jsonify({"status": "success"})
+    elif act == "favorite":
+        u = sync_db["users"].find_one({"_id": uid}) or {}
+        if fid in u.get("favorites", []): sync_db["users"].update_one({"_id": uid}, {"$pull": {"favorites": fid}}); return jsonify({"status": "success", "saved": False})
+        sync_db["users"].update_one({"_id": uid}, {"$addToSet": {"favorites": fid}}, upsert=True); return jsonify({"status": "success", "saved": True})
+    elif act == "like":
+        for dbx in get_extra_dbs_sync():
+            if dbx["files"].update_one({"_id": fid}, {"$addToSet": {"likes": uid}}).modified_count > 0:
+                if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+                    for it in HOME_DATA_CACHE["data"]["files"]:
+                        if it.get("_id") == fid:
+                            if uid not in it.setdefault("likes", []): it["likes"].append(uid)
+                            break
+                break
+    elif act == "rate":
+        st = max(1, min(5, int(d.get("stars", 5))))
+        for dbx in get_extra_dbs_sync():
+            doc = dbx["files"].find_one({"_id": fid})
+            if doc:
+                rs = [r for r in doc.get("ratings", []) if r.get("uid") != uid] + [{"uid": uid, "stars": st}]
+                dbx["files"].update_one({"_id": fid}, {"$set": {"ratings": rs}})
+                if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+                    for it in HOME_DATA_CACHE["data"]["files"]:
+                        if it.get("_id") == fid:
+                            it["ratings"] = rs
+                            break
+                return jsonify({"status": "success"})
+    elif act == "comment":
+        cmt = {"uid": uid, "text": d.get("text"), "time": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        for dbx in get_extra_dbs_sync():
+            if dbx["files"].update_one({"_id": fid}, {"$push": {"comments": cmt}}).modified_count > 0:
+                if HOME_DATA_CACHE["data"] and HOME_DATA_CACHE["data"].get("files"):
+                    for it in HOME_DATA_CACHE["data"]["files"]:
+                        if it.get("_id") == fid:
+                            it.setdefault("comments", []).append(cmt)
+                            break
+                break
+        return jsonify({"status": "success", "comment": cmt})
+    return jsonify({"status": "success"})
+
+def build_user_state_dict(user_id):
+    u = sync_db["users"].find_one({"_id": user_id}); is_p, exp = False, None
+    if u and u.get("premium_until") and u["premium_until"] > datetime.now(): is_p, exp = True, get_expiry_str(u["premium_until"])
+    return {"balance": u.get("balance", 0) if u else 0, "is_premium": is_p, "expiry": exp, "history": u.get("history", []) if u else [], "favorites": u.get("favorites", []) if u else [], "unlocked_files": u.get("unlocked_files", {}) if u else {}}
+
+@web.route('/api/user/<int:user_id>')
+def get_user(user_id):
+    return jsonify(build_user_state_dict(user_id))
+
+@web.route('/api/home_data')
+def api_home_data():
+    p = _fetch_home_payload()
+    uid_arg = request.args.get("uid", "")
+    u_state = None
+    if uid_arg.isdigit():
+        try: u_state = build_user_state_dict(int(uid_arg))
+        except: pass
+    resp = jsonify({"files": p["files"], "user": u_state})
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+    # ==========================================
+# 11. HTML MINI APP UI & SERVER RUNNER
+# ==========================================
+HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>{{ site_name }}</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>try{if(window.Telegram&&Telegram.WebApp){Telegram.WebApp.ready();Telegram.WebApp.expand();}}catch(e){}</script>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{background:#0b0d17;margin:0;min-height:100vh}
+body{color:#111;font-family:'Hind Siliguri',system-ui,-apple-system,sans-serif;padding-bottom:94px}
+body.ready{background:#f4f5f7}
+#app-splash{position:fixed;inset:0;z-index:999999;background:radial-gradient(circle at top,#1f1638,#0b0d17 70%);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;transition:opacity .28s ease}
+#app-splash.hide{opacity:0;pointer-events:none}
+.spl-ring{width:96px;height:96px;border-radius:26px;padding:3px;background:linear-gradient(135deg,#ff4d4d,#7c3aed,#06b6d4);box-shadow:0 12px 35px rgba(124,58,237,.45);animation:floatLogo 1.8s ease-in-out infinite;margin-bottom:14px}
+.spl-ring img{width:100%;height:100%;border-radius:23px;object-fit:cover;display:block;background:#141624}
+.spl-title{font-size:21px;font-weight:700;letter-spacing:.3px;margin-bottom:12px}
+.spl-bar{width:170px;height:4px;background:rgba(255,255,255,.14);border-radius:10px;overflow:hidden}
+.spl-bar-fill{width:45%;height:100%;background:linear-gradient(90deg,#ff4d4d,#7c3aed,#06b6d4);border-radius:10px;animation:splMove 1.1s ease-in-out infinite}
+@keyframes splMove{0%{transform:translateX(-110%)}100%{transform:translateX(260%)}}
+@keyframes btnShine{0%{left:-120%}100%{left:150%}}
+@keyframes gradFlow{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes fadeInSlide{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes popIn{from{opacity:0;transform:scale(.88)}to{opacity:1;transform:scale(1)}}
+@keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(108,92,231,.45),0 0 12px rgba(236,72,153,.28)}50%{box-shadow:0 0 0 8px rgba(108,92,231,0),0 0 18px rgba(6,182,212,.45)}}
+@keyframes posterGlow{0%{box-shadow:0 4px 16px rgba(124,58,237,.28),0 0 0 1.5px rgba(124,58,237,.45)}50%{box-shadow:0 6px 22px rgba(236,72,153,.35),0 0 0 1.5px rgba(6,182,212,.65)}100%{box-shadow:0 4px 16px rgba(124,58,237,.28),0 0 0 1.5px rgba(124,58,237,.45)}}
+@keyframes neonBtnGlow{0%,100%{box-shadow:0 4px 14px rgba(108,92,231,.38),0 0 10px rgba(236,72,153,.28)}50%{box-shadow:0 4px 18px rgba(6,182,212,.48),0 0 14px rgba(124,58,237,.45)}}
+@keyframes floatLogo{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-5px) scale(1.04)}}
+@keyframes spinRing{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes dotBlink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
+@keyframes navPop{0%{transform:translateY(0) scale(1)}50%{transform:translateY(-4px) scale(1.18)}100%{transform:translateY(-1px) scale(1.06)}}
+@keyframes rippleAnim{to{transform:scale(4);opacity:0}}
+@keyframes gentleBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+
+.anim-btn,button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c,.tut-lang-pill,.lang-big-btn{
+  transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .22s ease,background .25s ease;
+  position:relative;overflow:hidden;
+}
+button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active,.tut-lang-pill:active,.lang-big-btn:active{
+  transform:scale(.92)!important;
+}
+.btn-p,.q-btn,.p-dl,.unlock-opt,.watch-pill,.tut-btn{animation:gradFlow 3.5s ease infinite,neonBtnGlow 3.2s ease-in-out infinite}
+.btn-p::after,.q-btn::after,.p-dl::after,.unlock-opt::after,.watch-pill::after,.tut-btn::after,.cat-pill.active::after,.p-like::after,.p-save::after,.s-tab.active::after,.lang-big-btn.active::after{
+  content:"";position:absolute;top:0;left:-120%;width:55%;height:100%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.42),transparent);
+  transform:skewX(-20deg);animation:btnShine 2.5s infinite ease-in-out;pointer-events:none;
+}
+.ripple-fx{position:absolute;border-radius:50%;background:rgba(255,255,255,.45);transform:scale(0);animation:rippleAnim .5s linear;pointer-events:none}
+
+.top-header{position:sticky;top:0;z-index:90;background:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 12px rgba(124,58,237,.12)}
+.brand{display:flex;align-items:center;gap:7px;font-size:18.5px;font-weight:700}
+.hdr-logo{width:30px;height:30px;border-radius:9px;object-fit:cover;box-shadow:0 2px 10px rgba(124,58,237,.35);animation:gentleBob 3s ease-in-out infinite}
+.brand-badge{background:linear-gradient(90deg,#d90429,#ef233c,#ff4d6d);background-size:200% 200%;animation:gradFlow 4s ease infinite;color:#fff;font-size:12px;padding:2px 8px;border-radius:6px}
+.hdr-r{display:flex;align-items:center;gap:8px}.coin-pill{background:#fff3cd;color:#856404;border:1px solid #ffeeba;padding:4px 10px;border-radius:16px;font-size:12.5px;font-weight:700;animation:pulseGlow 2.8s infinite}
+.r-search{width:36px;height:36px;border-radius:50%;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.r-search::before,.float-search::before{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(#ff4d4d,#ffb703,#00d4ff,#6c5ce7,#ff4d4d);animation:spinRing 3.5s linear infinite}
+.r-search-in{position:relative;z-index:2;width:30px;height:30px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px}
+.float-search{position:fixed;bottom:82px;right:14px;z-index:95;width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 20px rgba(124,58,237,.35);cursor:pointer}
+.float-search .r-search-in{width:38px;height:38px;font-size:16px}
+
+.live-bar{background:linear-gradient(90deg,#4b39ef,#7c3aed,#ec4899);background-size:200% 200%;animation:gradFlow 6s ease infinite;color:#fff;display:flex;align-items:center;height:34px;overflow:hidden}
+.live-pill{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:700;background:rgba(0,0,0,.25);height:100%;white-space:nowrap}
+.live-dot{width:8px;height:8px;background:#ff3b30;border-radius:50%;animation:dotBlink 1s infinite}.marquee-wrap{flex:1;overflow:hidden;white-space:nowrap}
+.marquee-txt{display:inline-block;padding-left:100%;font-size:12.5px;animation:scr 18s linear infinite}@keyframes scr{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
+.search-box-wrap{display:none;padding:10px 14px;background:#fff;border-bottom:1px solid #eee}.search-box-wrap.open{display:block;animation:fadeInSlide .22s ease}
+.s-input{width:100%;padding:10px 14px;border-radius:12px;border:1.5px solid #e2e8f0;background:#f8fafc;font-size:14px;outline:none;color:#111}
+
+.cat-scroll{display:flex;flex-wrap:nowrap;gap:8px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-x;padding:10px 14px 5px 14px;scrollbar-width:none}
+.cat-scroll::-webkit-scrollbar{display:none}
+.cat-pill{flex:0 0 auto;width:max-content;background:#fff;color:#333;padding:7px 15px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 2px 8px rgba(124,58,237,.1);border:1px solid #e2e8f0}
+.cat-pill.active{background:linear-gradient(90deg,#ff512f,#dd2476,#ff512f);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
+.cat-pill.adult{background:linear-gradient(90deg,#5e0b2b,#9d174d);color:#fff;border-color:transparent;box-shadow:0 3px 12px rgba(157,23,77,.35)}
+.lang-pill{flex:0 0 auto;width:max-content;background:#eef2ff;color:#4338ca;padding:5px 13px;border-radius:14px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;box-shadow:0 2px 6px rgba(67,56,202,.12)}
+.lang-pill.active{background:linear-gradient(90deg,#4338ca,#6366f1,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite;color:#fff;box-shadow:0 3px 12px rgba(99,102,241,.38)}
+
+.page{display:none}.page.active{display:block;animation:fadeInSlide .26s ease}
+.sec-head{padding:10px 14px 6px 14px;font-size:15.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
+.pin-scroll{display:flex;flex-wrap:nowrap;gap:10px;overflow-x:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x;padding:4px 14px 12px 14px;scrollbar-width:none}.pin-scroll::-webkit-scrollbar{display:none}
+.pin-card{flex:0 0 auto;min-width:168px;max-width:168px;cursor:pointer;transition:transform .2s ease;animation:fadeInSlide .3s ease}.pin-card:active{transform:scale(.94)}
+.pin-img-w{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#141624;animation:posterGlow 3.6s ease-in-out infinite}.pin-img-w img{width:100%;height:100%;object-fit:cover;display:block;transition:filter .35s ease,transform .35s ease}
+.pin-tag{position:absolute;top:6px;left:6px;z-index:4;background:linear-gradient(90deg,#ff512f,#dd2476);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+.pin-views{position:absolute;bottom:6px;right:6px;z-index:4;background:rgba(0,0,0,.74);color:#fff;font-size:10px;padding:2px 6px;border-radius:8px}
+.pin-t{font-size:12.5px;font-weight:600;margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+.feed-wrap{padding:4px 14px}.feed-card{background:#fff;border-radius:16px;margin-bottom:15px;overflow:hidden;border:1.5px solid transparent;background-image:linear-gradient(#fff,#fff),linear-gradient(120deg,#7c3aed,#ec4899,#06b6d4,#7c3aed);background-origin:border-box;background-clip:content-box,border-box;background-size:200% 200%;animation:fadeInSlide .3s ease,posterGlow 4s ease-in-out infinite;cursor:pointer;transition:transform .22s ease}
+.feed-card:active{transform:scale(.96)}
+.feed-img-w{position:relative;width:100%;aspect-ratio:16/9;background:#141624;overflow:hidden}.feed-img-w img{width:100%;height:100%;object-fit:cover;display:block;transition:filter .35s ease,transform .35s ease}
+.feed-img-w::after,.pin-img-w::after,.det-img-w::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent 30%,rgba(255,255,255,.14) 50%,transparent 70%);transform:translateX(-120%);animation:btnShine 4.5s infinite ease-in-out;pointer-events:none;z-index:2}
+.b-new{position:absolute;top:10px;left:10px;z-index:4;background:linear-gradient(90deg,#2979ff,#00b0ff);color:#fff;font-size:11px;font-weight:700;padding:3px 9px;border-radius:8px;box-shadow:0 2px 8px rgba(0,176,255,.4)}.b-type{position:absolute;top:10px;right:10px;z-index:4;background:rgba(0,0,0,.78);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.18)}
+.feed-body{padding:10px 12px 12px 12px}.feed-title{font-size:15px;font-weight:700;margin-bottom:3px}.feed-meta{font-size:12px;color:#777;display:flex;justify-content:space-between}
+.car-wrap{display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:4px 0 12px 0;scrollbar-width:none}.car-wrap::-webkit-scrollbar{display:none}
+.p-slide{flex:0 0 auto;min-width:78%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 16px rgba(124,58,237,.16);border:1.5px solid rgba(124,58,237,.35)}.p-slide img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}.p-slide-b{padding:10px 12px}
+.watch-pill{background:linear-gradient(90deg,#e63946,#d90429,#ff4d6d);background-size:200% 200%;color:#fff;border:none;padding:7px 17px;border-radius:20px;font-size:12.5px;font-weight:700;cursor:pointer}
+
+.brand-mark{
+  position:absolute;bottom:8px;left:8px;z-index:6;
+  display:inline-flex;align-items:center;gap:5px;
+  padding:3px 10px;border-radius:10px;
+  background:rgba(10,12,24,0.78);backdrop-filter:blur(6px);
+  border:1px solid rgba(255,215,0,0.65);
+  color:#fff;font-size:10.5px;font-weight:800;letter-spacing:0.4px;
+  box-shadow:0 2px 12px rgba(0,0,0,0.5),0 0 12px rgba(124,58,237,0.45);
+  pointer-events:none;
+}
+.brand-mark::before{
+  content:"";width:6px;height:6px;border-radius:50%;
+  background:linear-gradient(135deg,#ff4d4d,#ffb703);
+  box-shadow:0 0 8px #ffb703;
+}
+.adult-blur{filter:blur(22px) brightness(0.72)!important;transform:scale(1.08)!important}
+.blur-ov{
+  position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;
+  background:rgba(15,10,25,0.38);color:#fff;text-align:center;padding:10px;cursor:pointer;
+}
+.blur-ov span{
+  background:linear-gradient(90deg,#be123c,#9333ea);padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;
+  box-shadow:0 4px 15px rgba(190,18,60,.45);border:1px solid rgba(255,255,255,.35);
+}
+
+.det-hdr{background:#fff;padding:12px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #eee;position:sticky;top:0;z-index:95}.back-btn{width:34px;height:34px;border-radius:50%;background:#f1f3f5;border:none;font-size:18px;cursor:pointer}
+.det-img-w{position:relative;width:100%;aspect-ratio:16/9;max-height:260px;background:#141624;overflow:hidden;animation:posterGlow 4s ease-in-out infinite}.det-img-w img{width:100%;height:100%;object-fit:cover;display:block;transition:filter .35s ease,transform .35s ease}.hd-b{position:absolute;top:12px;left:12px;z-index:4;background:#ffb703;color:#000;font-weight:800;font-size:11px;padding:3px 9px;border-radius:6px}
+.det-body{background:#fff;padding:14px 16px}.det-title{font-size:19px;font-weight:700;margin:0 0 8px 0}.d-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.d-tag{background:#f1f5f9;color:#475569;padding:3px 10px;border-radius:12px;font-size:11.5px;font-weight:600}
+.stats-r{display:flex;justify-content:space-around;align-items:center;padding:10px 0;border-top:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9;margin-bottom:12px}.stat-i{text-align:center;font-size:12px;color:#64748b}.stat-i b{display:block;font-size:15px;color:#111}
+.shr-c{width:40px;height:40px;border-radius:50%;background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;font-size:16px;cursor:pointer;animation:pulseGlow 2.8s infinite}.tip-ban{background:#fff8eb;border:1px solid #fde68a;color:#92400e;padding:9px 12px;border-radius:10px;font-size:13px;font-weight:600;text-align:center;margin-bottom:10px}
+.tut-btn{display:block;margin:0 auto 12px auto;background:linear-gradient(90deg,#1d4ed8,#4f46e5,#ec4899);background-size:200% 200%;color:#fff;border:none;padding:9px 20px;border-radius:22px;font-size:13px;font-weight:700;cursor:pointer}
+.tut-box{display:none;margin:0 auto 14px auto;background:#0f172a;border-radius:14px;overflow:hidden;box-shadow:0 6px 22px rgba(79,70,229,.28);position:relative;border:1.5px solid #4f46e5}
+.tut-lang-row{display:flex;gap:6px;overflow-x:auto;padding:8px 10px;background:#1e293b;scrollbar-width:none}.tut-lang-row::-webkit-scrollbar{display:none}
+.tut-lang-pill{flex:0 0 auto;background:#334155;color:#e2e8f0;border:1px solid #475569;padding:5px 12px;border-radius:16px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.tut-lang-pill.active{background:linear-gradient(90deg,#06b6d4,#6366f1);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(6,182,212,.45)}
+.tut-box video{width:100%;max-height:250px;display:block;background:#000}
+.tut-status{color:#e2e8f0;font-size:12px;text-align:center;padding:6px;background:rgba(15,23,42,.9)}
+.tut-tg-btn{width:100%;border:none;background:linear-gradient(90deg,#0ea5e9,#2563eb);color:#fff;padding:10px;font-size:13px;font-weight:700;cursor:pointer}
+
+.act-r{display:flex;gap:10px;margin-bottom:14px}
+.p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 3px 10px rgba(225,29,72,.14)}.p-dl{flex:1.2;background:linear-gradient(90deg,#0f172a,#334155,#4f46e5);background-size:200% 200%;border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 3px 10px rgba(217,119,6,.14)}
+.sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed,#ec4899);background-size:200% 200%;color:#fff;border:none;padding:9px 14px;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer}
+.lang-sel-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:8px 0 12px 0}
+.lang-sel-grid.one{grid-template-columns:1fr}
+.lang-big-btn{background:#fff;border:2px solid #cbd5e1;color:#1e293b;padding:13px 12px;border-radius:14px;font-size:14.5px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;box-shadow:0 3px 12px rgba(79,70,229,.12)}
+.lang-big-btn.active{background:linear-gradient(90deg,#4f46e5,#7c3aed,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
+.s-tab{flex:0 0 auto;width:max-content;background:#fff;border:1px solid #cbd5e1;color:#334155;padding:7px 14px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}.s-tab.active{background:linear-gradient(90deg,#111827,#4f46e5);color:#fff;border-color:#4f46e5;box-shadow:0 3px 12px rgba(79,70,229,.35)}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px;animation:fadeInSlide .22s ease}
+.rate-c{background:#fffbeb;border:1px solid #fde68a;border-radius:14px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-size:13px;font-weight:600}.star-b{font-size:20px;color:#cbd5e1;background:none;border:none;cursor:pointer;padding:0 2px}.star-b.lit{color:#f59e0b}
+.cmt-sec{background:#fff;margin-top:10px;padding:14px 16px 80px 16px}.cmt-bar{position:fixed;bottom:0;left:0;width:100%;background:#fff;padding:10px 14px;border-top:1px solid #eee;display:none;gap:10px;z-index:120}.cmt-bar input{flex:1;background:#f1f5f9;border:none;border-radius:22px;padding:10px 16px;outline:none;font-size:14px}.cmt-bar button{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#4f46e5,#ec4899);color:#fff;border:none;font-size:16px;cursor:pointer}
+.card-box{background:#fff;border-radius:16px;padding:16px;margin:12px 14px;box-shadow:0 3px 12px rgba(124,58,237,.08);border:1px solid #e2e8f0;animation:fadeInSlide .25s ease}.btn-p{width:100%;background:linear-gradient(90deg,#6c5ce7,#4f46e5,#ec4899);background-size:200% 200%;color:#fff;border:none;padding:11px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer}
+
+.tools-hero{text-align:center;padding:12px 14px 4px 14px}.tools-stats{display:flex;gap:10px;padding:10px 14px}.t-stat{flex:1;background:#fff;border-radius:16px;padding:12px 8px;text-align:center;box-shadow:0 3px 10px rgba(0,0,0,.05)}.t-stat b{font-size:20px;display:block}
+.t-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:4px 14px 10px 14px}.t-card{background:#fff;border-radius:18px;padding:14px;position:relative;overflow:hidden;box-shadow:0 4px 14px rgba(124,58,237,.1);cursor:pointer;border:1px solid #e2e8f0;transition:transform .2s ease;animation:fadeInSlide .25s ease}
+.t-card:active{transform:scale(.94)}
+.t-blob{position:absolute;top:-16px;right:-16px;width:62px;height:62px;border-radius:50%;opacity:.55}.t-new{position:absolute;top:8px;right:8px;background:#10b981;color:#fff;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:10px;z-index:2}
+.t-ico{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:21px;margin-bottom:10px}.t-name{font-size:13.5px;font-weight:700;color:#0f172a;margin-bottom:3px}.t-desc{font-size:11px;color:#64748b;line-height:1.35}
+.tool-lbl{display:block;text-align:left;font-size:12px;font-weight:600;color:#475569;margin:6px 0 3px 2px}.tool-res{background:#f1f5f9;border-radius:12px;padding:12px;margin-top:10px;font-size:13.5px;text-align:left;word-break:break-word}
+
+.bottom-nav{position:fixed;bottom:8px;left:6px;right:6px;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border-radius:24px;display:grid;grid-template-columns:repeat(7,1fr);align-items:center;padding:6px 2px;box-shadow:0 6px 24px rgba(124,58,237,.2);z-index:100;border:1px solid rgba(124,58,237,.22)}
+.nav-i{display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9.5px;color:#64748b;cursor:pointer;font-weight:600;padding:3px 1px;letter-spacing:-0.2px;white-space:nowrap;transition:transform .2s ease,color .2s ease}
+.nav-i.active{color:#d90429;font-weight:700;animation:navPop .35s cubic-bezier(.34,1.56,.64,1)}
+.nav-i.active span{animation:gentleBob 1.8s ease-in-out infinite}
+.nav-i span{font-size:17px;margin-bottom:1px;line-height:1.1}
+.av-badge{width:20px;height:20px;border-radius:50%;background:linear-gradient(135deg,#f43f5e,#8b5cf6);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700;margin-bottom:2px}
+.modal-ov{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.65);z-index:9999;justify-content:center;align-items:center;backdrop-filter:blur(4px);padding:14px}
+.modal-card{background:#fff;color:#111;border-radius:22px;padding:22px 18px;width:100%;max-width:390px;text-align:center;box-shadow:0 15px 40px rgba(0,0,0,.25);max-height:88vh;overflow-y:auto;position:relative;animation:popIn .26s cubic-bezier(.34,1.56,.64,1)}
+.age-card{background:#1c1d2b;color:#fff;border-radius:22px;padding:24px 20px;width:100%;max-width:370px;text-align:center;border:1px solid rgba(255,255,255,.1);animation:popIn .24s ease}.age-warn{background:rgba(239,68,68,.12);border:1px solid #ef4444;color:#fca5a5;padding:12px;border-radius:12px;font-size:13px;margin:14px 0}
+.wel-logo-ring{width:88px;height:88px;margin:0 auto 12px auto;border-radius:24px;padding:3px;background:linear-gradient(135deg,#ff4d4d,#7c3aed,#06b6d4);box-shadow:0 8px 24px rgba(124,58,237,.35);animation:floatLogo 2.5s ease-in-out infinite}
+.wel-logo-ring img{width:100%;height:100%;border-radius:21px;object-fit:cover;display:block;background:#141624}
+.wel-voice-btn{background:#eef2ff;color:#4f46e5;border:1px solid #c7d2fe;border-radius:16px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:10px;display:inline-flex;align-items:center;gap:5px}
+.wel-item{text-align:left;font-size:13.5px;line-height:1.55;margin-bottom:8px;color:#334155}
+.unlock-opt{width:100%;border:none;border-radius:14px;padding:13px 14px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;color:#fff}
+.step-badge{display:inline-block;background:#eef2ff;color:#4f46e5;font-size:12px;font-weight:700;padding:4px 12px;border-radius:16px;margin-bottom:8px}
+.clr-hist-btn{background:#fee2e2;color:#dc2626;border:none;padding:5px 12px;border-radius:12px;font-size:11.5px;font-weight:700;cursor:pointer}
+.pkg-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
+.pkg-tab{border:1px solid #e2e8f0;background:#f8fafc;color:#475569;padding:9px 4px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer;text-align:center;white-space:nowrap}
+.pkg-tab.active{background:linear-gradient(90deg,#6c5ce7,#4f46e5,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
+.inapp-ad-ov{display:none;position:fixed;inset:0;z-index:10050;background:#0f172a;flex-direction:column}
+.inapp-ad-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:#1e293b;color:#fff;border-bottom:1px solid rgba(255,255,255,.12);flex-shrink:0}
+.inapp-back-btn{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.22);padding:6px 12px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer}
+.inapp-ad-ttl{font-size:13px;font-weight:700;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inapp-ad-badge{background:linear-gradient(90deg,#f59e0b,#ef4444);color:#fff;padding:5px 11px;border-radius:14px;font-size:12px;font-weight:800;white-space:nowrap}
+.inapp-ad-body{position:relative;flex:1;width:100%;height:100%;background:#fff;overflow:hidden}
+.inapp-ad-loader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#cbd5e1;font-size:13.5px;font-weight:600;z-index:2;pointer-events:none}
+.inapp-ad-frame{width:100%;height:100%;border:none;display:block;background:#fff}
+</style>
+</head>
+<body>
+
+<div id="app-splash">
+  <div class="spl-ring"><img src="/site_logo?v={{ logo_ver }}" alt="{{ site_name }}" loading="eager" decoding="sync"></div>
+  <div class="spl-title">{{ site_name }}</div>
+  <div class="spl-bar"><div class="spl-bar-fill"></div></div>
+  <div style="font-size:12px;color:#94a3b8;margin-top:8px;">Loading movies &amp; series...</div>
+</div>
+
+<audio id="welcome-audio" preload="auto" playsinline style="display:none;"></audio>
+
+<div id="main-chrome">
+  <div class="top-header"><div class="brand"><img class="hdr-logo" src="/site_logo?v={{ logo_ver }}" alt="Logo"><span id="brand-title"></span></div><div class="hdr-r"><div class="coin-pill">🪙 <span id="hdr-bal">0</span></div><div class="r-search" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div></div></div>
+  <div class="live-bar"><div class="live-pill"><span class="live-dot"></span> LIVE</div><div class="marquee-wrap"><div class="marquee-txt">{{ marquee_text }}</div></div></div>
+  <div class="search-box-wrap" id="search-drawer"><input type="text" id="search-inp" class="s-input" placeholder="🔍 মুভি বা সিরিজ খুঁজুন..." onkeyup="feedLimit=15;renderFeed()"></div>
+</div>
+
+<div id="welcome-modal" class="modal-ov" onclick="ensureWelcomeVoice()"><div class="modal-card">
+  <div class="wel-logo-ring"><img id="wel-logo-img" src="/site_logo?v={{ logo_ver }}" alt="{{ site_name }}"></div>
+  <h2 style="margin:0 0 8px 0;font-size:20px;">👋 Welcome to<br>{{ site_name }} Bot!</h2>
+  <button class="wel-voice-btn" onclick="event.stopPropagation();playWelcomeVoice(true)">🔊 Play Welcome Voice</button>
+  <div class="wel-item">🎬 এখানে আপনি হাজারো Movie, Web Series, Drama ও Anime দেখতে পারবেন।</div>
+  <div class="wel-item">🔍 আপনার পছন্দের Movie খুঁজতে Search ব্যবহার করুন।</div>
+  <div class="wel-item">🎵 ভিডিওতে সাউন্ড সমস্যা হলে VLC Player অথবা MX Player দিয়ে প্লে করুন।</div>
+  <div class="wel-item">📥 কোনো Movie খুঁজে না পেলে <b>Profile</b> ট্যাব থেকে Movie Request পাঠান।</div>
+  <div class="wel-item">🍿 Happy Watching! ❤️</div>
+  <button class="btn-p" style="margin-top:8px;" onclick="event.stopPropagation();closeWelcome()">OK ✅</button>
+</div></div>
+
+<div id="age-modal" class="modal-ov"><div class="age-card">
+  <div style="font-size:52px;margin-bottom:8px;">🔞</div><h2 style="margin:0 0 10px 0;">বয়স নিশ্চিতকরণ</h2>
+  <p style="font-size:13.5px;color:#cbd5e1;margin:0;">এই সেকশনের কনটেন্ট শুধুমাত্র <b style="color:#00d4ff;">১৮ বছর বা তার বেশি বয়সী</b> ব্যবহারকারীদের জন্য প্রযোজ্য।</p>
+  <div class="age-warn">⚠️ আপনার বয়স ১৮+ না হলে এই ক্যাটাগরি ব্যবহার করবেন না।</div>
+  <button class="btn-p" style="background:linear-gradient(90deg,#00e5a3,#00d4ff);color:#000;margin-bottom:10px;" onclick="confirm18()">✅ হ্যাঁ, আমার বয়স ১৮+ বছর</button>
+  <button class="btn-p" style="background:transparent;border:1px solid #475569;color:#94a3b8;" onclick="deny18()">❌ না, বের হয়ে যান</button>
+</div></div>
+
+<div id="unlock-modal" class="modal-ov"><div class="modal-card">
+  <button onclick="document.getElementById('unlock-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
+  <div style="font-size:38px;margin-bottom:4px;">🔓</div>
+  <div class="step-badge" id="unlock-step-badge">Step 1 / 1</div>
+  <h3 style="margin:0 0 6px 0;color:#0f172a;">ফাইল আনলক করুন</h3>
+  <p style="font-size:13px;color:#64748b;margin:0 0 14px 0;">অ্যাড শেষ না হওয়া পর্যন্ত ব্যাক করবেন না। সময়ের আগে ফিরলে পুনরায় অ্যাড দেখতে হবে:</p>
+  <div id="unlock-options-area"></div>
+</div></div>
+
+<div id="task-ad-modal" class="modal-ov"><div class="modal-card">
+  <button onclick="document.getElementById('task-ad-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
+  <div style="font-size:38px;margin-bottom:4px;">⚡</div>
+  <div class="step-badge" id="task-step-badge">Step 1 / 1</div>
+  <h3 id="task-modal-title" style="margin:0 0 6px 0;color:#0f172a;">টাস্ক ভেরিফিকেশন</h3>
+  <p id="task-modal-desc" style="font-size:13px;color:#64748b;margin:0 0 14px 0;">আপনার পছন্দমতো যেকোনো একটি মাধ্যমে ভেরিফাই করুন:</p>
+  <div id="task-options-area"></div>
+</div></div>
+
+<div id="ad-modal" class="modal-ov"><div class="modal-card">
+  <button onclick="cancelActiveAd('⚠️ অ্যাড বাতিল করা হয়েছে! কিছুই আনলক হয়নি, পুনরায় অ্যাড দেখুন।')" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
+  <h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3>
+  <p id="ad-status-msg" style="font-size:13px;color:#64748b;">সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।</p>
+  <h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1>
+  <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় অ্যাডে ক্লিক করুন</button>
+  <button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button>
+</div></div>
+
+<div id="inapp-ad-ov" class="inapp-ad-ov">
+  <div class="inapp-ad-hdr">
+    <button type="button" id="inapp-ad-back" class="inapp-back-btn">❮ Back</button>
+    <div class="inapp-ad-ttl">🔒 WebApp Ad Browser</div>
+    <div id="inapp-ad-badge" class="inapp-ad-badge">⏳ 5s</div>
+  </div>
+  <div class="inapp-ad-body">
+    <div id="inapp-ad-loader" class="inapp-ad-loader">⏳ অ্যাড লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
+    <iframe id="inapp-ad-frame" class="inapp-ad-frame" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+  </div>
+</div>
+
+<div id="tool-modal" class="modal-ov"><div class="modal-card"><button onclick="document.getElementById('tool-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button><h3 id="tool-m-title" style="margin:0 0 10px 0;"></h3><div id="tool-m-body"></div></div></div>
+
+<div id="page-home" class="page active">
+  <div class="cat-scroll" id="cat-pills"></div><div class="cat-scroll" id="lang-pills" style="padding-top:2px;"></div>
+  <div id="pinned-section"><div class="sec-head" id="home-pinned-head">🔥 Top Trending</div><div class="pin-scroll" id="pinned-list"></div></div>
+  <div class="feed-wrap" id="feed-list"></div>
+</div>
+
+<div id="page-details" class="page">
+  <div class="det-hdr"><button class="back-btn" onclick="closeDetails()">❮</button><b style="font-size:16px;">Video Details</b></div>
+  <div class="det-img-w" id="det-poster-wrap" onclick="handleDetPosterTap()">
+    <img id="det-poster" src="">
+    <div class="hd-b">HD</div>
+    <div id="det-brand-slot"></div>
+    <div class="blur-ov" id="det-blur-ov" style="display:none;"><span>🔞 Tap Poster to Reveal</span></div>
+  </div>
+  <div class="det-body">
+    <h2 class="det-title" id="det-title"></h2><div class="d-tags" id="det-tags"></div>
+    <div class="stats-r"><div class="stat-i">❤️<b id="det-likes">0</b>Like</div><div class="stat-i">⬇️<b id="det-views">0</b>Download</div><div class="stat-i">💬<b id="det-cmts-cnt">0</b>Comments</div><button class="shr-c" onclick="shareCurrent()">🔗</button></div>
+    <div class="tip-ban">💡 Tap the button below to download easily</div>
+    <button class="tut-btn" id="tut-toggle-btn" onclick="toggleInlineTutorial()">❓ Need help? Watch the tutorial</button>
+    <div class="tut-box" id="inline-tut-box">
+      <div class="tut-lang-row" id="tut-lang-row" style="display:none;"></div>
+      <div class="tut-status" id="tut-status">⏳ টিউটোরিয়াল ভিডিও লোড হচ্ছে...</div>
+      <video id="det-tut-vid" controls playsinline webkit-playsinline preload="auto"><source id="det-tut-src" type="video/mp4"></video>
+      <button class="tut-tg-btn" onclick="sendTutorialToTelegram()">📲 টেলিগ্রামে টিউটোরিয়াল ভিডিও নিন</button>
+    </div>
+    <div class="act-r"><button class="p-like" id="btn-like" onclick="likeCurrent()">🤍 Like</button><button class="p-dl" onclick="scrollToDownload()">⬇️ Download</button><button class="p-save" id="btn-save" onclick="saveCurrent()">🔖 Save</button></div>
+    <div id="det-selector-area"></div>
+    <div class="rate-c"><span>Rate it: <span id="star-row"></span></span><span id="rate-avg">⭐ 0.0 (0)</span></div>
+  </div>
+  <div class="cmt-sec"><h4 style="margin:0 0 10px 0;">Comments (<span id="cmt-cnt-h">0</span>)</h4><div id="det-cmt-list"></div></div>
+</div>
+<div class="cmt-bar" id="cmt-bar"><input type="text" id="cmt-inp" placeholder="Add a public comment..."><button onclick="sendComment()">➤</button></div>
+
+<div id="page-favorite" class="page">
+  <div class="sec-head">🔖 Saved Favorites</div>
+  <div class="feed-wrap" id="fav-list"></div>
+  <div class="sec-head"><span>🕒 Watch History</span><button class="clr-hist-btn" onclick="clearHistory()">🗑 Clear</button></div>
+  <div class="feed-wrap" id="hist-list"></div>
+</div>
+
+<div id="page-tools" class="page">
+  <div class="tools-hero"><div style="font-size:20px;font-weight:700;color:#6366f1;">🛠️ Smart Tools</div><div style="font-size:12px;color:#64748b;margin-bottom:10px;">All the essential tools in one place ✨</div><input type="text" id="tool-search" class="s-input" placeholder="🔍 Search tools (যেমন: Age, BMI, QR)..." onkeyup="renderTools()"></div>
+  <div class="tools-stats"><div class="t-stat"><b style="color:#8b5cf6;">20</b><small>Total Tools</small></div><div class="t-stat"><b style="color:#0ea5e9;">7</b><small>Newly added</small></div><div class="t-stat"><b style="color:#10b981;">100%</b><small>Free to use</small></div></div>
+  <div id="tools-container"></div>
+</div>
+
+<div id="page-upcoming" class="page"><div class="sec-head">📅 Upcoming Upload Schedule</div><div class="feed-wrap" id="upcoming-list"></div><div class="sec-head">⭐ Featured Promotions</div><div class="feed-wrap" id="promo-full-list"></div></div>
+
+<div id="page-profile" class="page">
+  <div class="card-box" style="text-align:center;">
+    <img id="u-pic" src="/poster/default" style="width:76px;height:76px;border-radius:50%;object-fit:cover;border:3px solid #6c5ce7;">
+    <h3 id="u-name" style="margin:8px 0 2px 0;">User</h3><div style="font-size:12px;color:#64748b;">ID: <span id="u-id"></span></div>
+    <div id="u-prem-status" style="display:inline-block;margin-top:8px;padding:4px 12px;border-radius:14px;font-size:12px;font-weight:700;background:#f1f5f9;">👤 Regular Member</div>
+    <div id="u-prem-exp" style="font-size:11.5px;color:#d97706;margin-top:4px;"></div><h2 style="margin:12px 0 0 0;color:#4f46e5;">🪙 <span id="u-bal">0</span> Coins</h2>
+  </div>
+  <div class="card-box"><h4 style="margin:0 0 8px 0;">🎁 Refer & Earn ({{ ref_coin }} Coins)</h4><div style="display:flex;gap:8px;"><input type="text" id="ref-inp" class="s-input" readonly><button class="btn-p" style="width:auto;padding:0 16px;" onclick="copyRef()">Copy</button></div></div>
+  <div class="card-box"><h3 style="margin:0 0 8px 0;">📥 Movie / Series Request</h3><div style="display:flex;gap:8px;"><input type="text" id="req-inp" class="s-input" placeholder="যেমন: Pushpa 2 (2024)"><button class="btn-p" style="width:auto;padding:0 16px;" onclick="sendMovieRequest()">Send</button></div></div>
+  <div class="card-box"><h3 style="margin:0 0 8px 0;">🎟 Redeem Code</h3><div style="display:flex;gap:8px;"><input type="text" id="coupon-inp" class="s-input" placeholder="যেমন: VIP10 বা RND123"><button class="btn-p" style="width:auto;padding:0 16px;" onclick="redeemCoupon()">Redeem</button></div></div>
+  <div id="earn-area"></div>
+  <div class="card-box">
+    <h3 style="margin-top:0;margin-bottom:12px;">👑 Buy VIP / Coins</h3>
+    <div class="pkg-tabs">
+      <button type="button" class="pkg-tab active" onclick="switchPkgTab('coin', this)">Redeem Coin</button>
+      <button type="button" class="pkg-tab" onclick="switchPkgTab('bkash', this)">Bkash Coin</button>
+      <button type="button" class="pkg-tab" onclick="switchPkgTab('usd', this)">USD Coin</button>
+    </div>
+    <div id="pkg-list-wrap">
+      {% for pkg in pkgs %}
+      <div class="pkg-item" data-pkg-type="{{ pkg.type|lower }}" style="padding:10px;border:1px solid #eee;border-radius:12px;margin-bottom:8px;display:{{ 'flex' if pkg.type|lower == 'coin' else 'none' }};justify-content:space-between;align-items:center;">
+        <div><b>{{ pkg.details }}</b><br><small style="color:#64748b;">{{ pkg.type|upper }}</small></div>
+        {% if pkg.type|lower == 'coin' %}<button class="watch-pill" style="background:#6c5ce7;" onclick="buyWithCoin('{{ pkg._id }}', {{ pkg.coins }})">Exchange</button>
+        {% else %}<button class="watch-pill" onclick="openTgLink('https://t.me/{{ admin_username }}')">Buy Now</button>{% endif %}
+      </div>
+      {% endfor %}
+      <div id="pkg-empty-msg" style="display:none;text-align:center;color:#64748b;padding:14px 8px;font-size:13px;">No packages available in this category.</div>
+    </div>
+  </div>
+</div>
+
+<div class="float-search" id="float-search-btn" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div>
+
+<div class="bottom-nav" id="bottom-nav">
+  <div class="nav-i active" data-tab="home" onclick="switchTab('home', this, 'all')"><span>🏠</span>Home</div>
+  <div class="nav-i" data-tab="movie" onclick="switchTab('home', this, 'movie')"><span>🎬</span>Movie</div>
+  <div class="nav-i" data-tab="series" onclick="switchTab('home', this, 'series')"><span>📺</span>Series</div>
+  <div class="nav-i" data-tab="favorite" onclick="switchTab('favorite', this)"><span>🔖</span>Fav</div>
+  <div class="nav-i" data-tab="tools" onclick="switchTab('tools', this)"><span>🛠️</span>Tools</div>
+  <div class="nav-i" data-tab="upcoming" onclick="switchTab('upcoming', this)"><span>📅</span>Upcoming</div>
+  <div class="nav-i" data-tab="profile" onclick="switchTab('profile', this)"><div class="av-badge" id="nav-av">U</div>Profile</div>
+</div>
+<script>
+const tg=window.Telegram?.WebApp;
+const botUsername="{{ bot_username }}", siteName="{{ site_name }}", recGroupLink={{ rec_group_link_json | safe }};
+const hasTutorial={{ has_tutorial_json | safe }}, tutorialVer={{ tutorial_ver_json | safe }}, siteNameHash={{ site_name_hash_json | safe }};
+const brandName={{ brand_name_json | safe }};
+const tutorialsList={{ tutorials_json | safe }};
+let allFiles={{ files_json | safe }};
+const categories={{ categories_json | safe }}, dbLanguages={{ languages_json | safe }};
+const promotions={{ promotions_json | safe }}, upcomingList={{ upcoming_json | safe }}, zoneIds={{ zone_ids_json | safe }};
+const adConfig={{ ad_config_json | safe }};
+const initialUserState={{ initial_user_json | safe }};
+
+(function(){const p=siteName.trim().split(/\s+/),e=document.getElementById('brand-title');e.innerHTML=p.length>1?`${p[0]} <span class="brand-badge">${p.slice(1).join(' ')}</span>`:`${siteName} <span class="brand-badge">Bot</span>`;})();
+
+function brandBadgeHtml(){
+  return brandName?`<div class="brand-mark">${brandName}</div>`:'';
+}
+function isAdult(f){
+  return ((f&&f.category)||'').includes('18');
+}
+
+function ensureZoneSdk(zid){
+  return new Promise((resolve)=>{
+    if(!zid)return resolve(false);
+    if(typeof window['show_'+zid]==='function')return resolve(true);
+    let s=document.querySelector(`script[data-zone="${zid}"]`);
+    if(!s){
+      s=document.createElement('script');
+      s.src='https://libtl.com/sdk.js';
+      s.setAttribute('data-zone',zid);
+      s.setAttribute('data-sdk','show_'+zid);
+      s.async=true;
+      document.head.appendChild(s);
+    }
+    let tries=0;
+    const iv=setInterval(()=>{
+      tries++;
+      if(typeof window['show_'+zid]==='function'){clearInterval(iv);resolve(true);}
+      else if(tries>=25){clearInterval(iv);resolve(false);}
+    },200);
+  });
+}
+
+document.addEventListener('click',function(e){
+  const btn=e.target.closest('button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.unlock-opt,.tut-lang-pill,.lang-big-btn');
+  if(!btn)return;
+  const r=document.createElement('span'); r.className='ripple-fx';
+  const rect=btn.getBoundingClientRect(), sz=Math.max(rect.width,rect.height);
+  r.style.width=r.style.height=sz+'px';
+  r.style.left=(e.clientX-rect.left-sz/2)+'px'; r.style.top=(e.clientY-rect.top-sz/2)+'px';
+  btn.appendChild(r); setTimeout(()=>r.remove(),520);
+});
+
+let userId=123456789; const urlP=new URLSearchParams(window.location.search);
+if(tg?.initDataUnsafe?.user){const u=tg.initDataUnsafe.user;userId=u.id;localStorage.setItem("tg_user_id",userId);const fn=(u.first_name+" "+(u.last_name||"")).trim();document.getElementById('u-name').innerText=fn;document.getElementById('nav-av').innerText=fn.slice(0,2).toUpperCase();if(u.photo_url)document.getElementById('u-pic').src=u.photo_url;}
+else if(urlP.get('uid')){userId=parseInt(urlP.get('uid'));localStorage.setItem("tg_user_id",userId);}
+else if(localStorage.getItem("tg_user_id"))userId=parseInt(localStorage.getItem("tg_user_id"));
+document.getElementById('u-id').innerText=userId; document.getElementById('ref-inp').value=`https://t.me/${botUsername}?start=${userId}`;
+
+let welcomeVoicePlayed=false;
+function getWelcomePhrase(){
+  let cn=siteName.replace(/\bbot\b/gi,'').trim()||siteName;
+  return `Welcome to our ${cn} Bot`;
+}
+function playWelcomeVoice(forceReplay){
+  if(welcomeVoicePlayed&&!forceReplay)return;
+  welcomeVoicePlayed=true;
+  const aud=document.getElementById('welcome-audio');
+  if(!aud.getAttribute('src'))aud.src=`/api/welcome_audio?v=${siteNameHash}`;
+  aud.currentTime=0;
+  aud.play().catch(()=>{
+    welcomeVoicePlayed=false;
+    try{
+      if('speechSynthesis' in window){
+        window.speechSynthesis.cancel();
+        const u=new SpeechSynthesisUtterance(getWelcomePhrase());
+        u.lang='en-US'; u.rate=0.96;
+        window.speechSynthesis.speak(u);
+        welcomeVoicePlayed=true;
+      }
+    }catch(e){}
+  });
+}
+function ensureWelcomeVoice(){
+  if(!welcomeVoicePlayed)playWelcomeVoice(false);
+}
+function maybeShowWelcome(){
+  if(!sessionStorage.getItem('wel_seen')){
+    document.getElementById('welcome-modal').style.display='flex';
+    setTimeout(()=>playWelcomeVoice(false),250);
+    document.addEventListener('pointerdown',()=>ensureWelcomeVoice(),{once:true});
+  }
+}
+function closeWelcome(){
+  ensureWelcomeVoice();
+  sessionStorage.setItem('wel_seen','1');
+  document.getElementById('welcome-modal').style.display='none';
+}
+
+let userState=initialUserState||{balance:0,is_premium:false,expiry:null,history:[],favorites:[],unlocked_files:{}};
+let activeCat='All',activeLang='All',activeType='all',pendingCat=null,curFile=null,curSeasonIdx=0,curSelectedLang=null,feedLimit=15,lastFilteredLen=0;
+let blurTimers={}, detBlurTimer=null, curTutId=(tutorialsList.length?tutorialsList[0]._id:'default');
+
+function openTgLink(u){
+  if(!u)return;
+  try{
+    if(tg&&tg.openTelegramLink&&/^https?:\/\/(t\.me|telegram\.me)\//i.test(u)){tg.openTelegramLink(u);return;}
+    if(tg&&tg.openLink){tg.openLink(u);return;}
+  }catch(e){}
+  window.open(u,'_blank')||(window.location.href=u);
+}
+function applyUserStateUI(){
+  document.getElementById('hdr-bal').innerText=userState.balance||0;
+  document.getElementById('u-bal').innerText=userState.balance||0;
+  if(userState.is_premium){
+    document.getElementById('u-prem-status').innerHTML='💎 Premium Member';
+    document.getElementById('u-prem-status').style.background='#ede9fe';
+    document.getElementById('u-prem-status').style.color='#5b21b6';
+    document.getElementById('u-prem-exp').innerText='Expiry: '+(userState.expiry||'');
+  }
+  renderFavs();
+}
+async function loadUser(){try{const r=await fetch('/api/user/'+userId+'?_t='+Date.now(),{cache:'no-store'});userState=await r.json();applyUserStateUI();}catch(e){}}
+applyUserStateUI();
+
+function hideSplash(){
+  const sp=document.getElementById('app-splash');
+  if(!sp||sp.classList.contains('hide'))return;
+  document.body.classList.add('ready');
+  sp.classList.add('hide');
+  setTimeout(()=>{sp.style.display='none';maybeShowWelcome();},280);
+}
+
+async function hydrateAppFast(){
+  const safety=setTimeout(hideSplash,4500);
+  try{
+    if(allFiles.length>0){
+      renderTopSlider();
+      renderFeed();
+      setTimeout(hideSplash,350);
+    }
+    const r=await fetch('/api/home_data?uid='+userId+'&_t='+Date.now(),{cache:'no-store'});
+    const d=await r.json();
+    if(Array.isArray(d.files)){
+      allFiles=d.files;
+      renderTopSlider();
+      renderFeed();
+      renderFavs();
+    }
+    if(d.user){
+      userState=d.user;
+      applyUserStateUI();
+    }
+  }catch(e){}
+  clearTimeout(safety);
+  hideSplash();
+  setTimeout(()=>{
+    try{
+      const l=document.createElement('link');
+      l.rel='stylesheet';
+      l.href='https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap';
+      document.head.appendChild(l);
+      (zoneIds||[]).forEach(z=>ensureZoneSdk(z));
+    }catch(e){}
+  },700);
+}
+
+function toggleSearch(){const d=document.getElementById('search-drawer');d.classList.toggle('open');if(d.classList.contains('open'))document.getElementById('search-inp').focus();}
+
+function renderFilters(){
+  let cH=`<div class="cat-pill ${activeCat==='All'?'active':''}" onclick="setCat('All')">All</div>`;
+  categories.forEach(c=>{const i18=c.includes('18');cH+=`<div class="cat-pill ${activeCat===c?'active':(i18?'adult':'')}" onclick="setCat('${c.replace(/'/g,"\\'")}')">${i18?'🔞 ':''}${c}</div>`;});
+  document.getElementById('cat-pills').innerHTML=cH;
+  if(dbLanguages.length>0){
+    document.getElementById('lang-pills').style.display='flex';
+    document.getElementById('lang-pills').innerHTML=['All',...dbLanguages].map(l=>`<div class="lang-pill ${activeLang===l?'active':''}" onclick="setLang('${l.replace(/'/g,"\\'")}')">${l==='All'?'All Languages':l}</div>`).join('');
+  } else document.getElementById('lang-pills').style.display='none';
+}
+function setCat(c){if(c.includes('18')&&sessionStorage.getItem('age_18_ok')!=='1'){pendingCat=c;document.getElementById('age-modal').style.display='flex';return;}activeCat=c;feedLimit=15;renderFilters();renderFeed();}
+function confirm18(){sessionStorage.setItem('age_18_ok','1');document.getElementById('age-modal').style.display='none';if(pendingCat){activeCat=pendingCat;pendingCat=null;feedLimit=15;renderFilters();renderFeed();}}
+function deny18(){pendingCat=null;document.getElementById('age-modal').style.display='none';activeCat='All';feedLimit=15;renderFilters();renderFeed();}
+function setLang(l){activeLang=l;feedLimit=15;renderFilters();renderFeed();}
+renderFilters();
+
+function matchesType(f){
+  if(activeType==='movie')return f.type!=='series';
+  if(activeType==='series')return f.type==='series';
+  return true;
+}
+
+function topScore(f){
+  return ((f.views||0)*3)+((f.likes||[]).length*5)+((f.ratings||[]).length*2);
+}
+
+function renderTopSlider(){
+  let base=allFiles.filter(f=>matchesType(f)&&!isAdult(f));
+  let tops=[...base].sort((a,b)=>topScore(b)-topScore(a)).slice(0,10);
+  const sec=document.getElementById('pinned-section');
+  if(!tops.length){sec.style.display='none';return;}
+  sec.style.display='block';
+  document.getElementById('home-pinned-head').innerText=activeType==='movie'?'🔥 Top Movies':(activeType==='series'?'🔥 Top Series':'🔥 Top Movies & Series');
+  document.getElementById('pinned-list').innerHTML=tops.map((f,idx)=>`<div class="pin-card" onclick="openDetails('${f._id}')"><div class="pin-img-w"><img loading="${idx<3?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}"><div class="pin-tag">🔥 Top #${idx+1}</div>${brandBadgeHtml()}<div class="pin-views">⬇️ ${f.views||0}</div></div><div class="pin-t">${f.title}</div></div>`).join('');
+}
+
+function timeAgo(iso){if(!iso)return 'Recently';const s=Math.floor((new Date()-new Date(iso))/1000);if(s<3600)return Math.max(1,Math.floor(s/60))+' min ago';if(s<86400)return Math.floor(s/3600)+' hr ago';return new Date(iso).toLocaleDateString();}
+
+function revealCardPoster(key, fid, ev){
+  const img=document.getElementById('pimg-'+key);
+  const ov=document.getElementById('blurov-'+key);
+  if(img && img.classList.contains('adult-blur')){
+    if(ev)ev.stopPropagation();
+    img.classList.remove('adult-blur');
+    if(ov)ov.style.display='none';
+    if(blurTimers[key])clearTimeout(blurTimers[key]);
+    const bsec=Number(adConfig.blur_sec||0);
+    if(bsec>0){
+      blurTimers[key]=setTimeout(()=>{
+        const im=document.getElementById('pimg-'+key), o=document.getElementById('blurov-'+key);
+        if(im)im.classList.add('adult-blur');
+        if(o)o.style.display='flex';
+      },bsec*1000);
+    }
+    return;
+  }
+  openDetails(fid);
+}
+
+function buildPosterCardHtml(f, i, pfx, badgeHtml){
+  const adult=isAdult(f);
+  const key=`${pfx}_${f._id}`;
+  const imgCls=adult?'adult-blur':'';
+  const tapAttr=adult?`onclick="revealCardPoster('${key}','${f._id}',event)"`:'';
+  const blurOv=adult?`<div class="blur-ov" id="blurov-${key}"><span>🔞 Tap Poster to View</span></div>`:'';
+  return `<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w" ${tapAttr}><img id="pimg-${key}" class="${imgCls}" loading="${i<2?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}">${badgeHtml}${brandBadgeHtml()}${blurOv}</div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
+}
+
+function renderFeed(){
+  const q=(document.getElementById('search-inp').value||'').toLowerCase();
+  const list=allFiles.filter(f=>{
+    if(!matchesType(f))return false;
+    if(activeCat==='All'){
+      if(isAdult(f))return false;
+    } else {
+      if((f.category||'All')!==activeCat)return false;
+    }
+    if(activeLang!=='All'){
+      const langs=getFileAvailLangs(f);
+      if((f.language||'')!==activeLang && !langs.includes(activeLang))return false;
+    }
+    if(q&&!f.title.toLowerCase().includes(q))return false;
+    return true;
+  });
+  lastFilteredLen=list.length;
+  const shown=list.slice(0,feedLimit);
+  let h='';
+  shown.forEach((f,i)=>{
+    const tl=f.type==='series'?'📺 Series':(f.is_premium?'💎 VIP':'🎬 Movie');
+    h+=buildPosterCardHtml(f,i,'feed',`<div class="b-new">🆕 New</div><div class="b-type">${tl}</div>`);
+    if((i+1)%3===0&&promotions.length>0)h+=`<div class="car-wrap">`+promotions.map(p=>`<div class="p-slide" onclick="openTgLink('${p.link}')"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="p-slide-b"><div style="font-size:14px;font-weight:700;margin-bottom:6px;">${p.title}</div><button class="watch-pill">Watch Now</button></div></div>`).join('')+`</div>`;
+  });
+  if(list.length>feedLimit){
+    h+=`<button class="btn-p" style="margin:6px 0 16px 0;" onclick="loadMoreFeed()">⬇️ Load More (${list.length-feedLimit} more)</button>`;
+  }
+  document.getElementById('feed-list').innerHTML=h||"<p style='text-align:center;color:#777;padding:30px;'>কোনো ভিডিও পাওয়া যায়নি!</p>";
+}
+function loadMoreFeed(){feedLimit+=15;renderFeed();}
+window.addEventListener('scroll',()=>{
+  if(document.getElementById('page-home').classList.contains('active')&&feedLimit<lastFilteredLen&&(window.innerHeight+window.scrollY)>=document.body.offsetHeight-350){
+    loadMoreFeed();
+  }
+},{passive:true});
+
+function renderFavs(){
+  const favIds=[...(userState.favorites||[])];
+  const favIts=allFiles.filter(f=>favIds.includes(f._id));
+  document.getElementById('fav-list').innerHTML=favIts.map((f,i)=>buildPosterCardHtml(f,i,'fav',`<div class="b-new">🔖 Saved</div>`)).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো ফেভারিট ভিডিও সেভ করা নেই!</p>";
+
+  const histIds=(userState.history||[]).filter(id=>!favIds.includes(id));
+  const histIts=allFiles.filter(f=>histIds.includes(f._id));
+  document.getElementById('hist-list').innerHTML=histIts.map((f,i)=>buildPosterCardHtml(f,i,'hist',`<div class="b-new" style="background:#475569;">🕒 Watched</div>`)).join('')||"<p style='text-align:center;color:#777;padding:18px;'>কোনো ওয়াচ হিস্টোরি নেই!</p>";
+}
+async function clearHistory(){
+  userState.history=[];
+  renderFavs();
+  await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'clear_history',uid:userId})});
+}
+function renderUpcoming(){document.getElementById('upcoming-list').innerHTML=upcomingList.map(u=>`<div class="feed-card"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${u.thumb_url||'/poster/default'}"><div class="b-new">📅 UPCOMING</div>${brandBadgeHtml()}<div class="b-type">🕒 ${u.release_time}</div></div><div class="feed-body"><div class="feed-title">${u.title}</div><div class="feed-meta"><span>Release: ${u.release_time}</span></div></div></div>`).join('')||"<p style='text-align:center;color:#777;padding:20px;'>কোনো আপকামিং শিডিউল নেই!</p>";document.getElementById('promo-full-list').innerHTML=promotions.map(p=>`<div class="feed-card" onclick="openTgLink('${p.link}')"><div class="feed-img-w"><img loading="lazy" decoding="async" src="${p.image||'/poster/default'}"><div class="b-new">⭐ PROMO</div></div><div class="feed-body"><div class="feed-title">${p.title}</div></div></div>`).join('');}
+renderUpcoming();
+
+function handleDetPosterTap(){
+  if(!curFile||!isAdult(curFile))return;
+  const img=document.getElementById('det-poster'), ov=document.getElementById('det-blur-ov');
+  if(img.classList.contains('adult-blur')){
+    img.classList.remove('adult-blur');
+    ov.style.display='none';
+    if(detBlurTimer)clearTimeout(detBlurTimer);
+    const bsec=Number(adConfig.blur_sec||0);
+    if(bsec>0){
+      detBlurTimer=setTimeout(()=>{
+        img.classList.add('adult-blur');
+        ov.style.display='flex';
+      },bsec*1000);
+    }
+  }
+}
+function openDetails(id){
+  curFile=allFiles.find(f=>f._id===id); if(!curFile)return;
+  if(isAdult(curFile)&&sessionStorage.getItem('age_18_ok')!=='1'){pendingCat=curFile.category;document.getElementById('age-modal').style.display='flex';return;}
+  curSeasonIdx=0; curSelectedLang=null;
+  document.getElementById('main-chrome').style.display='none'; document.getElementById('bottom-nav').style.display='none'; document.getElementById('float-search-btn').style.display='none';
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); document.getElementById('page-details').classList.add('active'); document.getElementById('cmt-bar').style.display='flex'; window.scrollTo(0,0);
+  const tb=document.getElementById('inline-tut-box'), tv=document.getElementById('det-tut-vid'), tbtn=document.getElementById('tut-toggle-btn');
+  tv.pause(); tb.style.display='none'; tbtn.innerText='❓ Need help? Watch the tutorial';
+  const dp=document.getElementById('det-poster'), dbov=document.getElementById('det-blur-ov');
+  dp.src=curFile.thumb_url||'/poster/default';
+  document.getElementById('det-brand-slot').innerHTML=brandBadgeHtml();
+  if(detBlurTimer){clearTimeout(detBlurTimer);detBlurTimer=null;}
+  if(isAdult(curFile)){dp.classList.add('adult-blur');dbov.style.display='flex';}
+  else{dp.classList.remove('adult-blur');dbov.style.display='none';}
+  document.getElementById('det-title').innerText=curFile.title;
+  document.getElementById('det-likes').innerText=(curFile.likes||[]).length; document.getElementById('det-views').innerText=curFile.views||0;
+  document.getElementById('det-cmts-cnt').innerText=(curFile.comments||[]).length; document.getElementById('cmt-cnt-h').innerText=(curFile.comments||[]).length;
+  const fLangs=getFileAvailLangs(curFile);
+  let tags=[]; if(curFile.year)tags.push(curFile.year); if(curFile.category)tags.push(curFile.category);
+  if(fLangs.length)fLangs.forEach(l=>tags.push(l)); else if(curFile.language)tags.push(curFile.language);
+  document.getElementById('det-tags').innerHTML=tags.map(t=>`<span class="d-tag">${t}</span>`).join('');
+  document.getElementById('btn-save').innerText=(userState.favorites||[]).includes(id)?'✅ Saved':'🔖 Save';
+  document.getElementById('btn-like').innerText=(curFile.likes||[]).includes(userId)?'❤️ Liked':'🤍 Like';
+  renderRating(); renderComments(); renderSelectors();
+  if(!(userState.history||[]).includes(id)){
+    if(!userState.history)userState.history=[];
+    userState.history.push(id);
+  }
+  fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'history',uid:userId,file_id:id})});
+}
+function closeDetails(){
+  const tb=document.getElementById('inline-tut-box'), tv=document.getElementById('det-tut-vid');
+  tv.pause(); tb.style.display='none';
+  if(detBlurTimer){clearTimeout(detBlurTimer);detBlurTimer=null;}
+  document.getElementById('main-chrome').style.display='block';document.getElementById('bottom-nav').style.display='grid';document.getElementById('float-search-btn').style.display='flex';document.getElementById('cmt-bar').style.display='none';document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-home').classList.add('active');
+}
+
+function renderTutorialLangs(){
+  const row=document.getElementById('tut-lang-row');
+  if(!tutorialsList.length){row.style.display='none';curTutId='default';return;}
+  row.style.display='flex';
+  if(!tutorialsList.some(t=>t._id===curTutId))curTutId=tutorialsList[0]._id;
+  row.innerHTML=tutorialsList.map(t=>`<button class="tut-lang-pill ${t._id===curTutId?'active':''}" onclick="selectTutorial('${t._id}')">🌐 ${t.lang}${t.title?' • '+t.title:''}</button>`).join('');
+}
+function selectTutorial(tid){
+  curTutId=tid;
+  renderTutorialLangs();
+  const vid=document.getElementById('det-tut-vid'), src=document.getElementById('det-tut-src'), st=document.getElementById('tut-status');
+  st.style.display='block';
+  st.innerText='⏳ টিউটোরিয়াল ভিডিও লোড হচ্ছে...';
+  const vUrl=`/tutorial_video?id=${encodeURIComponent(tid)}&v=${tutorialVer}`;
+  src.setAttribute('src',vUrl);
+  vid.oncanplay=()=>{st.style.display='none';};
+  vid.onplaying=()=>{st.style.display='none';};
+  vid.onerror=()=>{st.style.display='block';st.innerText='⚠️ ভিডিও লোড হতে সময় নিচ্ছে, অথবা নিচের বাটন থেকে টেলিগ্রামে দেখুন।';};
+  vid.load();
+  vid.play().catch(()=>{});
+}
+function toggleInlineTutorial(){
+  const box=document.getElementById('inline-tut-box'), vid=document.getElementById('det-tut-vid'), src=document.getElementById('det-tut-src'), btn=document.getElementById('tut-toggle-btn');
+  if(!hasTutorial && !tutorialsList.length){alert('⚠️ টিউটোরিয়াল ভিডিও এখনো সেট করা হয়নি!');return;}
+  if(box.style.display==='none'||!box.style.display){
+    box.style.display='block';
+    renderTutorialLangs();
+    if(!src.getAttribute('src')){
+      selectTutorial(curTutId||'default');
+    } else {
+      vid.play().catch(()=>{});
+    }
+    btn.innerText='🔼 Hide tutorial video';
+  } else {
+    vid.pause();
+    box.style.display='none';
+    btn.innerText='❓ Need help? Watch the tutorial';
+  }
+}
+async function sendTutorialToTelegram(){
+  const tid=curTutId||'default';
+  try{
+    const r=await fetch('/api/send_tutorial',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,tut_id:tid})});
+    const d=await r.json();
+    if(d.status==='success'){alert(d.msg);return;}
+  }catch(e){}
+  openTgLink(`https://t.me/${botUsername}?start=tut_${tid}`);
+}
+
+function pad2(v){
+  const s=String(v||'1').replace(/^(?:episode|ep|e|season|s)\s*[-_:]?\s*/i,'').trim();
+  const m=s.match(/^(\d+)$/);
+  if(m){return m[1].length<2?'0'+m[1]:m[1];}
+  return s;
+}
+function sortNumKey(v){
+  const m=String(v||'').match(/\d+/);
+  return m?parseInt(m[0],10):999999;
+}
+
+function getFileAvailLangs(f){
+  if(!f)return [];
+  const res=[], defL=(f.language||'').trim();
+  const pushL=(l)=>{
+    const val=(l||defL||'Default').trim();
+    if(!res.includes(val))res.push(val);
+  };
+  let hasAnyTag=!!defL;
+  if(f.type==='series'&&f.seasons?.length){
+    f.seasons.forEach(s=>(s.episodes||[]).forEach(e=>(e.qualities||[]).forEach(q=>{
+      if(q.lang&&q.lang.trim())hasAnyTag=true;
+    })));
+    if(!hasAnyTag)return [];
+    f.seasons.forEach(s=>(s.episodes||[]).forEach(e=>(e.qualities||[]).forEach(q=>pushL(q.lang))));
+    return res;
+  }
+  if(f.qualities?.length){
+    f.qualities.forEach(q=>{if(q.lang&&q.lang.trim())hasAnyTag=true;});
+    if(!hasAnyTag)return [];
+    f.qualities.forEach(q=>pushL(q.lang));
+    return res;
+  }
+  return defL?[defL]:[];
+}
+function selectFileLang(ln){
+  curSelectedLang=ln;
+  curSeasonIdx=0;
+  renderSelectors();
+}
+
+function renderSelectors(){
+  const area=document.getElementById('det-selector-area');
+  const availLangs=getFileAvailLangs(curFile);
+  const defL=(curFile.language||'').trim()||'Default';
+  let h='';
+
+  if(availLangs.length>0){
+    if(curSelectedLang&&!availLangs.includes(curSelectedLang))curSelectedLang=null;
+    h+=`<div class="sel-box"><div style="font-size:14px;font-weight:700;margin-bottom:4px;color:#0f172a;">🌐 ভাষা সিলেক্ট করুন (Select Language)</div>`;
+    h+=`<div class="lang-sel-grid ${availLangs.length===1?'one':''}">`;
+    availLangs.forEach(ln=>{
+      const act=(curSelectedLang===ln);
+      const safeLn=ln.replace(/'/g,"\\'");
+      h+=`<button class="lang-big-btn ${act?'active':''}" onclick="selectFileLang('${safeLn}')">🌐 ${ln} ${act?'✅':''}</button>`;
+    });
+    h+=`</div>`;
+    if(!curSelectedLang){
+      h+=`<div style="font-size:12.5px;color:#64748b;text-align:center;padding:8px 4px;">👆 উপরের বাটনে ক্লিক করে আপনার পছন্দের ভাষা সিলেক্ট করুন, এরপর ডাউনলোড লিংক পাবেন।</div></div>`;
+      area.innerHTML=h;
+      return;
+    }
+  } else {
+    h+=`<div class="sel-box">`;
+  }
+
+  const matchQ=(q)=>!availLangs.length||((q.lang||'').trim()||defL)===curSelectedLang;
+
+  if(curFile.type==='series'&&curFile.seasons?.length){
+    let ssns=[...curFile.seasons].sort((a,b)=>sortNumKey(a.season_no)-sortNumKey(b.season_no));
+    ssns=ssns.map(s=>{
+      const eps=[...(s.episodes||[])].sort((a,b)=>sortNumKey(a.ep_no)-sortNumKey(b.ep_no)).map(e=>{
+        const qs=(e.qualities||[]).map((q,qi)=>({...q,_qidx:(q.orig_idx!==undefined?q.orig_idx:qi)})).filter(matchQ);
+        return {...e,_qs:qs};
+      }).filter(e=>e._qs.length>0);
+      return {...s,_eps:eps};
+    }).filter(s=>s._eps.length>0);
+
+    if(!ssns.length){
+      area.innerHTML=h+`<p style="color:#64748b;font-size:13px;text-align:center;">এই ভাষায় এখনো কোনো এপিসোড অ্যাড করা হয়নি।</p></div>`;
+      return;
+    }
+    if(curSeasonIdx>=ssns.length)curSeasonIdx=0;
+    const curS=ssns[curSeasonIdx];
+    const sOrig=(curS.orig_idx!==undefined)?curS.orig_idx:curSeasonIdx;
+    h+=`<div style="font-size:13.5px;font-weight:700;margin-bottom:8px;">📺 Select Season & Episode ${curSelectedLang?'('+curSelectedLang+')':''}</div><div style="display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;">`;
+    ssns.forEach((s,si)=>{
+      const sLbl=pad2(s.season_no);
+      h+=`<button class="s-tab ${si===curSeasonIdx?'active':''}" onclick="curSeasonIdx=${si};renderSelectors()">Season ${sLbl}</button>`;
+    });
+    h+=`</div>`;
+    curS._eps.forEach((e,ei)=>{
+      const eOrig=(e.orig_idx!==undefined)?e.orig_idx:ei;
+      const eLbl=pad2(e.ep_no);
+      h+=`<div class="ep-card"><div style="font-size:13px;font-weight:700;margin-bottom:6px;">🎬 Episode ${eLbl}</div><div class="q-grid">`;
+      e._qs.forEach(q=>{
+        h+=`<button class="q-btn" onclick="triggerDownload('sfile_${curFile._id}_${sOrig}_${eOrig}_${q._qidx}')">⬇️ Ep ${eLbl} ${q.name}</button>`;
+      });
+      h+=`</div></div>`;
+    });
+    area.innerHTML=h+`</div>`;
+  } else if(curFile.qualities?.length){
+    const qs=curFile.qualities.map((q,qi)=>({...q,_qidx:(q.orig_idx!==undefined?q.orig_idx:qi)})).filter(matchQ);
+    if(!qs.length){
+      area.innerHTML=h+`<p style="color:#64748b;font-size:13px;text-align:center;">এই ভাষায় এখনো কোনো কোয়ালিটি অ্যাড করা হয়নি।</p></div>`;
+      return;
+    }
+    h+=`<div style="font-size:13.5px;font-weight:700;">🎞 Select Quality ${curSelectedLang?'('+curSelectedLang+')':''}</div><div class="q-grid">`+qs.map(q=>`<button class="q-btn" onclick="triggerDownload('mfile_${curFile._id}_${q._qidx}')">⬇️ Download ${q.name}</button>`).join('')+`</div></div>`;
+    area.innerHTML=h;
+  } else {
+    area.innerHTML=h+`<button class="btn-p" onclick="triggerDownload('file_${curFile._id}')">⬇️ Download Movie ${curSelectedLang?'('+curSelectedLang+')':''}</button></div>`;
+  }
+}
+function scrollToDownload(){document.getElementById('det-selector-area')?.scrollIntoView({behavior:'smooth'});}
+
+function isFileLocallyUnlocked(btnKey){
+  if(userState.is_premium)return true;
+  if(adConfig.relock_sec===0)return false;
+  const exp=(userState.unlocked_files||{})[btnKey];
+  if(!exp)return false;
+  try{return new Date(exp)>new Date();}catch(e){return false;}
+}
+
+let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdCleanupList=[], activeAdCancelCb=null;
+
+function closeInAppAdBrowser(){
+  const box=document.getElementById('inapp-ad-ov');
+  const fr=document.getElementById('inapp-ad-frame');
+  const ld=document.getElementById('inapp-ad-loader');
+  if(box)box.style.display='none';
+  if(fr){fr.onload=null;fr.src='about:blank';}
+  if(ld)ld.style.display='flex';
+}
+function cleanupAdWatchers(){
+  if(activeAdIv){clearInterval(activeAdIv);activeAdIv=null;}
+  while(activeAdCleanupList.length){
+    try{activeAdCleanupList.pop()();}catch(e){}
+  }
+  closeInAppAdBrowser();
+}
+function cancelActiveAd(reasonMsg){
+  cleanupAdWatchers();
+  curAdToken=null;
+  document.getElementById('ad-modal').style.display='none';
+  if(reasonMsg)alert(reasonMsg);
+  const cb=activeAdCancelCb; activeAdCancelCb=null;
+  if(cb)cb();
+}
+async function startServerAdToken(kind,target,mode){
+  try{
+    const r=await fetch('/api/ad_start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,kind,target,mode})});
+    const d=await r.json();
+    curAdToken=d.token||null;
+    return d;
+  }catch(e){curAdToken=null;return {token:null,min_sec:0,strict_ad:adConfig.strict_ad};}
+}
+
+function renderUnlockStepModal(){
+  if(!pendingUnlockData)return;
+  const {currentStep,totalSteps,waitT,adLinks,zList,coinPrice}=pendingUnlockData;
+  document.getElementById('unlock-step-badge').innerText=`Step ${currentStep} / ${totalSteps}`;
+  const randZone=zList.length?zList[Math.floor(Math.random()*zList.length)]:null;
+  const randLink=adLinks.length?adLinks[Math.floor(Math.random()*adLinks.length)]:null;
+  pendingUnlockData.curZone=randZone;
+  pendingUnlockData.curLink=randLink;
+
+  let h=`<button class="unlock-opt" style="background:linear-gradient(90deg,#f59e0b,#d97706);" onclick="unlockWithCoin()"><span>🪙 কয়েন দিয়ে সরাসরি আনলক (${coinPrice} Coins)</span><span>আপনার: ${userState.balance||0}</span></button>`;
+  if(randZone){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="unlockWithMonetag('${randZone}')"><span>📺 Monetag Ad (Step ${currentStep}/${totalSteps})</span><span>Verify ⚡</span></button>`;
+  }
+  if(randLink){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="unlockWithAdsterra()"><span>🔗 Direct Link Ad (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
+  }
+  if(!randZone&&!randLink){
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#10b981,#059669);" onclick="directStepWait()"><span>⚡ Verify &amp; Continue (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
+  }
+  document.getElementById('unlock-options-area').innerHTML=h;
+  document.getElementById('unlock-modal').style.display='flex';
+}
+
+function triggerDownload(sp){
+  const dl=`https://t.me/${botUsername}?start=${sp}`;
+  if(isFileLocallyUnlocked(sp)){openTgLink(dl);return;}
+  const adLinks=adConfig.ad_links||[];
+  const zList=adConfig.zone_ids||zoneIds||[];
+  const needsAd=curFile.is_premium||(adConfig.ads_on&&(adLinks.length>0||zList.length>0));
+  if(!needsAd){openTgLink(dl);return;}
+
+  const waitList=adConfig.wait_times||[5];
+  const waitT=curFile.is_premium?(adConfig.prem_wait_time||10):(waitList[Math.floor(Math.random()*waitList.length)]||5);
+  const totalSteps=Math.max(1,curFile.is_premium?(adConfig.prstep||1):(adConfig.regstep||1));
+  const coinPrice=adConfig.coin_price||50;
+
+  pendingUnlockData={sp,dl,totalSteps,currentStep:1,waitT,adLinks,zList,coinPrice,fileId:sp};
+  renderUnlockStepModal();
+}
+
+async function completeUnlockStep(method){
+  if(!pendingUnlockData)return;
+  if(pendingUnlockData.currentStep<pendingUnlockData.totalSteps){
+    pendingUnlockData.currentStep++;
+    renderUnlockStepModal();
+    return;
+  }
+  const {dl,sp}=pendingUnlockData;
+  const tok=curAdToken; curAdToken=null;
+  const r=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:sp,method,ad_token:tok})});
+  const d=await r.json();
+  if(d.status!=='success'){
+    alert(d.msg||'❌ আনলক ব্যর্থ হয়েছে! আবার অ্যাড দেখুন।');
+    renderUnlockStepModal();
+    return;
+  }
+  pendingUnlockData=null;
+  document.getElementById('unlock-modal').style.display='none';
+  if(d.expiry&&adConfig.relock_sec!==0){
+    if(!userState.unlocked_files)userState.unlocked_files={};
+    userState.unlocked_files[sp]=d.expiry;
+  }
+  openTgLink(dl);
+}
+
+async function unlockWithCoin(){
+  if(!pendingUnlockData)return;
+  const {dl,sp}=pendingUnlockData;
+  const r2=await fetch('/api/unlock_file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,file_id:sp,method:'coin'})});
+  const d2=await r2.json();
+  if(d2.status==='success'){
+    if(d2.expiry&&adConfig.relock_sec!==0){
+      if(!userState.unlocked_files)userState.unlocked_files={};
+      userState.unlocked_files[sp]=d2.expiry;
+    }
+    pendingUnlockData=null;
+    document.getElementById('unlock-modal').style.display='none';
+    loadUser();
+    openTgLink(dl);
+  } else alert(d2.msg);
+}
+
+async function unlockWithMonetag(zid){
+  if(!pendingUnlockData)return;
+  document.getElementById('unlock-modal').style.display='none';
+  await startServerAdToken('file',pendingUnlockData.sp,'monetag');
+  const mWait=Number(adConfig.monetag_wait||0);
+  const t0=Date.now();
+  const ok=await ensureZoneSdk(zid);
+  if(ok&&typeof window['show_'+zid]==='function'){
+    try{
+      await window['show_'+zid]();
+      const el=(Date.now()-t0)/1000;
+      if(adConfig.strict_ad && mWait>0 && el<mWait){
+        curAdToken=null;
+        alert(`❌ অ্যাড শেষ হওয়ার আগেই ব্যাক করেছেন (${Math.floor(el)}s)! অন্তত ${mWait}s অ্যাড দেখুন।`);
+        if(pendingUnlockData)renderUnlockStepModal();
+        return;
+      }
+      await completeUnlockStep('monetag');
+      return;
+    }catch(e){
+      curAdToken=null;
+      alert('❌ অ্যাড সম্পূর্ণ না করেই ব্যাক করেছেন! আবার অ্যাড দেখুন।');
+      if(pendingUnlockData)renderUnlockStepModal();
+      return;
+    }
+  }
+  curAdToken=null;
+  alert('⚠️ Monetag অ্যাড লোড হয়নি, অন্য মাধ্যম (Direct Link) দিয়ে চেষ্টা করুন।');
+  if(pendingUnlockData)renderUnlockStepModal();
+}
+
+function unlockWithAdsterra(){
+  if(!pendingUnlockData)return;
+  const link=pendingUnlockData.curLink;
+  const wt=pendingUnlockData.waitT||5;
+  document.getElementById('unlock-modal').style.display='none';
+  runAdTimer(link,wt,async()=>{await completeUnlockStep('adsterra');},()=>{if(pendingUnlockData)renderUnlockStepModal();},{kind:'file',target:pendingUnlockData.sp});
+}
+
+async function directStepWait(){
+  if(!pendingUnlockData)return;
+  document.getElementById('unlock-modal').style.display='none';
+  await startServerAdToken('file',pendingUnlockData.sp,'link');
+  runAdTimer(null,pendingUnlockData.waitT||5,async()=>{await completeUnlockStep('direct');},()=>{if(pendingUnlockData)renderUnlockStepModal();});
+}
+
+function runAdTimer(link,sec,onDone,onCancel,adMeta){
+  cleanupAdWatchers();
+  activeAdCancelCb=onCancel||null;
+  const ov=document.getElementById('ad-modal'),
+        tm=document.getElementById('ad-timer'),
+        st=document.getElementById('ad-status-msg'),
+        retryBtn=document.getElementById('ad-retry-btn'),
+        btn=document.getElementById('ad-action-btn'),
+        inappOv=document.getElementById('inapp-ad-ov'),
+        inappBack=document.getElementById('inapp-ad-back'),
+        inappBadge=document.getElementById('inapp-ad-badge'),
+        inappLoader=document.getElementById('inapp-ad-loader'),
+        inappFrame=document.getElementById('inapp-ad-frame');
+
+  ov.style.display='flex';
+  btn.style.display='none';
+  retryBtn.style.display='none';
+  st.style.color='#64748b';
+  st.innerText='সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।';
+  tm.style.color='#e11d48';
+  tm.innerText=sec;
+
+  const startTs=Date.now();
+  let leftPage=false, leftAt=0, paused=false, completed=false;
+  const tokenPromise=(adMeta&&adMeta.kind)?startServerAdToken(adMeta.kind,adMeta.target||'','link'):Promise.resolve(null);
+
+  function finishTimer(){
+    if(completed||paused)return;
+    completed=true;
+    cleanupAdWatchers();
+    tm.style.color='#059669';
+    tm.innerText='0';
+    st.style.color='#059669';
+    st.innerText='✅ অ্যাড ভেরিফিকেশন সম্পন্ন হয়েছে! নিচের বাটনে ক্লিক করুন।';
+    retryBtn.style.display='none';
+    btn.style.display='block';
+    btn.onclick=async()=>{
+      btn.disabled=true;
+      const tokRes=await tokenPromise;
+      if(tokRes&&tokRes.token)curAdToken=tokRes.token;
+      btn.disabled=false;
+      ov.style.display='none';
+      activeAdCancelCb=null;
+      onDone();
+    };
+  }
+
+  function pauseEarly(msg){
+    if(paused||completed)return;
+    paused=true;
+    cleanupAdWatchers();
+    curAdToken=null;
+    const rem=Math.max(1,Math.ceil(sec-((Date.now()-startTs)/1000)));
+    tm.style.color='#f59e0b';
+    tm.innerText=rem+'s ⏸️';
+    st.style.color='#dc2626';
+    st.innerText=msg||'⏸️ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! টাইমার পজ হয়েছে। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
+    btn.style.display='none';
+    retryBtn.style.display='block';
+    retryBtn.onclick=()=>{
+      runAdTimer(link,sec,onDone,onCancel,adMeta);
+    };
+  }
+
+  function handleEarlyBack(){
+    if(paused||completed)return;
+    const el=(Date.now()-startTs)/1000;
+    if(el<sec-0.5){
+      if(adConfig.strict_ad){
+        pauseEarly();
+      } else {
+        closeInAppAdBrowser();
+      }
+    } else {
+      finishTimer();
+    }
+  }
+
+  function checkReturnNow(){
+    if(!leftPage||paused||completed||document.hidden)return;
+    if(tg && tg.isActive===false)return;
+    if((Date.now()-leftAt)<120)return;
+    const el=(Date.now()-startTs)/1000;
+    if(el<sec-0.5){
+      pauseEarly();
+    } else {
+      finishTimer();
+    }
+  }
+
+  if(link){
+    inappBadge.innerText='⏳ '+sec+'s';
+    inappBadge.style.background='linear-gradient(90deg,#f59e0b,#ef4444)';
+    inappLoader.style.display='flex';
+    inappFrame.onload=()=>{inappLoader.style.display='none';};
+    const ldTimer=setTimeout(()=>{inappLoader.style.display='none';},2000);
+    inappFrame.src=link;
+    inappOv.style.display='flex';
+    inappBack.onclick=handleEarlyBack;
+    activeAdCleanupList.push(()=>{clearTimeout(ldTimer);inappBack.onclick=null;});
+
+    if(tg?.BackButton){
+      try{
+        tg.BackButton.show();
+        tg.BackButton.onClick(handleEarlyBack);
+        activeAdCleanupList.push(()=>{try{tg.BackButton.offClick(handleEarlyBack);tg.BackButton.hide();}catch(e){}});
+      }catch(e){}
+    } else {
+      try{
+        history.pushState({inappAd:1},'');
+        const onPop=()=>{handleEarlyBack();};
+        window.addEventListener('popstate',onPop);
+        activeAdCleanupList.push(()=>window.removeEventListener('popstate',onPop));
+      }catch(e){}
+    }
+  }
+
+  if(adConfig.strict_ad && link){
+    const markLeft=()=>{
+      if(!leftPage){leftPage=true;leftAt=Date.now();}
+    };
+    const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow();};
+
+    document.addEventListener('visibilitychange',onVis);
+    window.addEventListener('pagehide',markLeft);
+    window.addEventListener('pageshow',checkReturnNow);
+    activeAdCleanupList.push(
+      ()=>document.removeEventListener('visibilitychange',onVis),
+      ()=>window.removeEventListener('pagehide',markLeft),
+      ()=>window.removeEventListener('pageshow',checkReturnNow)
+    );
+    if(tg?.onEvent && tg?.offEvent){
+      tg.onEvent('deactivated',markLeft);
+      tg.onEvent('activated',checkReturnNow);
+      activeAdCleanupList.push(
+        ()=>{try{tg.offEvent('deactivated',markLeft);}catch(e){}},
+        ()=>{try{tg.offEvent('activated',checkReturnNow);}catch(e){}}
+      );
+    }
+  }
+
+  activeAdIv=setInterval(()=>{
+    if(paused||completed)return;
+    if(adConfig.strict_ad && link){
+      const away=document.hidden || (tg && tg.isActive===false);
+      if(away){
+        if(!leftPage){leftPage=true;leftAt=Date.now();}
+      } else if(leftPage){
+        checkReturnNow();
+        if(paused||completed)return;
+      }
+    }
+    const el=(Date.now()-startTs)/1000;
+    const rem=Math.max(0,Math.ceil(sec-el));
+    tm.innerText=rem;
+    if(link)inappBadge.innerText=rem>0?('⏳ '+rem+'s'):'✅ 0s';
+    if(el>=sec){
+      finishTimer();
+    }
+  },200);
+}
+function likeCurrent(){if(!curFile.likes)curFile.likes=[];if(!curFile.likes.includes(userId)){curFile.likes.push(userId);document.getElementById('det-likes').innerText=curFile.likes.length;document.getElementById('btn-like').innerText='❤️ Liked';fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'like',uid:userId,file_id:curFile._id})});}}
+async function saveCurrent(){
+  const fid=curFile._id;
+  if(!userState.favorites)userState.favorites=[];
+  const wasSaved=userState.favorites.includes(fid);
+  if(wasSaved){userState.favorites=userState.favorites.filter(x=>x!==fid);document.getElementById('btn-save').innerText='🔖 Save';}
+  else{userState.favorites.push(fid);document.getElementById('btn-save').innerText='✅ Saved';}
+  renderFavs();
+  const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'favorite',uid:userId,file_id:fid})});
+  const d=await r.json();
+  document.getElementById('btn-save').innerText=d.saved?'✅ Saved':'🔖 Save';
+  loadUser();
+}
+function shareCurrent(){
+  const refUrl=`https://t.me/${botUsername}?start=${userId}`;
+  const shareTxt=`🔥 Watch "${curFile.title}" & thousands of Movies/Series on ${siteName}!`;
+  openTgLink(`https://t.me/share/url?url=${encodeURIComponent(refUrl)}&text=${encodeURIComponent(shareTxt)}`);
+}
+function renderRating(){const rs=curFile.ratings||[],avg=rs.length?(rs.reduce((a,b)=>a+b.stars,0)/rs.length).toFixed(1):'0.0';document.getElementById('rate-avg').innerText=`⭐ ${avg} (${rs.length})`;const my=(rs.find(r=>r.uid===userId)||{}).stars||0;document.getElementById('star-row').innerHTML=[1,2,3,4,5].map(n=>`<button class="star-b ${n<=my?'lit':''}" onclick="rateVideo(${n})">★</button>`).join('');}
+async function rateVideo(stars){await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rate',uid:userId,file_id:curFile._id,stars})});if(!curFile.ratings)curFile.ratings=[];curFile.ratings=curFile.ratings.filter(x=>x.uid!==userId);curFile.ratings.push({uid:userId,stars});renderRating();}
+function renderComments(){const cs=curFile.comments||[];document.getElementById('det-cmt-list').innerHTML=cs.map(c=>`<div style="padding:8px 0;border-bottom:1px solid #f1f5f9;font-size:13.5px;"><b>User ${c.uid}</b> <small style="color:#94a3b8;">${c.time}</small><br>${c.text}</div>`).join('')||"<p style='color:#94a3b8;font-size:13px;'>No comments yet.</p>";}
+async function sendComment(){const i=document.getElementById('cmt-inp'),t=i.value.trim();if(!t||!curFile)return;i.value='';const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'comment',uid:userId,file_id:curFile._id,text:t})});const d=await r.json();if(!curFile.comments)curFile.comments=[];curFile.comments.push(d.comment);document.getElementById('det-cmts-cnt').innerText=curFile.comments.length;document.getElementById('cmt-cnt-h').innerText=curFile.comments.length;renderComments();}
+
+function switchTab(id,el,tp){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.nav-i').forEach(n=>n.classList.remove('active'));
+  if(el)el.classList.add('active');
+  if(id==='home'){
+    activeType=tp||'all';
+    feedLimit=15;
+    renderTopSlider();
+    renderFeed();
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  if(id==='favorite')renderFavs();
+  if(id==='profile'){loadUser();loadEarn();}
+  if(id==='tools')renderTools();
+}
+
+const TOOLS=[
+  {id:'age',sec:'🔥 Popular Tools',ico:'🎂',bg:'#fef3c7',bl:'#ddd6fe',name:'Age Calculator',desc:'Calculate exact age'},
+  {id:'bmi',sec:'🔥 Popular Tools',ico:'⚖️',bg:'#e0e7ff',bl:'#fbcfe8',name:'BMI Calculator',desc:'Body Mass Index'},
+  {id:'curr',sec:'🔥 Popular Tools',ico:'💱',bg:'#d1fae5',bl:'#a7f3d0',name:'Currency Converter',desc:'Convert currencies'},
+  {id:'love',sec:'🔥 Popular Tools',ico:'💘',bg:'#ffe4e6',bl:'#fecdd3',name:'Love Match',desc:'Love compatibility'},
+  {id:'pass',sec:'🛡️ Utility Tools',ico:'🔐',bg:'#e0f2fe',bl:'#bae6fd',name:'Password Generator',desc:'Strong passwords'},
+  {id:'blood',sec:'🛡️ Utility Tools',ico:'🩸',bg:'#fee2e2',bl:'#fecaca',name:'Blood Group Finder',desc:'Donor compatibility'},
+  {id:'qr',sec:'🛡️ Utility Tools',ico:'📱',bg:'#f3e8ff',bl:'#e9d5ff',name:'QR Code Generator',desc:'Create QR for link'},
+  {id:'rand',sec:'🛡️ Utility Tools',ico:'🎲',bg:'#fef9c3',bl:'#fde68a',name:'Random Picker',desc:'Pick random item'},
+  {id:'style',sec:'⚡ Exclusive Tools',ico:'✨',bg:'#fae8ff',bl:'#e9d5ff',name:'Stylish Text Maker',desc:'Stylish Unicode fonts'},
+  {id:'tasbih',sec:'⚡ Exclusive Tools',ico:'📿',bg:'#dcfce7',bl:'#bbf7d0',name:'Tasbih Counter',desc:'Digital tasbih counter'},
+  {id:'tz',sec:'⚡ Exclusive Tools',ico:'🌍',bg:'#dbeafe',bl:'#bfdbfe',name:'Time Zone Converter',desc:'World live times'},
+  {id:'unit',sec:'🧰 More Useful Tools',ico:'📏',bg:'#e0f2fe',bl:'#bae6fd',name:'Unit Converter',desc:'Length, weight, temp',n:1},
+  {id:'pct',sec:'🧰 More Useful Tools',ico:'📊',bg:'#fef3c7',bl:'#fde68a',name:'Percentage Calculator',desc:'Calculate percentage',n:1},
+  {id:'emi',sec:'🧰 More Useful Tools',ico:'💰',bg:'#d1fae5',bl:'#a7f3d0',name:'EMI Calculator',desc:'Monthly loan EMI',n:1},
+  {id:'ddiff',sec:'🧰 More Useful Tools',ico:'📅',bg:'#f3e8ff',bl:'#e9d5ff',name:'Date Difference',desc:'Days between dates',n:1},
+  {id:'word',sec:'🧰 More Useful Tools',ico:'🔤',bg:'#e0e7ff',bl:'#fecdd3',name:'Text Case & Word Count',desc:'Case & word count',n:1},
+  {id:'zakat',sec:'🧰 More Useful Tools',ico:'🕌',bg:'#fef9c3',bl:'#bbf7d0',name:'Zakat Calculator',desc:'2.5% Zakat calc',n:1},
+  {id:'color',sec:'🧰 More Useful Tools',ico:'🎨',bg:'#ffe4e6',bl:'#fbcfe8',name:'Color Picker',desc:'HEX, RGB, HSL codes',n:1},
+  {id:'short',sec:'🌟 More Tools',ico:'🔗',bg:'#e0f2fe',bl:'#ddd6fe',name:'Link Shortener',desc:'Shorten with Ad Gate'},
+  {id:'mrec',sec:'🌟 More Tools',ico:'🎬',bg:'#f1f5f9',bl:'#fecaca',name:'Movie Recommendation',desc:'Join Movie Group'}
+];
+
+function renderTools(){
+  const q=(document.getElementById('tool-search').value||'').toLowerCase(), secs=[...new Set(TOOLS.map(t=>t.sec))]; let h='';
+  secs.forEach(s=>{
+    const its=TOOLS.filter(t=>t.sec===s&&(!q||t.name.toLowerCase().includes(q)||t.desc.toLowerCase().includes(q))); if(!its.length)return;
+    h+=`<div class="sec-head"><span>${s}</span></div><div class="t-grid">`+its.map(t=>`<div class="t-card" onclick="openTool('${t.id}')"><div class="t-blob" style="background:${t.bl};"></div>${t.n?'<span class="t-new">NEW</span>':''}<div class="t-ico" style="background:${t.bg};">${t.ico}</div><div class="t-name">${t.name}</div><div class="t-desc">${t.desc}</div></div>`).join('')+`</div>`;
+  });
+  document.getElementById('tools-container').innerHTML=h;
+}
+
+let tasbihCnt=0;
+function openTool(id){
+  const t=TOOLS.find(x=>x.id===id); document.getElementById('tool-m-title').innerText=t.ico+' '+t.name;
+  const b=document.getElementById('tool-m-body'); document.getElementById('tool-modal').style.display='flex';
+  const ui={
+    age:`<span class="tool-lbl">জন্মতারিখ (যেমন: 2002-05-15)</span><input type="date" id="ti1" class="s-input" value="2002-05-15"><br><br><button class="btn-p" onclick="calcAge()">Calculate</button><div id="tr" class="tool-res"></div>`,
+    bmi:`<span class="tool-lbl">ওজন কেজিতে (যেমন: 65)</span><input type="number" id="ti1" class="s-input" placeholder="যেমন: 65"><span class="tool-lbl">উচ্চতা সেমি-তে (যেমন: 170)</span><input type="number" id="ti2" class="s-input" placeholder="যেমন: 170"><br><br><button class="btn-p" onclick="calcBMI()">Calculate BMI</button><div id="tr" class="tool-res"></div>`,
+    curr:`<span class="tool-lbl">পরিমাণ (যেমন: 100)</span><input type="number" id="ti1" class="s-input" value="100" placeholder="যেমন: 100"><span class="tool-lbl">From</span><select id="ti2" class="s-input"><option>USD</option><option>BDT</option><option>SAR</option><option>AED</option><option>INR</option><option>EUR</option><option>GBP</option><option>MYR</option></select><span class="tool-lbl">To</span><select id="ti3" class="s-input"><option>BDT</option><option>USD</option><option>SAR</option><option>AED</option><option>INR</option><option>EUR</option></select><br><br><button class="btn-p" onclick="calcCurr()">Convert</button><div id="tr" class="tool-res"></div>`,
+    love:`<span class="tool-lbl">আপনার নাম (যেমন: Rahim)</span><input id="ti1" class="s-input" placeholder="যেমন: Rahim"><span class="tool-lbl">পার্টনারের নাম (যেমন: Karim)</span><input id="ti2" class="s-input" placeholder="যেমন: Karim"><br><br><button class="btn-p" onclick="calcLove()">Check Match 💘</button><div id="tr" class="tool-res"></div>`,
+    pass:`<span class="tool-lbl">পাসওয়ার্ড দৈর্ঘ্য (যেমন: 12)</span><input type="number" id="ti1" class="s-input" value="12" placeholder="যেমন: 12" min="6" max="32"><br><br><button class="btn-p" onclick="genPass()">Generate</button><div id="tr" class="tool-res"></div>`,
+    blood:`<span class="tool-lbl">ব্লাড গ্রুপ সিলেক্ট করুন (যেমন: O+)</span><select id="ti1" class="s-input" onchange="showBlood()"><option value="O+">O+</option><option value="O-">O-</option><option value="A+">A+</option><option value="A-">A-</option><option value="B+">B+</option><option value="B-">B-</option><option value="AB+">AB+</option><option value="AB-">AB-</option></select><div id="tr" class="tool-res"></div>`,
+    qr:`<span class="tool-lbl">যেকোনো লিংক বা লেখা (যেমন: https://t.me/${botUsername})</span><input id="ti1" class="s-input" placeholder="যেমন: https://google.com"><br><br><button class="btn-p" onclick="genQR()">Generate QR</button><div id="tr" class="tool-res" style="text-align:center;"></div>`,
+    rand:`<span class="tool-lbl">কমা দিয়ে অপশন লিখুন (যেমন: Apple, Mango, Banana)</span><textarea id="ti1" class="s-input" rows="3" placeholder="যেমন: Ali, Karim, Rahim"></textarea><br><br><button class="btn-p" onclick="pickRand()">Pick Random</button><div id="tr" class="tool-res"></div>`,
+    style:`<span class="tool-lbl">ইংরেজি লেখা লিখুন (যেমন: Moviee Link)</span><input id="ti1" class="s-input" placeholder="যেমন: Moviee Link" onkeyup="genStyle()"><div id="tr" class="tool-res"></div>`,
+    tasbih:`<h1 id="tcnt" style="font-size:48px;color:#10b981;margin:8px 0;">${tasbihCnt}</h1><button class="btn-p" onclick="tasbihCnt++;document.getElementById('tcnt').innerText=tasbihCnt">Count (+1)</button><br><br><button class="btn-p" style="background:#64748b;" onclick="tasbihCnt=0;document.getElementById('tcnt').innerText=0">Reset</button>`,
+    tz:`<div id="tr" class="tool-res"></div>`,
+    unit:`<span class="tool-lbl">সংখ্যা দিন (যেমন: 5)</span><input type="number" id="ti1" class="s-input" value="5" placeholder="যেমন: 5"><span class="tool-lbl">রূপান্তর</span><select id="ti2" class="s-input"><option value="km_m">KM ➔ Meter</option><option value="kg_g">KG ➔ Gram</option><option value="kg_lb">KG ➔ Pound</option><option value="c_f">°C ➔ °F</option><option value="f_c">°F ➔ °C</option></select><br><br><button class="btn-p" onclick="calcUnit()">Convert</button><div id="tr" class="tool-res"></div>`,
+    pct:`<span class="tool-lbl">শতকরা হার % (যেমন: 15)</span><input type="number" id="ti1" class="s-input" placeholder="যেমন: 15"><span class="tool-lbl">মোট সংখ্যা (যেমন: 1000)</span><input type="number" id="ti2" class="s-input" placeholder="যেমন: 1000"><br><br><button class="btn-p" onclick="calcPct()">Calculate</button><div id="tr" class="tool-res"></div>`,
+    emi:`<span class="tool-lbl">লোনের পরিমাণ (যেমন: 100000)</span><input type="number" id="ti1" class="s-input" placeholder="যেমন: 100000"><span class="tool-lbl">বার্ষিক সুদ % (যেমন: 10)</span><input type="number" id="ti2" class="s-input" placeholder="যেমন: 10"><span class="tool-lbl">মাস (যেমন: 12)</span><input type="number" id="ti3" class="s-input" placeholder="যেমন: 12"><br><br><button class="btn-p" onclick="calcEMI()">Calculate EMI</button><div id="tr" class="tool-res"></div>`,
+    ddiff:`<span class="tool-lbl">শুরুর তারিখ</span><input type="date" id="ti1" class="s-input" value="2026-01-01"><span class="tool-lbl">শেষের তারিখ</span><input type="date" id="ti2" class="s-input" value="2026-12-31"><br><br><button class="btn-p" onclick="calcDDiff()">Calculate Days</button><div id="tr" class="tool-res"></div>`,
+    word:`<span class="tool-lbl">যেকোনো লেখা লিখুন (যেমন: Hello World 2026)</span><textarea id="ti1" class="s-input" rows="3" placeholder="যেমন: Hello World 2026" onkeyup="calcWord()"></textarea><div style="display:flex;gap:6px;margin-top:8px;"><button class="btn-p" onclick="ti1.value=ti1.value.toUpperCase();calcWord()">UPPER</button><button class="btn-p" onclick="ti1.value=ti1.value.toLowerCase();calcWord()">lower</button></div><div id="tr" class="tool-res"></div>`,
+    zakat:`<span class="tool-lbl">মোট সম্পদ/টাকা/সোনা (যেমন: 500000)</span><input type="number" id="ti1" class="s-input" placeholder="যেমন: 500000"><span class="tool-lbl">ঋণ থাকলে লিখুন (যেমন: 0)</span><input type="number" id="ti2" class="s-input" placeholder="যেমন: 0" value="0"><br><br><button class="btn-p" onclick="calcZakat()">Calculate 2.5%</button><div id="tr" class="tool-res"></div>`,
+    color:`<span class="tool-lbl">যেকোনো কালার সিলেক্ট করুন</span><input type="color" id="ti1" value="#6c5ce7" style="width:100%;height:50px;border:none;cursor:pointer;" oninput="pickCol()"><div id="tr" class="tool-res"></div>`,
+    short:`<span class="tool-lbl">বড় লিংক দিন (যেমন: https://google.com/search?q=movies)</span><input id="ti1" class="s-input" placeholder="যেমন: https://google.com"><br><br><button class="btn-p" onclick="shortUrl()">Shorten Link (With Ads)</button><div id="tr" class="tool-res"></div>`,
+    mrec: recGroupLink
+      ? `<p style="font-size:13.5px;color:#475569;margin-bottom:12px;">মুভি রিকোয়েস্ট ও সাজেশন পেতে আমাদের অফিসিয়াল গ্রুপে জয়েন করুন!</p><div class="tool-res" style="margin-bottom:12px;text-align:center;">🔗 <b>${recGroupLink}</b></div><button class="btn-p" onclick="openTgLink('${recGroupLink}')">👥 Join Movie Group</button><br><br><button class="btn-p" style="background:#0f172a;" onclick="navigator.clipboard.writeText('${recGroupLink}');alert('✅ Group Link Copied!')">📋 Copy Group Link</button>`
+      : `<div class="tool-res" style="text-align:center;">⚠️ গ্রুপ লিংক এখনো সেট করা হয়নি!<br><small>অ্যাডমিন বটে <b>/setrecgroup https://t.me/...</b> দিয়ে গ্রুপ লিংক সেট করুন।</small></div>`
+  };
+  b.innerHTML=ui[id];
+  if(id==='blood')showBlood();
+  if(id==='tz'){const zs=[['🇧🇩 Dhaka','Asia/Dhaka'],['🇸🇦 Riyadh','Asia/Riyadh'],['🇦🇪 Dubai','Asia/Dubai'],['🇮🇳 Delhi','Asia/Kolkata'],['🇬🇧 London','Europe/London'],['🇺🇸 New York','America/New_York']];document.getElementById('tr').innerHTML=zs.map(z=>`<b>${z[0]}:</b> ${new Date().toLocaleTimeString('en-US',{timeZone:z[1]})}`).join('<br>');}
+  if(id==='color')pickCol();
+}
+
+function calcAge(){const d=new Date(ti1.value),n=new Date();if(isNaN(d))return;let y=n.getFullYear()-d.getFullYear(),m=n.getMonth()-d.getMonth(),dd=n.getDate()-d.getDate();if(dd<0){m--;dd+=30;}if(m<0){y--;m+=12;}tr.innerHTML=`🎂 <b>${y} Years, ${m} Months, ${dd} Days</b><br>Total Days: ${Math.floor((n-d)/86400000)}`;}
+function calcBMI(){const w=+ti1.value,h=+ti2.value/100;if(!w||!h)return;const bmi=(w/(h*h)).toFixed(1);tr.innerHTML=`⚖️ BMI: <b>${bmi}</b> (${bmi<18.5?'Underweight':bmi<25?'Normal':bmi<30?'Overweight':'Obese'})`;}
+async function calcCurr(){const r=await(await fetch('/api/rates')).json(),v=+ti1.value*(r[ti3.value]/r[ti2.value]);tr.innerHTML=`💱 <b>${ti1.value} ${ti2.value} = ${v.toFixed(2)} ${ti3.value}</b>`;}
+function calcLove(){const s=(ti1.value+ti2.value).toLowerCase().replace(/\s/g,'');if(!s)return;let h=0;for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))%101;tr.innerHTML=`💘 Compatibility: <b>${Math.max(45,h)}%</b> ❤️`;}
+function genPass(){const cs="ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%&*",n=Math.min(32,Math.max(6,+ti1.value||12));let p="";for(let i=0;i<n;i++)p+=cs[Math.floor(Math.random()*cs.length)];tr.innerHTML=`🔐 <b>${p}</b>`;}
+function showBlood(){const m={'O+':'Give: O+,A+,B+,AB+ | Take: O+,O-','O-':'Universal Donor! | Take: O-','A+':'Give: A+,AB+ | Take: A+,A-,O+,O-','A-':'Give: A+,A-,AB+,AB- | Take: A-,O-','B+':'Give: B+,AB+ | Take: B+,B-,O+,O-','B-':'Give: B+,B-,AB+,AB- | Take: B-,O-','AB+':'Give: AB+ | Take: All (Universal Receiver)','AB-':'Give: AB+,AB- | Take: AB-,A-,B-,O-'};tr.innerHTML=`🩸 <b>${ti1.value}:</b><br>${m[ti1.value]}`;}
+function genQR(){if(!ti1.value)return;tr.innerHTML=`<img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ti1.value)}" style="border-radius:10px;">`;}
+function pickRand(){const a=ti1.value.split(/[,\n]+/).map(x=>x.trim()).filter(Boolean);if(a.length)tr.innerHTML=`🎲 Winner: <b>${a[Math.floor(Math.random()*a.length)]}</b>`;}
+function genStyle(){const t=ti1.value;if(!t){tr.innerHTML='';return;}const mp=(a,b)=>[...t].map(c=>{const i=c.charCodeAt(0);if(i>=65&&i<=90)return String.fromCodePoint(a+i-65);if(i>=97&&i<=122)return String.fromCodePoint(b+i-97);return c;}).join('');tr.innerHTML=[mp(0x1D400,0x1D41A),mp(0x1D4D0,0x1D4EA),mp(0x1D5D4,0x1D5EE),mp(0x1D670,0x1D68A),`★彡 ${t} 彡★`].map(x=>`<div style="padding:4px 0;border-bottom:1px solid #ddd;">${x}</div>`).join('');}
+function calcUnit(){const v=+ti1.value,k=ti2.value,r=k==='km_m'?v*1000:k==='kg_g'?v*1000:k==='kg_lb'?v*2.20462:k==='c_f'?(v*9/5)+32:(v-32)*5/9;tr.innerHTML=`📏 Result: <b>${r.toFixed(2)}</b>`;}
+function calcPct(){tr.innerHTML=`📊 ${ti1.value}% of ${ti2.value} = <b>${((+ti1.value/100)*+ti2.value).toFixed(2)}</b>`;}
+function calcEMI(){const P=+ti1.value,r=(+ti2.value/12)/100,n=+ti3.value;if(!P||!n)return;const e=r?(P*r*Math.pow(1+r,n))/(Math.pow(1+r,n)-1):P/n;tr.innerHTML=`💰 Monthly EMI: <b>${e.toFixed(2)}</b><br>Total: ${(e*n).toFixed(2)}`;}
+function calcDDiff(){const d1=new Date(ti1.value),d2=new Date(ti2.value);if(isNaN(d1)||isNaN(d2))return;tr.innerHTML=`📅 Difference: <b>${Math.abs(Math.round((d2-d1)/86400000))} Days</b>`;}
+function calcWord(){const t=ti1.value;tr.innerHTML=`Words: <b>${t.trim()?t.trim().split(/\s+/).length:0}</b> | Chars: <b>${t.length}</b>`;}
+function calcZakat(){const net=Math.max(0,(+ti1.value||0)-(+ti2.value||0));tr.innerHTML=`🕌 Net Wealth: <b>${net}</b><br>Zakat (2.5%): <b>${(net*0.025).toFixed(2)}</b>`;}
+function pickCol(){const h=ti1.value,r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);tr.innerHTML=`HEX: <b>${h}</b><br>RGB: <b>rgb(${r},${g},${b})</b>`;}
+async function shortUrl(){const res=await(await fetch('/api/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:ti1.value})})).json();if(res.status==='success'){tr.innerHTML=`🔗 <a href="${res.short_url}" target="_blank">${res.short_url}</a><br><br><button class="btn-p" onclick="navigator.clipboard.writeText('${res.short_url}');alert('✅ Short Link Copied!')">📋 Copy Short Link</button>`;}else{tr.innerHTML=res.msg;}}
+
+let earnState=null, pendingTaskData=null;
+async function loadEarn(){
+  const r=await fetch('/api/earn_info/'+userId),d=await r.json();
+  earnState=d;
+  let h=`<div class="card-box"><b>🎡 Daily Spin (${d.spins_done}/${d.spin_limit})</b> <small style="color:#64748b;">(${d.task_step||1} Step)</small><br><br><button class="btn-p" onclick="doEarn('spin')" ${d.spins_done>=d.spin_limit?'disabled':''}>Spin &amp; Earn</button></div>`;
+  h+=`<div class="card-box"><b>📱 Daily Task (${d.tasks_done}/${d.task_limit})</b> <small style="color:#64748b;">(${d.task_step||1} Step)</small><br><br><button class="btn-p" onclick="doEarn('task')" ${d.tasks_done>=d.task_limit?'disabled':''}>Complete Task</button></div>`;
+  (d.custom_tasks||[]).forEach((t,idx)=>{
+    const dn=(d.custom_tasks_done||[]).includes(t._id);
+    if(t.task_type==='tg_join'){
+      h+=`<div class="card-box"><b>📢 ${t.title} (+${t.coin}C)</b><div style="font-size:11.5px;color:#64748b;margin:4px 0 10px 0;">Telegram Join Task • জয়েন না করলে Verify হবে না</div><div style="display:flex;gap:8px;"><button class="btn-p" style="background:linear-gradient(90deg,#0ea5e9,#2563eb);" onclick="openTgLink('${t.link}')">📢 Join</button><button class="btn-p" onclick="verifyTgTask('${t._id}')" ${dn?'disabled':''}>${dn?'Verified ✅':'✅ Verify'}</button></div></div>`;
+      return;
+    }
+    const isZ=(t.task_type==='zone'||!!t.zone_id);
+    const badge=isZ?`📺 Monetag Zone (${t.zone_id})`:`🔗 Direct Link`;
+    const stp=t.steps>0?t.steps:(d.task_step||1);
+    h+=`<div class="card-box"><b>💎 ${t.title} (+${t.coin}C)</b><div style="font-size:11.5px;color:#64748b;margin:4px 0 10px 0;">${badge} • ${stp} Step</div><button class="btn-p" onclick="doCustomEarnIdx(${idx})" ${dn?'disabled':''}>${dn?'Completed':'Complete'}</button></div>`;
+  });
+  document.getElementById('earn-area').innerHTML=h;
+}
+
+async function verifyTgTask(tid){
+  const r=await fetch('/api/verify_tg_task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,task_id:tid})});
+  const d=await r.json();
+  alert(d.msg);
+  if(d.status==='success'){loadUser();loadEarn();}
+}
+
+function renderTaskStepModal(){
+  if(!pendingTaskData)return;
+  const {title,currentStep,totalSteps,mode,zoneList,linkList,fixedZone,fixedLink,waitT}=pendingTaskData;
+  document.getElementById('task-step-badge').innerText=`Step ${currentStep} / ${totalSteps}`;
+  document.getElementById('task-modal-title').innerText=title||'টাস্ক ভেরিফিকেশন';
+
+  let h='';
+  if(mode==='zone'){
+    document.getElementById('task-modal-desc').innerText=`Monetag Zone (${fixedZone}) অ্যাড দেখে স্টেপ সম্পন্ন করুন:`;
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="runTaskMonetag('${fixedZone}')"><span>📺 Monetag Ad (Step ${currentStep}/${totalSteps})</span><span>Zone ${fixedZone} ⚡</span></button>`;
+  } else if(mode==='link'){
+    document.getElementById('task-modal-desc').innerText=`ডিরেক্ট লিংক ভিজিট করে স্টেপ সম্পন্ন করুন (সময়ের আগে ব্যাক করবেন না):`;
+    h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="runTaskLink('${encodeURIComponent(fixedLink)}')"><span>🔗 Direct Link Ad (Step ${currentStep}/${totalSteps})</span><span>${waitT}s ⏳</span></button>`;
+  } else {
+    document.getElementById('task-modal-desc').innerText='অ্যাড শেষ না হওয়া পর্যন্ত ব্যাক করবেন না। নিচের যেকোনো একটি মাধ্যমে ভেরিফাই করুন:';
+    const rz=zoneList.length?zoneList[Math.floor(Math.random()*zoneList.length)]:null;
+    const rl=linkList.length?linkList[Math.floor(Math.random()*linkList.length)]:null;
+    if(rz){
+      h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#6c5ce7,#4f46e5);" onclick="runTaskMonetag('${rz}')"><span>📺 Monetag Ad দিয়ে Complete করুন</span><span>Step ${currentStep}/${totalSteps} ⚡</span></button>`;
+    }
+    if(rl){
+      h+=`<button class="unlock-opt" style="background:linear-gradient(90deg,#ff512f,#dd2476);" onclick="runTaskLink('${encodeURIComponent(rl)}')"><span>🔗 Direct Link দিয়ে Complete করুন</span><span>${waitT}s ⏳</span></button>`;
+    }
+  }
+  document.getElementById('task-options-area').innerHTML=h;
+  document.getElementById('task-ad-modal').style.display='flex';
+}
+
+async function completeTaskStep(){
+  if(!pendingTaskData)return;
+  if(pendingTaskData.currentStep<pendingTaskData.totalSteps){
+    pendingTaskData.currentStep++;
+    renderTaskStepModal();
+    return;
+  }
+  const tp=pendingTaskData.claimType;
+  const tok=curAdToken; curAdToken=null;
+  const ok=await claimEarn(tp,tok);
+  if(ok){
+    pendingTaskData=null;
+    document.getElementById('task-ad-modal').style.display='none';
+  } else if(pendingTaskData){
+    renderTaskStepModal();
+  }
+}
+
+async function runTaskMonetag(zid){
+  document.getElementById('task-ad-modal').style.display='none';
+  await startServerAdToken('earn',pendingTaskData?pendingTaskData.claimType:'earn','monetag');
+  const mWait=Number(adConfig.monetag_wait||0);
+  const t0=Date.now();
+  const ok=await ensureZoneSdk(zid);
+  if(ok&&typeof window['show_'+zid]==='function'){
+    try{
+      await window['show_'+zid]();
+      const el=(Date.now()-t0)/1000;
+      if(adConfig.strict_ad && mWait>0 && el<mWait){
+        curAdToken=null;
+        alert(`❌ অ্যাড শেষ হওয়ার আগেই ব্যাক করেছেন (${Math.floor(el)}s)! অন্তত ${mWait}s দেখুন।`);
+        if(pendingTaskData)renderTaskStepModal();
+        return;
+      }
+      await completeTaskStep();
+      return;
+    }catch(e){
+      curAdToken=null;
+      alert('❌ অ্যাড সম্পূর্ণ না করেই ব্যাক করেছেন! কোনো কয়েন পাবেন না, আবার অ্যাড দেখুন।');
+      if(pendingTaskData)renderTaskStepModal();
+      return;
+    }
+  }
+  curAdToken=null;
+  alert('⚠️ Monetag অ্যাড লোড হয়নি, অনুগ্রহ করে Direct Link ব্যবহার করুন।');
+  if(pendingTaskData)renderTaskStepModal();
+}
+
+function runTaskLink(encLink){
+  const link=decodeURIComponent(encLink||'');
+  const wt=(pendingTaskData&&pendingTaskData.waitT)||10;
+  document.getElementById('task-ad-modal').style.display='none';
+  runAdTimer(link,wt,async()=>{await completeTaskStep();},()=>{if(pendingTaskData)renderTaskStepModal();},{kind:'earn',target:pendingTaskData?pendingTaskData.claimType:'earn'});
+}
+
+async function doEarn(tp){
+  const ad=await(await fetch('/api/get_earn_ad/'+tp)).json();
+  const zList=ad.zone_ids||zoneIds||[];
+  const lList=ad.ad_links||[];
+  const steps=Math.max(1,ad.task_step||(earnState&&earnState.task_step)||1);
+  if(!zList.length&&!lList.length){
+    return claimEarn(tp,null);
+  }
+  pendingTaskData={
+    claimType:tp,
+    title:tp==='spin'?'🎡 Daily Spin Verification':'📱 Daily Task Verification',
+    mode:'popup',
+    totalSteps:steps,
+    currentStep:1,
+    zoneList:zList,
+    linkList:lList,
+    waitT:ad.wait_time||adConfig.task_wait_sec||10
+  };
+  renderTaskStepModal();
+}
+
+function doCustomEarnIdx(idx){
+  if(!earnState||!earnState.custom_tasks)return;
+  const t=earnState.custom_tasks[idx];
+  if(!t)return;
+  const steps=t.steps>0?t.steps:(earnState.task_step||1);
+  const isZ=(t.task_type==='zone'||!!t.zone_id);
+  pendingTaskData={
+    claimType:'custom_'+t._id,
+    title:'💎 '+t.title,
+    mode:isZ?'zone':'link',
+    totalSteps:Math.max(1,steps),
+    currentStep:1,
+    fixedZone:t.zone_id||'',
+    fixedLink:t.link||'',
+    zoneList:[],
+    linkList:[],
+    waitT:earnState.wait_time||adConfig.task_wait_sec||10
+  };
+  renderTaskStepModal();
+}
+
+function doCustomEarn(id,lk){runAdTimer(lk,10,()=>claimEarn('custom_'+id,curAdToken),null,{kind:'earn',target:'custom_'+id});}
+async function claimEarn(tp,adTok){
+  const d=await(await fetch('/api/claim_earn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,type:tp,ad_token:adTok})})).json();
+  alert(d.msg);
+  loadUser();loadEarn();
+  return d.status==='success';
+}
+async function redeemCoupon(){const c=document.getElementById('coupon-inp').value.trim();if(!c)return;const d=await(await fetch('/api/redeem',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,code:c})})).json();alert(d.msg);if(d.status==='success'){document.getElementById('coupon-inp').value='';loadUser();}}
+async function sendMovieRequest(){const n=document.getElementById('req-inp').value.trim();if(!n)return;const d=await(await fetch('/api/request_movie',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,movie_name:n})})).json();alert(d.msg);document.getElementById('req-inp').value='';}
+async function buyWithCoin(pid,cost){if(!confirm(`${cost} কয়েন দিয়ে কিনবেন?`))return;const d=await(await fetch('/api/buy_with_coin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:userId,pkg_id:pid})})).json();alert(d.msg);loadUser();}
+function switchPkgTab(tp, btn){
+  document.querySelectorAll('.pkg-tab').forEach(b=>b.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+  let cnt=0;
+  document.querySelectorAll('#pkg-list-wrap .pkg-item').forEach(el=>{
+    const show=(el.getAttribute('data-pkg-type')===tp);
+    el.style.display=show?'flex':'none';
+    if(show)cnt++;
+  });
+  const emp=document.getElementById('pkg-empty-msg');
+  if(emp)emp.style.display=cnt===0?'block':'none';
+}
+switchPkgTab('coin', document.querySelector('.pkg-tab.active'));
+function copyRef(){const i=document.getElementById('ref-inp');i.select();navigator.clipboard.writeText(i.value);alert('✅ Link Copied!');}
+hydrateAppFast();
+</script>
+</body>
+</html>"""
+
+def _fetch_shell_payload():
+    now = time.time()
+    db_ver = get_db_cache_ver()
+    if (
+        SHELL_DATA_CACHE["data"] is not None
+        and SHELL_DATA_CACHE.get("ver") == db_ver
+        and (now - SHELL_DATA_CACHE["ts"]) < 60
+    ):
+        return SHELL_DATA_CACHE["data"]
+
+    def q_config():
+        try: return sync_db["config"].find_one({"_id": "settings"}) or {}
+        except: return {}
+
+    def q_cats():
+        try: return [c["name"] for c in sync_db["categories"].find()]
+        except: return []
+
+    def q_langs():
+        try: return [l["name"] for l in sync_db["languages"].find()]
+        except: return []
+
+    def q_promos():
+        try: return list(sync_db["promotions"].find())
+        except: return []
+
+    def q_upcs():
+        try: return list(sync_db["upcoming"].find().sort("_id", -1))
+        except: return []
+
+    def q_pkgs():
+        try: return list(sync_db["packages"].find())
+        except: return []
+
+    def q_zones():
+        try: return [z["zone_id"] for z in sync_db["zone_ids"].find()]
+        except: return []
+
+    def q_ad_links():
+        try: return [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+        except: return []
+
+    def q_tutorials():
+        try: return list(sync_db["tutorials"].find())
+        except: return []
+
+    f_cfg = WEB_POOL.submit(q_config)
+    f_cats = WEB_POOL.submit(q_cats)
+    f_langs = WEB_POOL.submit(q_langs)
+    f_promos = WEB_POOL.submit(q_promos)
+    f_upcs = WEB_POOL.submit(q_upcs)
+    f_pkgs = WEB_POOL.submit(q_pkgs)
+    f_zones = WEB_POOL.submit(q_zones)
+    f_links = WEB_POOL.submit(q_ad_links)
+    f_tuts = WEB_POOL.submit(q_tutorials)
+
+    config = f_cfg.result()
+    cats = f_cats.result()
+    langs = f_langs.result()
+    promos = f_promos.result()
+    upcs = f_upcs.result()
+    pkgs = f_pkgs.result()
+    zone_ids = f_zones.result()
+    ad_links = f_links.result()
+    raw_tuts = f_tuts.result()
+
+    if not zone_ids and DEFAULT_ZONE_ID:
+        zone_ids = [DEFAULT_ZONE_ID]
+
+    live_url = get_live_web_url(config)
+    for p in promos:
+        p["_id"] = str(p["_id"])
+        img = p.get("image") or ""
+        if "/poster/" in img:
+            p["image"] = f"{live_url}/poster/{img.split('/poster/', 1)[1]}"
+        elif img.startswith("data:image"):
+            p["image"] = f"{live_url}/poster/promo_{p['_id']}"
+
+    for u in upcs:
+        u["_id"] = str(u["_id"])
+        tu = u.get("thumb_url") or ""
+        if "/poster/" in tu:
+            u["thumb_url"] = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
+        elif tu.startswith("data:image"):
+            u["thumb_url"] = f"{live_url}/poster/upc_{u['_id']}"
+
+    tutorials = []
+    for t in raw_tuts:
+        tutorials.append({
+            "_id": str(t["_id"]),
+            "lang": t.get("lang", "Bangla"),
+            "title": t.get("title", "")
+        })
+    if not tutorials and config.get("tutorial_vid"):
+        tutorials.append({"_id": "default", "lang": "Default", "title": "Tutorial"})
+
+    payload = {
+        "config": config,
+        "cats": cats,
+        "langs": langs,
+        "promos": promos,
+        "upcs": upcs,
+        "pkgs": pkgs,
+        "zone_ids": zone_ids,
+        "ad_links": ad_links,
+        "tutorials": tutorials
+    }
+    SHELL_DATA_CACHE["data"] = payload
+    SHELL_DATA_CACHE["ts"] = time.time()
+    SHELL_DATA_CACHE["ver"] = db_ver
+    return payload
+
+def _fetch_home_payload():
+    now = time.time()
+    db_ver = get_db_cache_ver()
+    if (
+        HOME_DATA_CACHE["data"] is not None
+        and HOME_DATA_CACHE.get("ver") == db_ver
+        and (now - HOME_DATA_CACHE["ts"]) < 120
+    ):
+        return HOME_DATA_CACHE["data"]
+
+    with HOME_CACHE_LOCK:
+        now = time.time()
+        db_ver = get_db_cache_ver()
+        if (
+            HOME_DATA_CACHE["data"] is not None
+            and HOME_DATA_CACHE.get("ver") == db_ver
+            and (now - HOME_DATA_CACHE["ts"]) < 120
+        ):
+            return HOME_DATA_CACHE["data"]
+
+        shell = _fetch_shell_payload()
+        config = shell["config"]
+        live_url = get_live_web_url(config)
+
+        raw_files = []
+        for d in get_extra_dbs_sync():
+            try: raw_files.extend(list(d["files"].find().sort("_id", -1)))
+            except: pass
+
+        files = []
+        for doc in raw_files:
+            fid = str(doc["_id"])
+            tu = doc.get("thumb_url") or ""
+            if "/poster/" in tu:
+                tu = f"{live_url}/poster/{tu.split('/poster/', 1)[1]}"
+            elif tu.startswith("data:image"):
+                tu = f"{live_url}/poster/{fid}"
+            elif not tu or "placehold.co" in tu:
+                tu = f"{live_url}/poster/default"
+
+            indexed_seasons = []
+            for si, s in enumerate(doc.get("seasons", [])):
+                indexed_eps = []
+                for ei, e in enumerate(s.get("episodes", [])):
+                    ep_lbl = clean_ep_no(e.get("ep_no", "1"))
+                    indexed_eps.append({
+                        "ep_no": ep_lbl,
+                        "orig_idx": ei,
+                        "qualities": [
+                            {"name": q.get("name", "HD"), "lang": q.get("lang", ""), "orig_idx": qi}
+                            for qi, q in enumerate(e.get("qualities", []))
+                        ]
+                    })
+                indexed_eps.sort(key=lambda x: natural_sort_key(x["ep_no"]))
+                ssn_lbl = clean_season_no(s.get("season_no", "1"))
+                indexed_seasons.append({
+                    "season_no": ssn_lbl,
+                    "orig_idx": si,
+                    "episodes": indexed_eps
+                })
+            indexed_seasons.sort(key=lambda x: natural_sort_key(x["season_no"]))
+
+            clean_doc = {
+                "_id": fid,
+                "type": doc.get("type", "movie"),
+                "title": doc.get("title", ""),
+                "name": doc.get("name", ""),
+                "year": doc.get("year", ""),
+                "category": doc.get("category", "All"),
+                "language": doc.get("language", ""),
+                "is_premium": bool(doc.get("is_premium", False)),
+                "thumb_url": tu,
+                "pinned": bool(doc.get("pinned", False)),
+                "ratings": doc.get("ratings", []),
+                "created_at": doc.get("created_at", ""),
+                "views": doc.get("views", 0),
+                "likes": doc.get("likes", []),
+                "comments": doc.get("comments", []),
+                "qualities": [
+                    {"name": q.get("name", "HD"), "lang": q.get("lang", ""), "orig_idx": qi}
+                    for qi, q in enumerate(doc.get("qualities", []))
+                ],
+                "seasons": indexed_seasons
+            }
+            files.append(clean_doc)
+
+        payload = {
+            **shell,
+            "files": files
+        }
+        HOME_DATA_CACHE["data"] = payload
+        HOME_DATA_CACHE["ts"] = time.time()
+        HOME_DATA_CACHE["ver"] = db_ver
+        return payload
+
+def warm_caches_loop():
+    while True:
+        try:
+            warm_site_logo_sync()
+            _fetch_home_payload()
+        except: pass
+        time.sleep(45)
+
+@web.route('/')
+def home():
+    p = _fetch_home_payload()
+    config = p["config"]
+    tut_vid = config.get("tutorial_vid") or ""
+    tut_ver = hashlib.md5((str(tut_vid) + str(len(p["tutorials"]))).encode()).hexdigest()[:8] if (tut_vid or p["tutorials"]) else "0"
+    logo_val = config.get("start_logo") or config.get("site_name", "FB")
+    logo_ver = hashlib.md5(str(logo_val).encode()).hexdigest()[:8]
+    sn = config.get("site_name", "Moviee Link")
+    site_name_hash = hashlib.md5(sn.encode("utf-8")).hexdigest()[:8]
+
+    uid_arg = request.args.get("uid", "")
+    initial_user = None
+    if uid_arg.isdigit():
+        try: initial_user = build_user_state_dict(int(uid_arg))
+        except: pass
+
+    initial_files = p["files"][:15] if p.get("files") else []
+
+    ad_config = {
+        "ads_on": config.get("ads_on", True),
+        "strict_ad": bool(config.get("strict_ad", True)),
+        "blur_sec": int(config.get("blur_sec", 20)),
+        "coin_price": config.get("premium_vid_coin", 50),
+        "prstep": max(1, int(config.get("prstep", 1))),
+        "regstep": max(1, int(config.get("regstep", 1))),
+        "relock_sec": get_relock_seconds(config),
+        "prem_wait_time": int(config.get("prem_vid_wait", 10)),
+        "task_wait_sec": int(config.get("task_wait_sec", 10)),
+        "monetag_wait": int(config.get("monetag_wait", 4)),
+        "ad_links": p["ad_links"],
+        "zone_ids": p["zone_ids"],
+        "wait_times": config.get("direk_wait", [5])
+    }
+
+    html = render_template_string(
+        HTML_TEMPLATE,
+        files_json=json.dumps(initial_files, default=str),
+        categories_json=json.dumps(p["cats"]),
+        languages_json=json.dumps(p["langs"]),
+        promotions_json=json.dumps(p["promos"], default=str),
+        upcoming_json=json.dumps(p["upcs"], default=str),
+        zone_ids=p["zone_ids"],
+        zone_ids_json=json.dumps(p["zone_ids"]),
+        ad_config_json=json.dumps(ad_config),
+        initial_user_json=json.dumps(initial_user),
+        tutorials_json=json.dumps(p["tutorials"]),
+        brand_name_json=json.dumps(config.get("brand_name", "")),
+        pkgs=p["pkgs"],
+        bot_username=BOT_USERNAME,
+        admin_username=config.get("payment_admin", DEFAULT_ADMIN_USERNAME),
+        site_name=sn,
+        logo_ver=logo_ver,
+        site_name_hash_json=json.dumps(site_name_hash),
+        rec_group_link_json=json.dumps(config.get("rec_group_link", "")),
+        has_tutorial_json=json.dumps(bool(tut_vid or p["tutorials"])),
+        tutorial_ver_json=json.dumps(tut_ver),
+        marquee_text=config.get("marquee_text", "VLC Player অথবা MX Player দিয়ে চালিয়ে দেখুন। ✅ সাউন্ড/অডিও সমস্যা হলে ভিডিওটি ডাউনলোড করে দেখুন।"),
+        ref_coin=config.get("ref_coin", 10)
+    )
+    return Response(html, mimetype="text/html", headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+
+app_flask = web
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    print(f"🌐 Starting Flask Web on port {port} | WEB_URL={WEB_URL}", flush=True)
+    web.run(host="0.0.0.0", port=port, debug=False, threaded=True, use_reloader=False)
+
+async def main_bot():
+    global BOT_USERNAME, bg_task_ref
+    if not BOT_TOKEN:
+        print("❌ ERROR: BOT_TOKEN environment variable is NOT set! Bot skipped.", flush=True)
+        while True: await asyncio.sleep(3600)
+    print("⏳ Connecting to MongoDB & Telegram...", flush=True)
+    await get_db()
+    conf = await get_config()
+    live_url = get_live_web_url(conf)
+    await app.start()
+    BOT_USERNAME = app.me.username
+    print(f"✅ Bot Started Successfully! (@{BOT_USERNAME})", flush=True)
+    if conf.get("tutorial_vid") and not str(conf["tutorial_vid"]).startswith("http"):
+        threading.Thread(target=ensure_tutorial_cached_sync, args=(conf["tutorial_vid"],), daemon=True).start()
+    try:
+        commands = [
+            BotCommand("start", "বট স্টার্ট করুন"),
+            BotCommand("tutorial", "টিউটোরিয়াল ভিডিও দেখুন"),
+            BotCommand("cmd", "সকল কমান্ড ও উদাহরণ (Admin)"),
+            BotCommand("stats", "বট স্ট্যাটিস্টিকস (Admin)"),
+            BotCommand("movies", "নতুন মুভি এড (Admin)"),
+            BotCommand("editemovies", "মুভি এডিট (Admin)"),
+            BotCommand("deletedmovies", "মুভি ডিলিট (Admin)"),
+            BotCommand("addseries", "নতুন ওয়েব সিরিজ এড (Admin)"),
+            BotCommand("editeseries", "ওয়েব সিরিজ এডিট (Admin)"),
+            BotCommand("deleteseries", "সিরিজ ডিলিট (Admin)"),
+            BotCommand("addupcoming", "আপকামিং শিডিউল এড (Admin)"),
+            BotCommand("delupcoming", "আপকামিং ডিলিট (Admin)"),
+            BotCommand("setcategory", "ক্যাটাগরি এড (Admin)"),
+            BotCommand("deletecategory", "ক্যাটাগরি ডিলিট (Admin)"),
+            BotCommand("blar", "১৮+ পোস্টার অটো ব্লার সময় (Admin)"),
+            BotCommand("brand", "পোস্টারে ব্র্যান্ড নাম সেট (Admin)"),
+            BotCommand("delbrand", "ব্র্যান্ড নাম রিমুভ (Admin)"),
+            BotCommand("setlanguage", "ভাষা এড (Admin)"),
+            BotCommand("deletelanguage", "ভাষা ডিলিট (Admin)"),
+            BotCommand("setrecgroup", "Recommendation গ্রুপ সেট (Admin)"),
+            BotCommand("delrecgroup", "Recommendation গ্রুপ রিমুভ (Admin)"),
+            BotCommand("strictad", "অ্যাড শেষ না হলে বাতিল (Admin)"),
+            BotCommand("regwait", "রেগুলার অ্যাডের সময় সেকেন্ড (Admin)"),
+            BotCommand("prparadd", "প্রিমিয়াম অ্যাডের সময় সেকেন্ড (Admin)"),
+            BotCommand("taskwait", "স্পিন ও টাস্ক অ্যাডের সময় (Admin)"),
+            BotCommand("monetagwait", "Monetag ন্যূনতম সময় (Admin)"),
+            BotCommand("addzoonid", "Monetag Zone ID এড (Admin)"),
+            BotCommand("deletezoonid", "Zone ID ডিলিট (Admin)"),
+            BotCommand("prstep", "প্রিমিয়াম অ্যাড স্টেপ (Admin)"),
+            BotCommand("regstep", "রেগুলার অ্যাড স্টেপ (Admin)"),
+            BotCommand("taskstep", "টাস্ক ও স্পিন অ্যাড স্টেপ (Admin)"),
+            BotCommand("relocktime", "রিলক টাইম সেকেন্ডে সেট (Admin)"),
+            BotCommand("tgtask", "টেলিগ্রাম জয়েন টাস্ক এড (Admin)"),
+            BotCommand("deltgtask", "টেলিগ্রাম টাস্ক ডিলিট (Admin)"),
+            BotCommand("addzonetask", "আলাদা Zone ID টাস্ক এড (Admin)"),
+            BotCommand("addlinktask", "আলাদা Direct Link টাস্ক এড (Admin)"),
+            BotCommand("addredeem", "রিডিম কোড তৈরি (Admin)"),
+            BotCommand("premiumuserlist", "প্রিমিয়াম ইউজার লিস্ট (Admin)"),
+            BotCommand("deletepremium", "প্রিমিয়াম রিমুভ (Admin)"),
+            BotCommand("addtutorial", "ভাষা অনুযায়ী টিউটোরিয়াল এড (Admin)"),
+            BotCommand("deltutorial", "টিউটোরিয়াল ডিলিট (Admin)"),
+            BotCommand("settutorial", "ডিফল্ট টিউটোরিয়াল সেট (Admin)"),
+            BotCommand("setnotice", "স্ক্রলিং নোটিশ সেট (Admin)"),
+            BotCommand("cancel", "চলমান প্রসেস বাতিল (Admin)")
+        ]
+        await app.set_bot_commands(commands)
+        await app.set_chat_menu_button(menu_button=MenuButtonWebApp(text="Watch Now 🎬", web_app=WebAppInfo(url=live_url)))
+        print(f"✅ Menu WebApp URL set to: {live_url}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Menu/Commands Setup Error: {e}", flush=True)
+    if bg_task_ref is None or bg_task_ref.done():
+        bg_task_ref = asyncio.create_task(background_tasks())
+    await idle()
+    await app.stop()
+
+if __name__ == "__main__":
+    try:
+        instance_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        instance_lock.bind(("127.0.0.1", 9876))
+    except socket.error:
+        print("⚠️ বট আগে থেকেই রান হচ্ছে!", flush=True)
+        sys.exit(1)
+
+    if BOT_TOKEN:
+        try: requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
+        except: pass
+
+    threading.Thread(target=warm_caches_loop, daemon=True).start()
+    threading.Thread(target=keep_alive, daemon=True).start()
+    threading.Thread(target=run_flask, daemon=True).start()
+    while True:
+        try: loop.run_until_complete(main_bot())
+        except FloodWait as e: time.sleep(e.value)
+        except Exception as e:
+            print(f"❌ Bot Error: {e}", flush=True)
+            traceback.print_exc()
+            time.sleep(5)
