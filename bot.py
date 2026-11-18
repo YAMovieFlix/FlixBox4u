@@ -2521,10 +2521,29 @@ async def finalize_save_series(c, uid, mo):
 async def srsave_final_cb(c, q): await finalize_save_series(c, q.from_user.id, q.message)
 
 @app.on_message(filters.command("deleteseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
-async def cmd_delete_series(c, m): await send_del_page(m, {"type": "series"}, "delsr", 0, edit=False)
+async def cmd_delete_series(c, m):
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if raw_arg:
+        admin_steps[m.from_user.id] = {"step": "delsr_search_wait", "del_query": raw_arg}
+        return await send_del_page(m, {"type": "series"}, "delsr", 0, edit=False, query=raw_arg)
+    admin_steps.pop(m.from_user.id, None)
+    await send_del_page(m, {"type": "series"}, "delsr", 0, edit=False)
+
+@app.on_callback_query(filters.regex(r"^delsrsrch$") & filters.user(ADMIN_ID) & unique_cb)
+async def delsrsrch_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "delsr_search_wait"}
+    await q.message.edit_text("🔍 **যে সিরিজ ডিলিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `Bachelor Point`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]]))
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("delsr_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_delsr_search(c, m):
+    q_txt = m.text.strip()
+    admin_steps[m.from_user.id] = {"step": "delsr_search_wait", "del_query": q_txt}
+    await send_del_page(m, {"type": "series"}, "delsr", 0, edit=False, query=q_txt)
 
 @app.on_callback_query(filters.regex(r"^delsrpg_") & filters.user(ADMIN_ID) & unique_cb)
-async def delsrpg_cb(c, q): await send_del_page(q, {"type": "series"}, "delsr", int(q.data.split("_")[1]), edit=True)
+async def delsrpg_cb(c, q):
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": "series"}, "delsr", int(q.data.split("_")[1]), edit=True, query=cur_q)
 
 @app.on_callback_query(filters.regex(r"^delsr_") & filters.user(ADMIN_ID) & unique_cb)
 async def delsr_cb(c, q):
@@ -2539,29 +2558,39 @@ async def delsr_cb(c, q):
         poster_cache_del(f_id)
         invalidate_home_cache()
         await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
-    await send_del_page(q, {"type": "series"}, "delsr", int(pg), edit=True)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": "series"}, "delsr", int(pg), edit=True, query=cur_q)
 
-@app.on_message(filters.command("editeseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+@app.on_message(filters.command(["editeseries", "editseries"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_edit_series(c, m):
-    name, year = parse_name_year(m.text, "/editeseries")
-    if not name:
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if not raw_arg:
         admin_steps[m.from_user.id] = {"step": "edsr_search_wait"}
-        return await m.reply("🔍 **যে ওয়েব সিরিজ এডিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `Bachelor Point`")
-    alls = await get_all_files_across_dbs({"type": "series"})
-    ms = [d for d in alls if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_series_panel(m, str(ms[0]["_id"]), edit=False)
-    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in ms[:20]]))
-    return await m.reply(f"❌ '{name}' নামে কোনো সিরিজ পাওয়া যায়নি!")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 সব সিরিজ দেখুন (Page by Page)", callback_data="edsrpage_all_0")],
+            [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+        ])
+        return await m.reply("🔍 **যে ওয়েব সিরিজ এডিট করতে চান, তার নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `Bachelor Point`", reply_markup=kb)
+    await send_edit_search_page(m, m.from_user.id, True, raw_arg, 0, edit=False)
 
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_search_wait") & ~filters.regex(r"^/") & unique_msg)
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("edsr_search_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_search(c, m):
-    admin_steps.pop(m.from_user.id, None)
-    name, year = parse_name_year(m.text, "")
-    alls = await get_all_files_across_dbs({"type": "series"})
-    ms = [d for d in alls if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_series_panel(m, str(ms[0]["_id"]), edit=False)
-    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edsrpick_{d['_id']}")] for d in ms[:20]]))
-    return await m.reply(f"❌ '{name}' নামে কোনো সিরিজ পাওয়া যায়নি! আবার `/editeseries` দিয়ে সার্চ করুন।")
+    await send_edit_search_page(m, m.from_user.id, True, m.text.strip(), 0, edit=False)
+
+@app.on_callback_query(filters.regex(r"^edsragain$") & filters.user(ADMIN_ID) & unique_cb)
+async def edsragain_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "edsr_search_wait"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 সব সিরিজ দেখুন", callback_data="edsrpage_all_0")],
+        [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+    ])
+    await q.message.edit_text("🔍 **নতুন করে সিরিজের নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `Bachelor Point`", reply_markup=kb)
+
+@app.on_callback_query(filters.regex(r"^edsrpage_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrpage_cb(c, q):
+    _, mode_tag, pg_str = q.data.split("_", 2)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("search_query", "") if mode_tag == "q" else ""
+    await send_edit_search_page(q, q.from_user.id, True, cur_q, int(pg_str), edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrpick_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrpick_cb(c, q):
