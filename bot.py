@@ -1964,24 +1964,126 @@ async def finalize_save_movie(c, uid, msg_obj):
 @app.on_callback_query(filters.regex(r"^mvsave_final$") & filters.user(ADMIN_ID) & unique_cb)
 async def mvsave_final_cb(c, q): await finalize_save_movie(c, q.from_user.id, q.message)
 
-@app.on_message(filters.command("deletedmovies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
-async def cmd_deleted_movies(c, m): await send_del_page(m, {"type": {"$ne": "series"}}, "delmv", 0, edit=False)
+async def search_files_list(is_series, raw_query):
+    qflt = {"type": "series"} if is_series else {"type": {"$ne": "series"}}
+    all_docs = await get_all_files_across_dbs(qflt)
+    raw = (raw_query or "").strip()
+    if not raw:
+        return all_docs
+    name, year = parse_name_year(raw, "")
+    nq = (name or raw).lower().strip()
+    res = []
+    for d in all_docs:
+        title = str(d.get("title", "")).lower()
+        dname = str(d.get("name", "")).lower()
+        dyear = str(d.get("year", "")).lower()
+        dcat = str(d.get("category", "")).lower()
+        did = str(d.get("_id", "")).lower()
+        if (nq in title or nq in dname or nq == did or nq in dcat) and (not year or year.lower() in title or year.lower() == dyear):
+            res.append(d)
+    return res
 
-async def send_del_page(mq, qflt, pfx, page=0, edit=True):
-    docs = await get_all_files_across_dbs(qflt)
-    if not docs: txt = "❌ কোনো আইটেম নেই!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
-    pp = 10; st = page * pp; ch = docs[st:st + pp]
-    btns = [[InlineKeyboardButton(f"🗑 {d['title'][:32]} [{d['_id']}]", callback_data=f"{pfx}_{d['_id']}_{page}")] for d in ch]
+async def send_edit_search_page(mq, uid, is_series, query, page=0, edit=True):
+    docs = await search_files_list(is_series, query)
+    kind = "সিরিজ" if is_series else "মুভি"
+    pick_pfx = "edsrpick" if is_series else "edmvpick"
+    page_pfx = "edsrpage" if is_series else "edmvpage"
+    again_cb = "edsragain" if is_series else "edmvagain"
+    admin_steps[uid] = {
+        "step": "edsr_search_wait" if is_series else "edmv_search_wait",
+        "search_query": query
+    }
+    if not docs:
+        txt = f"❌ `{query}` নামে কোনো {kind} পাওয়া যায়নি!\n\n🔍 অন্য কোনো নাম লিখে পাঠান অথবা নিচের বাটনে চাপ দিন:"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"📋 সব {kind} দেখুন", callback_data=f"{page_pfx}_all_0")],
+            [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+        ])
+        return await (mq.message.edit_text(txt, reply_markup=kb) if edit else mq.reply(txt, reply_markup=kb))
+
+    if len(docs) == 1 and query:
+        admin_steps.pop(uid, None)
+        if is_series:
+            return await show_edit_series_panel(mq, str(docs[0]["_id"]), edit=edit)
+        return await show_edit_movie_panel(mq, str(docs[0]["_id"]), edit=edit)
+
+    pp = 10
+    total_pages = max(1, (len(docs) + pp - 1) // pp)
+    page = max(0, min(page, total_pages - 1))
+    st = page * pp
+    ch = docs[st:st + pp]
+    btns = [[InlineKeyboardButton(f"✏️ {d['title'][:32]} [{d['_id']}]", callback_data=f"{pick_pfx}_{d['_id']}")] for d in ch]
+    nav = []
+    mode_tag = "q" if query else "all"
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{page_pfx}_{mode_tag}_{page-1}"))
+    if st + pp < len(docs):
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"{page_pfx}_{mode_tag}_{page+1}"))
+    if nav:
+        btns.append(nav)
+    btns.append([
+        InlineKeyboardButton("🔍 নতুন সার্চ", callback_data=again_cb),
+        InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")
+    ])
+    header = f"🔍 **'{query}' এর {kind} ফলাফল**" if query else f"📋 **সকল {kind} তালিকা**"
+    txt = f"{header} (মোট: {len(docs)} টি | পেজ {page+1}/{total_pages}):\n\n👇 এডিট করতে {kind}-তে ক্লিক করুন (অথবা সরাসরি নতুন নাম লিখুন):"
+    if edit:
+        await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else:
+        await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edsearch_cancel$") & filters.user(ADMIN_ID) & unique_cb)
+async def edsearch_cancel_cb(c, q):
+    admin_steps.pop(q.from_user.id, None)
+    await q.message.edit_text("✅ সার্চ বাতিল করা হয়েছে!")
+
+@app.on_message(filters.command("deletedmovies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+async def cmd_deleted_movies(c, m):
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if raw_arg:
+        admin_steps[m.from_user.id] = {"step": "delmv_search_wait", "del_query": raw_arg}
+        return await send_del_page(m, {"type": {"$ne": "series"}}, "delmv", 0, edit=False, query=raw_arg)
+    admin_steps.pop(m.from_user.id, None)
+    await send_del_page(m, {"type": {"$ne": "series"}}, "delmv", 0, edit=False)
+
+async def send_del_page(mq, qflt, pfx, page=0, edit=True, query=""):
+    is_series = (pfx == "delsr")
+    docs = await search_files_list(is_series, query) if query else await get_all_files_across_dbs(qflt)
+    srch_cb = "delsrsrch" if is_series else "delmvsrch"
+    if not docs:
+        txt = f"❌ `{query}` নামে কোনো আইটেম পাওয়া যায়নি!" if query else "❌ কোনো আইটেম নেই!"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 আবার সার্চ করুন", callback_data=srch_cb)], [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]]) if query else None
+        return await (mq.message.edit_text(txt, reply_markup=kb) if edit else mq.reply(txt, reply_markup=kb))
+    pp = 10
+    total_pages = max(1, (len(docs) + pp - 1) // pp)
+    page = max(0, min(page, total_pages - 1))
+    st = page * pp
+    ch = docs[st:st + pp]
+    btns = [[InlineKeyboardButton("🔍 নাম দিয়ে সার্চ করুন", callback_data=srch_cb)]]
+    btns += [[InlineKeyboardButton(f"🗑 {d['title'][:32]} [{d['_id']}]", callback_data=f"{pfx}_{d['_id']}_{page}")] for d in ch]
     nav = []
     if page > 0: nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{pfx}pg_{page-1}"))
     if st + pp < len(docs): nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"{pfx}pg_{page+1}"))
     if nav: btns.append(nav)
-    txt = f"🗑 **ডিলিট লিস্ট (Total: {len(docs)}):**"
+    txt = f"🗑 **ডিলিট লিস্ট {'(সার্চ: ' + query + ') ' if query else ''}(Total: {len(docs)} | পেজ {page+1}/{total_pages}):**"
     if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
+@app.on_callback_query(filters.regex(r"^delmvsrch$") & filters.user(ADMIN_ID) & unique_cb)
+async def delmvsrch_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "delmv_search_wait"}
+    await q.message.edit_text("🔍 **যে মুভি ডিলিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `RRR` অথবা `2024`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]]))
+
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("delmv_search_wait") & ~filters.regex(r"^/") & unique_msg)
+async def handle_delmv_search(c, m):
+    q_txt = m.text.strip()
+    admin_steps[m.from_user.id] = {"step": "delmv_search_wait", "del_query": q_txt}
+    await send_del_page(m, {"type": {"$ne": "series"}}, "delmv", 0, edit=False, query=q_txt)
+
 @app.on_callback_query(filters.regex(r"^delmvpg_") & filters.user(ADMIN_ID) & unique_cb)
-async def delmvpg_cb(c, q): await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(q.data.split("_")[1]), edit=True)
+async def delmvpg_cb(c, q):
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(q.data.split("_")[1]), edit=True, query=cur_q)
 
 @app.on_callback_query(filters.regex(r"^delmv_") & filters.user(ADMIN_ID) & unique_cb)
 async def delmv_cb(c, q):
@@ -1996,29 +2098,39 @@ async def delmv_cb(c, q):
         poster_cache_del(f_id)
         invalidate_home_cache()
         await q.answer(f"✅ {doc['title']} ডিলিট হয়েছে!", show_alert=True)
-    await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(pg), edit=True)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("del_query", "")
+    await send_del_page(q, {"type": {"$ne": "series"}}, "delmv", int(pg), edit=True, query=cur_q)
 
-@app.on_message(filters.command("editemovies", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+@app.on_message(filters.command(["editemovies", "editmovies"], case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_edit_movies(c, m):
-    name, year = parse_name_year(m.text, "/editemovies")
-    if not name:
+    raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
+    if not raw_arg:
         admin_steps[m.from_user.id] = {"step": "edmv_search_wait"}
-        return await m.reply("🔍 **যে মুভি এডিট করতে চান, তার নাম লিখুন:**\nউদাহরণ: `RRR` অথবা `RRR 2022`")
-    all_m = await get_all_files_across_dbs({"type": {"$ne": "series"}})
-    ms = [d for d in all_m if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_movie_panel(m, str(ms[0]["_id"]), edit=False)
-    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in ms[:20]]))
-    return await m.reply(f"❌ '{name}' নামে কোনো মুভি পাওয়া যায়নি!")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 সব মুভি দেখুন (Page by Page)", callback_data="edmvpage_all_0")],
+            [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+        ])
+        return await m.reply("🔍 **যে মুভি এডিট করতে চান, তার নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `RRR` অথবা `RRR 2022`", reply_markup=kb)
+    await send_edit_search_page(m, m.from_user.id, False, raw_arg, 0, edit=False)
 
-@app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_search_wait") & ~filters.regex(r"^/") & unique_msg)
+@app.on_message(filters.text & filters.user(ADMIN_ID) & is_in_step("edmv_search_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_search(c, m):
-    admin_steps.pop(m.from_user.id, None)
-    name, year = parse_name_year(m.text, "")
-    all_m = await get_all_files_across_dbs({"type": {"$ne": "series"}})
-    ms = [d for d in all_m if (name.lower() in d.get("title", "").lower() or name.lower() == str(d.get("_id", "")).lower()) and (not year or year in d.get("title", ""))]
-    if len(ms) == 1: return await show_edit_movie_panel(m, str(ms[0]["_id"]), edit=False)
-    elif ms: return await m.reply(f"🔍 '{name}' এর ফলাফল ({len(ms)} টি):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✏️ {d['title'][:35]}", callback_data=f"edmvpick_{d['_id']}")] for d in ms[:20]]))
-    return await m.reply(f"❌ '{name}' নামে কোনো মুভি পাওয়া যায়নি! আবার `/editemovies` দিয়ে সার্চ করুন।")
+    await send_edit_search_page(m, m.from_user.id, False, m.text.strip(), 0, edit=False)
+
+@app.on_callback_query(filters.regex(r"^edmvagain$") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvagain_cb(c, q):
+    admin_steps[q.from_user.id] = {"step": "edmv_search_wait"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 সব মুভি দেখুন", callback_data="edmvpage_all_0")],
+        [InlineKeyboardButton("❌ বাতিল", callback_data="edsearch_cancel")]
+    ])
+    await q.message.edit_text("🔍 **নতুন করে মুভির নাম, সাল বা আইডি লিখুন:**\nউদাহরণ: `RRR` অথবা `2024`", reply_markup=kb)
+
+@app.on_callback_query(filters.regex(r"^edmvpage_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvpage_cb(c, q):
+    _, mode_tag, pg_str = q.data.split("_", 2)
+    cur_q = admin_steps.get(q.from_user.id, {}).get("search_query", "") if mode_tag == "q" else ""
+    await send_edit_search_page(q, q.from_user.id, False, cur_q, int(pg_str), edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvpick_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvpick_cb(c, q):
