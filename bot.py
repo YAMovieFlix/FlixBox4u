@@ -1489,8 +1489,7 @@ async def getut_cb(c, q):
         await c.send_message(q.from_user.id, f"{cap}\n🔗 {t['video_id']}")
     else:
         await c.send_video(q.from_user.id, video=t["video_id"], caption=cap)
-        @app.on_message(filters.command("start", case_sensitive=False) & filters.private & unique_msg)
-async def start_cmd(client, message):
+@app.on_message(filters.command("start", case_sensitive=False) & filters.private & unique_msg)
     try:
         await get_db()
         uid = message.from_user.id
