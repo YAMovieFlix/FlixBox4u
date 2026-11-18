@@ -2454,8 +2454,6 @@ async def handle_edmv_poster_url(c, m):
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
-
-📦 PART 4/7
 # ==========================================
 # 8. SERIES WORKFLOW (NEXT EPISODE + MULTI-LANGUAGE + REVIEW & CONFIRM)
 # ==========================================
