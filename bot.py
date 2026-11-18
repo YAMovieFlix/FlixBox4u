@@ -477,8 +477,7 @@ def decode_b64_to_bytes(val):
         except: return None, mime
     try: return base64.b64decode(val), mime
     except: return None, mime
-
-def make_clean_placeholder_svg():
+        def make_clean_placeholder_svg():
     svg = """<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
   <defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#141624"/><stop offset="100%" stop-color="#271b3d"/></linearGradient></defs>
   <rect width="640" height="360" fill="url(#g)"/>
@@ -930,8 +929,7 @@ async def background_tasks():
                     print(f"AutoChannel Post Error ({c_id}): {e}", flush=True)
         except Exception as e:
             print("BG Task Error:", e, flush=True)
-
-# ==========================================
+            # ==========================================
 # 4. HELPER BUILDERS (100% DYNAMIC MONGODB)
 # ==========================================
 QUALITIES = ["360p", "480p", "720p", "1080p", "4K", "HDRip"]
@@ -1003,8 +1001,25 @@ def extract_file_meta(m):
         return f"{label} ({sz})"
     return label
 
-def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None, extra_rows=None):
-    btns, row = [], []
+def build_lang_pick_rows(langs, cur_lang, cb_prefix):
+    if not langs:
+        return []
+    rows, row = [], []
+    for i, ln in enumerate(langs):
+        mark = " ✅" if ln == cur_lang else ""
+        row.append(InlineKeyboardButton(f"🌐 {ln}{mark}", callback_data=f"{cb_prefix}_{i}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    none_mark = " ✅" if not cur_lang else ""
+    rows.append([InlineKeyboardButton(f"🌐 No Lang{none_mark}", callback_data=f"{cb_prefix}_none")])
+    return rows
+
+def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None, extra_rows=None, top_rows=None):
+    btns = list(top_rows) if top_rows else []
+    row = []
     for q in QUALITIES:
         row.append(InlineKeyboardButton(f"🎬 {q}", callback_data=f"{prefix}_{q}"))
         if len(row) == 3: btns.append(row); row = []
@@ -1016,6 +1031,23 @@ def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_c
         btns.append([InlineKeyboardButton(finish_label, callback_data=skip_cb)])
     if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns)
+
+def collect_doc_languages(doc):
+    res = []
+    def _add(v):
+        s = str(v or "").strip()
+        if s and s not in res:
+            res.append(s)
+    for x in (doc.get("languages") or []):
+        _add(x)
+    _add(doc.get("language"))
+    for q in (doc.get("qualities") or []):
+        _add(q.get("lang"))
+    for s in (doc.get("seasons") or []):
+        for e in (s.get("episodes") or []):
+            for q in (e.get("qualities") or []):
+                _add(q.get("lang"))
+    return res
 
 def is_in_step(step_name):
     return filters.create(lambda _, __, m: admin_steps.get(m.from_user.id, {}).get("step") == step_name)
@@ -1273,7 +1305,7 @@ async def cmd_setrecgroup(c, m):
     parts = m.text.split(None, 1)
     if len(parts) < 2:
         admin_steps[m.from_user.id] = {"step": "set_rec_group_wait"}
-        return await m.reply("👥 আপনার **Movie Recommendation গ্রুপের লিংক** দিন:\nউদরণ: `https://t.me/my_movie_group`")
+        return await m.reply("👥 আপনার **Movie Recommendation গ্রুপের লিংক** দিন:\nউদাহরণ: `https://t.me/my_movie_group`")
     link = parts[1].strip()
     if not link.startswith("http"):
         link = "https://t.me/" + link.lstrip("@")
@@ -1457,8 +1489,7 @@ async def getut_cb(c, q):
         await c.send_message(q.from_user.id, f"{cap}\n🔗 {t['video_id']}")
     else:
         await c.send_video(q.from_user.id, video=t["video_id"], caption=cap)
-
-@app.on_message(filters.command("start", case_sensitive=False) & filters.private & unique_msg)
+        @app.on_message(filters.command("start", case_sensitive=False) & filters.private & unique_msg)
 async def start_cmd(client, message):
     try:
         await get_db()
@@ -1534,7 +1565,10 @@ async def start_cmd(client, message):
                 if fd is not None and tdb is not None:
                     asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
                     qs = fd.get("qualities", []); qi = int(q_idx)
-                    if 0 <= qi < len(qs): return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}]", config, file_doc=fd)
+                    if 0 <= qi < len(qs):
+                        qo = qs[qi]
+                        qlbl = f"{qo['lang']} • {qo['name']}" if qo.get("lang") else qo["name"]
+                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} [{qlbl}]", config, file_doc=fd)
                     elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config, file_doc=fd)
                 return await message.reply("❌ ফাইল পাওয়া যায়নি!")
             elif pf_val.startswith("sfile_"):
@@ -1544,7 +1578,8 @@ async def start_cmd(client, message):
                     asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
                     try:
                         ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
-                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}]", config, file_doc=fd)
+                        qlbl = f"{qo['lang']} • {qo['name']}" if qo.get("lang") else qo["name"]
+                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qlbl}]", config, file_doc=fd)
                     except: pass
                 return await message.reply("❌ এপিসোড ফাইল পাওয়া যায়নি!")
             else:
@@ -1823,10 +1858,50 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
-    
 # ==========================================
-# 7. MOVIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
+# 7. MOVIES WORKFLOW (MULTI-LANGUAGE QUALITY + REVIEW & CONFIRM + SEARCH EDIT)
 # ==========================================
+async def build_mv_q_markup(st):
+    langs = await get_languages_list()
+    cur_lang = st.get("current_lang", st.get("language", ""))
+    top_rows = build_lang_pick_rows(langs, cur_lang, "mvqlg")
+    cnt = len(st.get("qualities", []))
+    lbl = f"🔍 Review & Confirm ({cnt})" if cnt else "🔍 Review & Confirm"
+    return get_quality_markup("mvqual", "mvrev", lbl, "mvback_poster", top_rows=top_rows)
+
+async def show_mv_review(mo, st, edit=True):
+    qs = st.get("qualities", [])
+    ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+    ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    has_p = "✅ Ready" if (st.get("poster_b64") or st.get("thumb_url")) else "❌ None"
+    all_langs = []
+    if st.get("language"): all_langs.append(st["language"])
+    for q in qs:
+        if q.get("lang") and q["lang"] not in all_langs: all_langs.append(q["lang"])
+    lang_str = ", ".join(all_langs) if all_langs else "None"
+    txt = (
+        f"🔍 **Review Movie (কনফার্মের আগে সাইটে এড হবে না):**\n\n"
+        f"🎬 **{ft}**\n"
+        f"📂 Category: `{st.get('category', 'All')}` | 🌐 Languages: `{lang_str}`\n"
+        f"🔰 Type: **{ps}** | 🖼 Poster: `{has_p}`\n\n"
+        f"🎞 **অ্যাড করা কোয়ালিটি ({len(qs)}):**\n"
+    )
+    if qs:
+        for i, q in enumerate(qs):
+            ql = f"[{q['lang']}] " if q.get("lang") else ""
+            txt += f"{i+1}. {ql}**{q['name']}** — `{q.get('meta', 'Video File')}`\n"
+    else:
+        txt += "_⚠️ কোনো কোয়ালিটি যোগ করা হয়নি!_\n"
+    txt += "\n👇 ভুল কোয়ালিটি থাকলে Remove করুন, সব ঠিক থাকলে **Confirm & Add to Site** চাপুন:"
+    btns = []
+    for i, q in enumerate(qs):
+        ql = f"[{q['lang']}] " if q.get("lang") else ""
+        btns.append([InlineKeyboardButton(f"🗑 Remove #{i+1}: {ql}{q['name']}", callback_data=f"mvrmq_{i}")])
+    btns.append([InlineKeyboardButton("➕ Add More Quality", callback_data="mvback_qual")])
+    btns.append([InlineKeyboardButton("✅ Confirm & Add to Site", callback_data="mvsave_final")])
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
 async def show_mv_poster_prompt(mo, st, edit=True):
     st["step"] = "mv_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
     txt = f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**"
@@ -1838,13 +1913,13 @@ async def show_mv_poster_prompt(mo, st, edit=True):
 async def cmd_movies(c, m):
     name, year = parse_name_year(m.text, "/movies")
     if not name: admin_steps[m.from_user.id] = {"step": "mv_name_year"}; return await m.reply("🎬 **মুভির নাম ও সাল দিন:**\nউদাহরণ: `RRR 2024`")
-    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None}
+    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
     mk, _ = await get_cat_markup("mvcat", "mvcat_skip"); await m.reply(f"🎬 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_name_year") & ~filters.regex(r"^/") & unique_msg)
 async def handle_mv_name_year(c, m):
     name, year = parse_name_year(m.text, "")
-    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None}
+    admin_steps[m.from_user.id] = {"step": "mv_cat", "name": name, "year": year, "qualities": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
     mk, _ = await get_cat_markup("mvcat", "mvcat_skip"); await m.reply(f"🎬 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_callback_query(filters.regex(r"^mvback_") & filters.user(ADMIN_ID) & unique_cb)
@@ -1862,8 +1937,10 @@ async def mvback_cb(c, q):
         return await show_mv_poster_prompt(q.message, st, edit=True)
     elif target == "qual":
         st["step"] = "mv_qual_wait"
-        qs = ", ".join([x["name"] for x in st.get("qualities", [])]) or "None"
-        return await q.message.edit_text(f"🎞 অ্যাড করা কোয়ালিটি: `{qs}`\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
+        qs = ", ".join([(f"[{x['lang']}] {x['name']}" if x.get("lang") else x["name"]) for x in st.get("qualities", [])]) or "None"
+        cl = st.get("current_lang", st.get("language", "")) or "None"
+        mk = await build_mv_q_markup(st)
+        return await q.message.edit_text(f"🌐 Current Language: **{cl}**\n🎞 পেন্ডিং কোয়ালিটি: `{qs}`\n\n৪. ভাষা ও **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=mk)
 
 @app.on_callback_query(filters.regex(r"^mvcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def mvcat_cb(c, q):
@@ -1880,9 +1957,31 @@ async def mvlang_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     val = q.data.split("_")[1]
-    if val == "skip": st["language"] = ""
-    else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
+    if val == "skip": st["language"] = ""; st["current_lang"] = ""
+    else:
+        langs = await get_languages_list()
+        chosen = langs[int(val)] if int(val) < len(langs) else ""
+        st["language"] = chosen; st["current_lang"] = chosen
     await show_mv_poster_prompt(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^mvqlg_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvqlg_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_", 1)[1]
+    if val == "none":
+        st["current_lang"] = ""
+    else:
+        langs = await get_languages_list()
+        st["current_lang"] = langs[int(val)] if int(val) < len(langs) else ""
+    cl = st["current_lang"] or "None"
+    await q.answer(f"🌐 Language: {cl}")
+    qs = ", ".join([(f"[{x['lang']}] {x['name']}" if x.get("lang") else x["name"]) for x in st.get("qualities", [])]) or "None"
+    mk = await build_mv_q_markup(st)
+    try:
+        await q.message.edit_text(f"🌐 Current Language: **{cl}**\n🎞 পেন্ডিং কোয়ালিটি: `{qs}`\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=mk)
+    except Exception:
+        pass
 
 @app.on_callback_query(filters.regex(r"^mvprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
 async def mvprem_toggle_cb(c, q):
@@ -1901,7 +2000,9 @@ async def handle_mv_poster(c, m):
         st = admin_steps.get(m.from_user.id)
         if not st: return await msg.edit_text("❌ সেশন এক্সপায়ার হয়েছে! আবার `/movies` দিন।")
         st["poster_b64"] = enc; st["poster_mime"] = mime; st["tg_thumb_id"] = tg_fid; st["step"] = "mv_qual_wait"
-        await msg.edit_text("✅ **পোস্টার রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন (শেষে **Save Movie** বাটনে ক্লিক করুন):", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
+        cl = st.get("current_lang", st.get("language", "")) or "None"
+        mk = await build_mv_q_markup(st)
+        await msg.edit_text(f"✅ **পোস্টার রেডি!**\n🌐 Current Language: **{cl}**\n\n৪. ভাষা ও **Quality** সিলেক্ট করে ভিডিও ফাইল দিন (শেষে **Review & Confirm** চাপুন):", reply_markup=mk)
     except Exception as e:
         await msg.edit_text(f"❌ পোস্টার এরর: `{e}`")
 
@@ -1925,7 +2026,9 @@ async def handle_mv_poster_url(c, m):
         except:
             st["thumb_url"] = url
         st["step"] = "mv_qual_wait"
-        await msg.edit_text("✅ **পোস্টার লিংক রেডি!**\n\n৪. এবার মুভির **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
+        cl = st.get("current_lang", st.get("language", "")) or "None"
+        mk = await build_mv_q_markup(st)
+        await msg.edit_text(f"✅ **পোস্টার লিংক রেডি!**\n🌐 Current Language: **{cl}**\n\n৪. ভাষা ও **Quality** সিলেক্ট করে ভিডিও ফাইল দিন:", reply_markup=mk)
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
 
@@ -1934,22 +2037,54 @@ async def mvqual_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     val = q.data.split("_", 1)[1]
+    cl = st.get("current_lang", st.get("language", ""))
+    l_tag = f"[{cl}] " if cl else ""
     if val == "custom":
         st["step"] = "mv_custom_qname"
-        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:\nউদাহরণ: `1080p HEVC`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
+        return await q.message.edit_text(f"✏️ কাস্টম কোয়ালিটির নাম লিখুন ({l_tag.strip() or 'No Lang'}):\nউদাহরণ: `1080p HEVC`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
     st["current_quality"] = val; st["step"] = "mv_qual_file"
-    await q.message.edit_text(f"📤 এবার **{val}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
+    await q.message.edit_text(f"📤 এবার **{l_tag}{val}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_custom_qname") & ~filters.regex(r"^/") & unique_msg)
 async def handle_mv_custom_qname(c, m):
     st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "mv_qual_file"
-    await m.reply(f"📤 এবার **{st['current_quality']}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
+    cl = st.get("current_lang", st.get("language", ""))
+    l_tag = f"[{cl}] " if cl else ""
+    await m.reply(f"📤 এবার **{l_tag}{st['current_quality']}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="mvback_qual")]]))
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("mv_qual_file") & unique_msg)
 async def handle_mv_qual_file(c, m):
     st = admin_steps[m.from_user.id]; f_id = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
-    q_name = st.get("current_quality", "HD"); st["qualities"].append({"name": q_name, "file_id": f_id}); st["step"] = "mv_qual_wait"
-    await m.reply(f"✅ **{q_name}** অ্যাড হয়েছে! (`{', '.join([q['name'] for q in st['qualities']])}`)\nআরও কোয়ালিটি যোগ করুন অথবা সেভ করুন:", reply_markup=get_quality_markup("mvqual", "mvsave_final", "✅ Save Movie Now", "mvback_poster"))
+    q_name = st.get("current_quality", "HD")
+    q_lang = st.get("current_lang", st.get("language", ""))
+    st["qualities"].append({"name": q_name, "lang": q_lang, "file_id": f_id, "meta": extract_file_meta(m)})
+    st["step"] = "mv_qual_wait"
+    ql = f"[{q_lang}] " if q_lang else ""
+    q_list = ", ".join([(f"[{q['lang']}] {q['name']}" if q.get("lang") else q["name"]) for q in st["qualities"]])
+    mk = await build_mv_q_markup(st)
+    await m.reply(
+        f"📝 **{ql}{q_name}** পেন্ডিং লিস্টে যোগ হয়েছে!\n"
+        f"🎞 পেন্ডিং: `{q_list}`\n"
+        f"⏳ _(Review & Confirm না করা পর্যন্ত সাইটে এড হবে না)_",
+        reply_markup=mk
+    )
+
+@app.on_callback_query(filters.regex(r"^mvrev$") & filters.user(ADMIN_ID) & unique_cb)
+async def mvrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await show_mv_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^mvrmq_") & filters.user(ADMIN_ID) & unique_cb)
+async def mvrmq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    idx = int(q.data.split("_", 1)[1])
+    qs = st.get("qualities", [])
+    if 0 <= idx < len(qs):
+        rm = qs.pop(idx)
+        await q.answer(f"🗑 {rm['name']} রিমুভ হয়েছে!", show_alert=False)
+    await show_mv_review(q.message, st, edit=True)
 
 async def finalize_save_movie(c, uid, msg_obj):
     st = admin_steps.pop(uid, None)
@@ -1969,10 +2104,13 @@ async def finalize_save_movie(c, uid, msg_obj):
             thumb_url = await save_poster_to_mongo(target_db, short_id, st["poster_b64"], st.get("poster_mime", "image/jpeg"), live_url)
         elif st.get("thumb_url"):
             thumb_url = st["thumb_url"]
+        clean_qs = [{"name": q["name"], "lang": q.get("lang", ""), "file_id": q["file_id"]} for q in st.get("qualities", [])]
         ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
-        nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": st["qualities"][0]["file_id"] if st.get("qualities") else None, "qualities": st.get("qualities", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        prim_lang = st.get("language", "") or (clean_qs[0]["lang"] if clean_qs and clean_qs[0].get("lang") else "")
+        nm = {"_id": short_id, "type": "movie", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": prim_lang, "is_premium": st.get("is_premium", False), "file_id": clean_qs[0]["file_id"] if clean_qs else None, "qualities": clean_qs, "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        nm["languages"] = collect_doc_languages(nm)
         await target_db["files"].insert_one(nm); invalidate_home_cache(); await notify_new_post(c, nm, conf)
-        await msg_obj.edit_text(f"✅ **মুভি ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
+        await msg_obj.edit_text(f"✅ **কনফার্ম সফল! মুভি ও পোস্টার সাইটে এড হয়েছে!**\n🎬 **{ft}** | 🆔 `{short_id}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
     except Exception as e:
         traceback.print_exc()
         await msg_obj.edit_text(f"❌ সেভ করতে সমস্যা হয়েছে: `{e}`")
@@ -2156,8 +2294,10 @@ async def edmvpick_cb(c, q):
 async def show_edit_movie_panel(mq, f_id, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
     if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
-    qs = doc.get("qualities", []); q_str = ", ".join([x["name"] for x in qs]) if qs else ("Single File" if doc.get("file_id") else "None")
-    txt = f"✏️ **Edit Movie:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n🎞 Qualities: `{q_str}`"
+    qs = doc.get("qualities", [])
+    q_str = ", ".join([(f"[{x['lang']}] {x['name']}" if x.get("lang") else x["name"]) for x in qs]) if qs else ("Single File" if doc.get("file_id") else "None")
+    langs_str = ", ".join(collect_doc_languages(doc)) or "None"
+    txt = f"✏️ **Edit Movie:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{langs_str}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n🎞 Qualities: `{q_str}`"
     btns = [[InlineKeyboardButton("✏️ Name/Year", callback_data=f"edmv_name_{f_id}"), InlineKeyboardButton("🖼 Poster", callback_data=f"edmv_poster_{f_id}")],
             [InlineKeyboardButton("📂 Category", callback_data=f"edmv_cat_{f_id}"), InlineKeyboardButton("🌐 Language", callback_data=f"edmv_lang_{f_id}")],
             [InlineKeyboardButton("➕ Add Quality", callback_data=f"edmv_addq_{f_id}"), InlineKeyboardButton("🗑 Delete Quality", callback_data=f"edmv_delq_{f_id}")],
@@ -2165,6 +2305,36 @@ async def show_edit_movie_panel(mq, f_id, edit=True):
             [InlineKeyboardButton("🗑 Delete Movie", callback_data=f"edmv_del_{f_id}")]]
     if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+async def build_edmv_q_markup(f_id, pending_q, cur_lang=""):
+    langs = await get_languages_list()
+    top_rows = build_lang_pick_rows(langs, cur_lang, "edmvqlg")
+    if pending_q:
+        return get_quality_markup("edmvqadd", f"edmvrev_{f_id}", f"🔍 Review & Confirm ({len(pending_q)})", f"edmvdis_{f_id}", top_rows=top_rows)
+    return get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back", top_rows=top_rows)
+
+async def show_edmv_review(mo, st, edit=True):
+    f_id = st["f_id"]
+    pq = st.get("pending_q", [])
+    doc, _ = await find_file_in_all_dbs(f_id)
+    title = doc["title"] if doc else f_id
+    txt = f"🔍 **Review Pending Qualities — {title}**\n\n⏳ _(কনফার্ম না করা পর্যন্ত সাইটে এড হবে না)_\n\n"
+    if pq:
+        for i, q in enumerate(pq):
+            ql = f"[{q['lang']}] " if q.get("lang") else ""
+            txt += f"{i+1}. {ql}**{q['name']}** — `{q.get('meta', 'Video File')}`\n"
+    else:
+        txt += "_কোনো পেন্ডিং কোয়ালিটি নেই।_\n"
+    btns = [
+        [InlineKeyboardButton(f"🗑 Remove #{i+1}: {('['+q['lang']+'] ' if q.get('lang') else '')}{q['name']}", callback_data=f"edmvrmq_{i}")]
+        for i, q in enumerate(pq)
+    ]
+    btns.append([InlineKeyboardButton("➕ Add More Quality", callback_data=f"edmv_addq_{f_id}")])
+    if pq:
+        btns.append([InlineKeyboardButton("✅ Confirm & Add to Site", callback_data=f"edmvcnf_{f_id}")])
+    btns.append([InlineKeyboardButton("❌ Discard & Back", callback_data=f"edmvdis_{f_id}")])
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
 @app.on_callback_query(filters.regex(r"^edmv_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmv_cb(c, q):
@@ -2191,12 +2361,36 @@ async def edmv_cb(c, q):
         if not ls: return await q.answer("❌ আগে /setlanguage দিয়ে ভাষা অ্যাড করুন!", show_alert=True)
         btns = [[InlineKeyboardButton(f"🌐 {ln}", callback_data=f"edmvlang_{f_id}_{i}")] for i, ln in enumerate(ls)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
         return await q.message.edit_text("🌐 Language সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(btns))
-    elif act == "addq": admin_steps[q.from_user.id] = {"step": "edmv_addq_pick", "f_id": f_id}; return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
+    elif act == "addq":
+        prev_st = admin_steps.get(q.from_user.id, {})
+        pq = prev_st.get("pending_q", []) if prev_st.get("f_id") == f_id else []
+        cl = prev_st.get("current_lang", doc.get("language", "")) if prev_st.get("f_id") == f_id else doc.get("language", "")
+        admin_steps[q.from_user.id] = {"step": "edmv_addq_pick", "f_id": f_id, "pending_q": pq, "current_lang": cl}
+        mk = await build_edmv_q_markup(f_id, pq, cl)
+        return await q.message.edit_text(f"🌐 Current Language: **{cl or 'None'}**\n➕ ভাষা ও Quality সিলেক্ট করুন:", reply_markup=mk)
     elif act == "delq":
         qs = doc.get("qualities", [])
         if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
-        btns = [[InlineKeyboardButton(f"❌ {ql['name']}", callback_data=f"edmvqdel_{f_id}_{i}")] for i, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
+        btns = [[InlineKeyboardButton(f"❌ {('['+ql['lang']+'] ' if ql.get('lang') else '')}{ql['name']}", callback_data=f"edmvqdel_{f_id}_{i}")] for i, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edmvpick_{f_id}")]]
         return await q.message.edit_text("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
+
+@app.on_callback_query(filters.regex(r"^edmvqlg_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvqlg_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_", 1)[1]
+    if val == "none":
+        st["current_lang"] = ""
+    else:
+        langs = await get_languages_list()
+        st["current_lang"] = langs[int(val)] if int(val) < len(langs) else ""
+    cl = st["current_lang"] or "None"
+    await q.answer(f"🌐 Language: {cl}")
+    mk = await build_edmv_q_markup(st["f_id"], st.get("pending_q", []), st["current_lang"])
+    try:
+        await q.message.edit_text(f"🌐 Current Language: **{cl}**\n➕ ভাষা ও Quality সিলেক্ট করুন:", reply_markup=mk)
+    except Exception:
+        pass
 
 @app.on_callback_query(filters.regex(r"^edmvcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvcat_cb(c, q):
@@ -2209,7 +2403,10 @@ async def edmvcat_cb(c, q):
 async def edmvlang_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
     ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
+    if doc is not None and tdb is not None:
+        doc["language"] = ls[int(idx)]
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)], "languages": collect_doc_languages(doc)}})
+        invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqdel_") & filters.user(ADMIN_ID) & unique_cb)
@@ -2220,7 +2417,8 @@ async def edmvqdel_cb(c, q):
         qs = doc.get("qualities", [])
         if 0 <= idx < len(qs): qs.pop(idx)
         new_fid = qs[0]["file_id"] if qs else None
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"qualities": qs, "file_id": new_fid}}); invalidate_home_cache()
+        doc["qualities"] = qs
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"qualities": qs, "file_id": new_fid, "languages": collect_doc_languages(doc)}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqadd_") & filters.user(ADMIN_ID) & unique_cb)
@@ -2228,30 +2426,86 @@ async def edmvqadd_cb(c, q):
     val = q.data.split("_", 1)[1]; st = admin_steps.get(q.from_user.id)
     if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     f_id = st["f_id"]
+    cl = st.get("current_lang", "")
+    l_tag = f"[{cl}] " if cl else ""
     if val == "custom":
         st["step"] = "edmv_custom_qname"
-        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{f_id}")]]))
+        return await q.message.edit_text(f"✏️ কাস্টম কোয়ালিটির নাম লিখুন ({l_tag.strip() or 'No Lang'}):", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{f_id}")]]))
     st["current_quality"] = val; st["step"] = "edmv_addq_file"
-    await q.message.edit_text(f"📤 এবার **{val}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{f_id}")]]))
+    await q.message.edit_text(f"📤 এবার **{l_tag}{val}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{f_id}")]]))
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_custom_qname") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_cq(c, m):
     st = admin_steps.get(m.from_user.id)
     if not st or "f_id" not in st: return
     st["current_quality"] = m.text.strip(); st["step"] = "edmv_addq_file"
-    await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{st['f_id']}")]]))
+    cl = st.get("current_lang", "")
+    l_tag = f"[{cl}] " if cl else ""
+    await m.reply(f"📤 এবার **{l_tag}{m.text.strip()}** ফাইল পাঠান:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edmv_addq_{st['f_id']}")]]))
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_addq_file") & unique_msg)
 async def handle_edmv_qf(c, m):
     st = admin_steps.get(m.from_user.id)
     if not st or "f_id" not in st: return
     f_id, qn = st["f_id"], st["current_quality"]
-    fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
+    ql = st.get("current_lang", "")
+    fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
+    pq = st.setdefault("pending_q", [])
+    pq.append({"name": qn, "lang": ql, "file_id": fid, "meta": extract_file_meta(m)})
+    st["step"] = "edmv_addq_pick"
+    l_tag = f"[{ql}] " if ql else ""
+    q_list = ", ".join([(f"[{x['lang']}] {x['name']}" if x.get("lang") else x["name"]) for x in pq])
+    mk = await build_edmv_q_markup(f_id, pq, ql)
+    await m.reply(
+        f"📝 **{l_tag}{qn}** পেন্ডিং লিস্টে যোগ হয়েছে!\n"
+        f"🎞 পেন্ডিং: `{q_list}`\n"
+        f"⏳ _(Review & Confirm না করা পর্যন্ত সাইটে এড হবে না)_",
+        reply_markup=mk
+    )
+
+@app.on_callback_query(filters.regex(r"^edmvrev_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await show_edmv_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvrmq_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvrmq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    idx = int(q.data.split("_", 1)[1])
+    pq = st.get("pending_q", [])
+    if 0 <= idx < len(pq):
+        rm = pq.pop(idx)
+        await q.answer(f"🗑 {rm['name']} রিমুভ হয়েছে!", show_alert=False)
+    await show_edmv_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvcnf_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvcnf_cb(c, q):
+    f_id = q.data.split("_", 1)[1]
+    st = admin_steps.pop(q.from_user.id, None)
+    if not st or not st.get("pending_q"):
+        return await q.answer("❌ কোনো পেন্ডিং কোয়ালিটি নেই!", show_alert=True)
+    pq = [{"name": x["name"], "lang": x.get("lang", ""), "file_id": x["file_id"]} for x in st["pending_q"]]
+    doc, tdb = await find_file_in_all_dbs(f_id)
     if doc is not None and tdb is not None:
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$push": {"qualities": {"name": qn, "file_id": fid}}})
-        if not doc.get("file_id"): await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"file_id": fid}})
+        doc.setdefault("qualities", []).extend(pq)
+        upd = {"qualities": doc["qualities"], "languages": collect_doc_languages(doc)}
+        if not doc.get("file_id") and pq:
+            upd["file_id"] = pq[0]["file_id"]
+        if not doc.get("language") and pq and pq[0].get("lang"):
+            upd["language"] = pq[0]["lang"]
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": upd})
         invalidate_home_cache()
-    st["step"] = "edmv_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edmvqadd", f"edmvpick_{f_id}", "⬅️ Back"))
+        await q.answer(f"✅ কনফার্ম সফল! {len(pq)} টি কোয়ালিটি সাইটে এড হয়েছে!", show_alert=True)
+    await show_edit_movie_panel(q, f_id, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edmvdis_") & filters.user(ADMIN_ID) & unique_cb)
+async def edmvdis_cb(c, q):
+    f_id = q.data.split("_", 1)[1]
+    admin_steps.pop(q.from_user.id, None)
+    await q.answer("🗑 পেন্ডিং কোয়ালিটি বাতিল করা হয়েছে!", show_alert=False)
+    await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edmv_name_wait") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edmv_name(c, m):
@@ -2308,10 +2562,65 @@ async def handle_edmv_poster_url(c, m):
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
         await msg.edit_text(f"❌ এরর: `{e}`")
+# ==========================================
+# 8. SERIES WORKFLOW (MULTI-LANGUAGE QUALITY + NEXT EPISODE + REVIEW & CONFIRM)
+# ==========================================
+def sr_total_pending_q(st):
+    return sum(len(e.get("qualities", [])) for s in st.get("seasons", []) for e in s.get("episodes", []))
 
-# ==========================================
-# 8. SERIES WORKFLOW (POSTER FIRST IN MONGODB + SEARCH EDIT + BACK BUTTONS)
-# ==========================================
+async def build_sr_q_markup(st):
+    langs = await get_languages_list()
+    cur_lang = st.get("current_lang", st.get("language", ""))
+    top_rows = build_lang_pick_rows(langs, cur_lang, "srqlg")
+    tot_q = sr_total_pending_q(st)
+    rev_lbl = f"🔍 Review & Confirm ({tot_q})" if tot_q else "🔍 Review & Confirm"
+    extra = [[InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next")]]
+    return get_quality_markup("srqual", "srrev", rev_lbl, "srback_ep", extra_rows=extra, top_rows=top_rows)
+
+async def show_sr_review(mo, st, edit=True):
+    ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
+    ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
+    has_p = "✅ Ready" if (st.get("poster_b64") or st.get("thumb_url")) else "❌ None"
+    all_langs = []
+    if st.get("language"): all_langs.append(st["language"])
+    q_entries = []
+    for si, s in enumerate(st.get("seasons", [])):
+        for ei, e in enumerate(s.get("episodes", [])):
+            for qi, q in enumerate(e.get("qualities", [])):
+                if q.get("lang") and q["lang"] not in all_langs: all_langs.append(q["lang"])
+                q_entries.append((si, ei, qi, s["season_no"], e["ep_no"], q))
+    lang_str = ", ".join(all_langs) if all_langs else "None"
+    txt = (
+        f"🔍 **Review Series (কনফার্মের আগে সাইটে এড হবে না):**\n\n"
+        f"📺 **{ft}**\n"
+        f"📂 Category: `{st.get('category', 'All')}` | 🌐 Languages: `{lang_str}`\n"
+        f"🔰 Type: **{ps}** | 🖼 Poster: `{has_p}`\n\n"
+    )
+    for si, s in enumerate(st.get("seasons", [])):
+        txt += f"📁 **Season {s['season_no']}**\n"
+        for ei, e in enumerate(s.get("episodes", [])):
+            qs = e.get("qualities", [])
+            q_str = ", ".join([(f"[{q['lang']}] {q['name']}" if q.get("lang") else q["name"]) for q in qs]) or "Empty"
+            txt += f"  • Ep {e['ep_no']}: `{q_str}`\n"
+    if not q_entries:
+        txt += "_⚠️ এখনো কোনো এপিসোড/কোয়ালিটি এড করা হয়নি!_\n"
+    else:
+        txt += "\n📝 **আপলোডকৃত ফাইলসমূহ:**\n"
+        for idx, (_, _, _, sno, eno, q) in enumerate(q_entries[-12:], 1):
+            ql = f"[{q['lang']}] " if q.get("lang") else ""
+            txt += f"{idx}. S{sno} E{eno} {ql}**{q['name']}** — `{q.get('meta', 'Video File')}`\n"
+    rm_btns = []
+    for si, ei, qi, sno, eno, q in q_entries[-12:]:
+        ql = f"[{q['lang']}] " if q.get("lang") else ""
+        rm_btns.append([InlineKeyboardButton(f"🗑 Remove S{sno} E{eno} {ql}[{q['name']}]", callback_data=f"srrmq_{si}_{ei}_{qi}")])
+    txt += "\n👇 ভুল থাকলে Remove করুন, সব ঠিক থাকলে **Confirm & Add to Site** চাপুন:"
+    btns = rm_btns + [
+        [InlineKeyboardButton("➕ Add / Edit Episodes", callback_data="srback_season")],
+        [InlineKeyboardButton("✅ Confirm & Add to Site", callback_data="srsave_final")]
+    ]
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
 async def show_sr_poster_prompt(mo, st, edit=True):
     st["step"] = "sr_poster"; ps = "💎 Premium" if st.get("is_premium") else "👤 Regular"
     txt = f"✅ Language: **{st.get('language') or 'None'}**\n\n৩. 🖼 **ল্যান্ডস্কোপ (16:9) পোস্টার ছবি অথবা ছবির লিংক পাঠান**\n_(আপনার MongoDB ও সাইট URL-এ হোস্ট হবে)_\n🔰 টাইপ: **{ps}**"
@@ -2323,13 +2632,13 @@ async def show_sr_poster_prompt(mo, st, edit=True):
 async def cmd_addseries(c, m):
     name, year = parse_name_year(m.text, "/addseries")
     if not name: admin_steps[m.from_user.id] = {"step": "sr_name_year"}; return await m.reply("📺 **সিরিজের নাম ও সাল দিন:**\nউদাহরণ: `Bachelor Point 2026`")
-    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None}
+    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
     mk, _ = await get_cat_markup("srcat", "srcat_skip"); await m.reply(f"📺 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_name_year") & ~filters.regex(r"^/") & unique_msg)
 async def handle_sr_name_year(c, m):
     name, year = parse_name_year(m.text, "")
-    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None}
+    admin_steps[m.from_user.id] = {"step": "sr_cat", "name": name, "year": year, "seasons": [], "is_premium": False, "thumb_url": None, "poster_b64": None, "poster_mime": "image/jpeg", "tg_thumb_id": None, "current_lang": ""}
     mk, _ = await get_cat_markup("srcat", "srcat_skip"); await m.reply(f"📺 **{name} {year}**\n\n১. **Category** সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_callback_query(filters.regex(r"^srcat_") & filters.user(ADMIN_ID) & unique_cb)
@@ -2347,8 +2656,11 @@ async def srlang_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     val = q.data.split("_")[1]
-    if val == "skip": st["language"] = ""
-    else: langs = await get_languages_list(); st["language"] = langs[int(val)] if int(val) < len(langs) else ""
+    if val == "skip": st["language"] = ""; st["current_lang"] = ""
+    else:
+        langs = await get_languages_list()
+        chosen = langs[int(val)] if int(val) < len(langs) else ""
+        st["language"] = chosen; st["current_lang"] = chosen
     await show_sr_poster_prompt(q.message, st, edit=True)
 
 @app.on_callback_query(filters.regex(r"^srprem_toggle$") & filters.user(ADMIN_ID) & unique_cb)
@@ -2397,10 +2709,12 @@ async def handle_sr_poster_url(c, m):
 
 async def prompt_series_season(mo, st, edit=True):
     st["step"] = "sr_season_no"; ns = len(st["seasons"]) + 1
+    tot_q = sr_total_pending_q(st)
+    rev_lbl = f"🔍 Review & Confirm ({tot_q})" if tot_q else "🔍 Review & Confirm"
     btns = [[InlineKeyboardButton(f"📺 Season {ns}", callback_data=f"srssn_{ns}")]]
     for idx, s in enumerate(st["seasons"]):
         btns.append([InlineKeyboardButton(f"📂 Edit Season {s['season_no']} ({len(s.get('episodes', []))} Eps)", callback_data=f"srssn_{s['season_no']}")])
-    btns.append([InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")])
+    btns.append([InlineKeyboardButton(rev_lbl, callback_data="srrev")])
     btns.append([InlineKeyboardButton("⬅️ Back to Poster", callback_data="srback_poster")])
     txt = f"✅ পোস্টার রেডি!\n\n৪. **Season নম্বর দিন** (যেমন: `1` বা `5`):"
     if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
@@ -2421,9 +2735,11 @@ def get_or_create_episode(st, si, eno):
 
 async def prompt_series_episode(mo, st, edit=True):
     st["step"] = "sr_ep_no"; ssn = st["seasons"][st["cur_s_idx"]]; ne = len(ssn["episodes"]) + 1
+    tot_q = sr_total_pending_q(st)
+    rev_lbl = f"🔍 Review & Confirm ({tot_q})" if tot_q else "🔍 Review & Confirm"
     btns = [[InlineKeyboardButton(f"🎬 Episode {ne}", callback_data=f"srep_{ne}")]]
     btns.append([InlineKeyboardButton("➕ Add Another Season", callback_data="srssn_new"), InlineKeyboardButton("⬅️ Back to Season", callback_data="srback_season")])
-    btns.append([InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")])
+    btns.append([InlineKeyboardButton(rev_lbl, callback_data="srrev")])
     txt = f"📺 **Season {ssn['season_no']}**\nএবার **Episode নম্বর দিন** (যেমন: `1` বা `134`):"
     if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
@@ -2431,11 +2747,29 @@ async def prompt_series_episode(mo, st, edit=True):
 async def show_sr_quality_prompt(mo, st, edit=True):
     st["step"] = "sr_qual_wait"
     ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
-    added = ", ".join([q["name"] for q in ep.get("qualities", [])]) or "None"
-    btns = get_quality_markup("srqual", "srep_next", "⏭ Next Episode", "srback_ep").inline_keyboard + [[InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
-    txt = f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\n🎞 Added: `{added}`\n\nআনলিমিটেড **Quality** অ্যাড করুন:"
-    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
-    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+    added = ", ".join([(f"[{q['lang']}] {q['name']}" if q.get("lang") else q["name"]) for q in ep.get("qualities", [])]) or "None"
+    cl = st.get("current_lang", st.get("language", "")) or "None"
+    mk = await build_sr_q_markup(st)
+    txt = f"📺 S{ssn['season_no']} | 🎬 E{ep['ep_no']}\n🌐 Current Language: **{cl}**\n🎞 Pending: `{added}`\n\nভাষা ও **Quality** অ্যাড করুন (শেষে **Review & Confirm** চাপুন):"
+    if edit: await mo.edit_text(txt, reply_markup=mk)
+    else: await mo.reply(txt, reply_markup=mk)
+
+@app.on_callback_query(filters.regex(r"^srqlg_") & filters.user(ADMIN_ID) & unique_cb)
+async def srqlg_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_", 1)[1]
+    if val == "none":
+        st["current_lang"] = ""
+    else:
+        langs = await get_languages_list()
+        st["current_lang"] = langs[int(val)] if int(val) < len(langs) else ""
+    cl = st["current_lang"] or "None"
+    await q.answer(f"🌐 Language: {cl}")
+    try:
+        await show_sr_quality_prompt(q.message, st, edit=True)
+    except Exception:
+        pass
 
 @app.on_callback_query(filters.regex(r"^srback_") & filters.user(ADMIN_ID) & unique_cb)
 async def srback_cb(c, q):
@@ -2487,26 +2821,63 @@ async def srqual_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     v = q.data.split("_", 1)[1]
-    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton("✅ Save Series", callback_data="srsave_final")]])
+    tot_q = sr_total_pending_q(st)
+    rev_lbl = f"🔍 Review & Confirm ({tot_q})" if tot_q else "🔍 Review & Confirm"
+    cl = st.get("current_lang", st.get("language", ""))
+    l_tag = f"[{cl}] " if cl else ""
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton(rev_lbl, callback_data="srrev")]])
     if v == "custom":
         st["step"] = "sr_custom_qname"
-        return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=back_kb)
+        return await q.message.edit_text(f"✏️ কাস্টম কোয়ালিটির নাম লিখুন ({l_tag.strip() or 'No Lang'}):", reply_markup=back_kb)
     st["current_quality"] = v; st["step"] = "sr_qual_file"
-    await q.message.edit_text(f"📤 এবার **{v}** এপিসোড ফাইল পাঠান:", reply_markup=back_kb)
+    await q.message.edit_text(f"📤 এবার **{l_tag}{v}** এপিসোড ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_custom_qname") & ~filters.regex(r"^/") & unique_msg)
 async def handle_sr_cq(c, m):
     st = admin_steps[m.from_user.id]; st["current_quality"] = m.text.strip(); st["step"] = "sr_qual_file"
-    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton("✅ Save Series", callback_data="srsave_final")]])
-    await m.reply(f"📤 এবার **{st['current_quality']}** ফাইল পাঠান:", reply_markup=back_kb)
+    tot_q = sr_total_pending_q(st)
+    rev_lbl = f"🔍 Review & Confirm ({tot_q})" if tot_q else "🔍 Review & Confirm"
+    cl = st.get("current_lang", st.get("language", ""))
+    l_tag = f"[{cl}] " if cl else ""
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="srback_qual")], [InlineKeyboardButton("⏭ Next Episode", callback_data="srep_next"), InlineKeyboardButton(rev_lbl, callback_data="srrev")]])
+    await m.reply(f"📤 এবার **{l_tag}{st['current_quality']}** ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("sr_qual_file") & unique_msg)
 async def handle_sr_qf(c, m):
     st = admin_steps[m.from_user.id]; fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
-    qn = st.get("current_quality", "HD"); ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
-    ep["qualities"].append({"name": qn, "file_id": fid}); st["step"] = "sr_qual_wait"
-    btns = get_quality_markup("srqual", "srep_next", "⏭ Next Episode", "srback_ep").inline_keyboard + [[InlineKeyboardButton("✅ Save Entire Series", callback_data="srsave_final")]]
-    await m.reply(f"✅ S{ssn['season_no']} E{ep['ep_no']} - **{qn}** অ্যাড হয়েছে!", reply_markup=InlineKeyboardMarkup(btns))
+    qn = st.get("current_quality", "HD")
+    ql = st.get("current_lang", st.get("language", ""))
+    ssn = st["seasons"][st["cur_s_idx"]]; ep = ssn["episodes"][st["cur_e_idx"]]
+    ep["qualities"].append({"name": qn, "lang": ql, "file_id": fid, "meta": extract_file_meta(m)}); st["step"] = "sr_qual_wait"
+    l_tag = f"[{ql}] " if ql else ""
+    mk = await build_sr_q_markup(st)
+    await m.reply(
+        f"📝 S{ssn['season_no']} E{ep['ep_no']} - **{l_tag}{qn}** পেন্ডিং লিস্টে যোগ হয়েছে!\n"
+        f"⏳ _(Review & Confirm না করা পর্যন্ত সাইটে এড হবে না)_",
+        reply_markup=mk
+    )
+
+@app.on_callback_query(filters.regex(r"^srrev$") & filters.user(ADMIN_ID) & unique_cb)
+async def srrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await show_sr_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^srrmq_") & filters.user(ADMIN_ID) & unique_cb)
+async def srrmq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    _, si_s, ei_s, qi_s = q.data.split("_", 3)
+    si, ei, qi = int(si_s), int(ei_s), int(qi_s)
+    ssns = st.get("seasons", [])
+    if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]):
+        qs = ssns[si]["episodes"][ei]["qualities"]
+        if 0 <= qi < len(qs):
+            rm = qs.pop(qi)
+            await q.answer(f"🗑 S{ssns[si]['season_no']} E{ssns[si]['episodes'][ei]['ep_no']} [{rm['name']}] রিমুভ হয়েছে!", show_alert=False)
+        if not qs:
+            ssns[si]["episodes"].pop(ei)
+    await show_sr_review(q.message, st, edit=True)
 
 async def finalize_save_series(c, uid, mo):
     st = admin_steps.pop(uid, None)
@@ -2525,18 +2896,31 @@ async def finalize_save_series(c, uid, mo):
             thumb_url = await save_poster_to_mongo(tdb, sid, st["poster_b64"], st.get("poster_mime", "image/jpeg"), live_url)
         elif st.get("thumb_url"):
             thumb_url = st["thumb_url"]
+        clean_seasons = []
+        first_q_lang = ""
+        for s in st.get("seasons", []):
+            clean_eps = []
+            for e in s.get("episodes", []):
+                clean_qs = [{"name": q["name"], "lang": q.get("lang", ""), "file_id": q["file_id"]} for q in e.get("qualities", [])]
+                if clean_qs:
+                    if not first_q_lang and clean_qs[0].get("lang"):
+                        first_q_lang = clean_qs[0]["lang"]
+                    clean_eps.append({"ep_no": e["ep_no"], "qualities": clean_qs})
+            if clean_eps:
+                clean_seasons.append({"season_no": s["season_no"], "episodes": clean_eps})
         ft = f"{st['name']} ({st['year']})" if st.get("year") else st["name"]
-        ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": st.get("language", ""), "is_premium": st.get("is_premium", False), "file_id": None, "seasons": st.get("seasons", []), "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        prim_lang = st.get("language", "") or first_q_lang
+        ns = {"_id": sid, "type": "series", "title": ft, "name": st["name"], "year": st.get("year", ""), "category": st.get("category", "All"), "language": prim_lang, "is_premium": st.get("is_premium", False), "file_id": None, "seasons": clean_seasons, "thumb_url": thumb_url, "tg_thumb_id": st.get("tg_thumb_id"), "pinned": False, "ratings": [], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
+        ns["languages"] = collect_doc_languages(ns)
         await tdb["files"].insert_one(ns); invalidate_home_cache(); await notify_new_post(c, ns, conf)
-        await mo.edit_text(f"✅ **সিরিজ ও পোস্টার MongoDB-তে সেভ হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
+        await mo.edit_text(f"✅ **কনফার্ম সফল! সিরিজ ও পোস্টার সাইটে এড হয়েছে!**\n📺 **{ft}** | 🆔 `{sid}`\n🖼 Poster URL: `{thumb_url or 'None'}`")
     except Exception as e:
         traceback.print_exc()
         await mo.edit_text(f"❌ সেভ করতে সমস্যা হয়েছে: `{e}`")
 
 @app.on_callback_query(filters.regex(r"^srsave_final$") & filters.user(ADMIN_ID) & unique_cb)
 async def srsave_final_cb(c, q): await finalize_save_series(c, q.from_user.id, q.message)
-
-@app.on_message(filters.command("deleteseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
+    @app.on_message(filters.command("deleteseries", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
 async def cmd_delete_series(c, m):
     raw_arg = re.sub(r"^/\w+(?:@\w+)?\s*", "", (m.text or "").strip(), count=1)
     if raw_arg:
@@ -2617,7 +3001,8 @@ async def show_edit_series_panel(mq, f_id, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id)
     if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
     ssns = doc.get("seasons", []); te = sum(len(s.get("episodes", [])) for s in ssns)
-    txt = f"📺 **Edit Series:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n📚 Seasons: `{len(ssns)}` | Eps: `{te}`"
+    langs_str = ", ".join(collect_doc_languages(doc)) or "None"
+    txt = f"📺 **Edit Series:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{langs_str}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n📚 Seasons: `{len(ssns)}` | Eps: `{te}`"
     btns = [[InlineKeyboardButton("✏️ Name/Year", callback_data=f"edsr_name_{f_id}"), InlineKeyboardButton("🖼 Poster", callback_data=f"edsr_poster_{f_id}")],
             [InlineKeyboardButton("📂 Category", callback_data=f"edsr_cat_{f_id}"), InlineKeyboardButton("🌐 Language", callback_data=f"edsr_lang_{f_id}")],
             [InlineKeyboardButton("➕ Add Season", callback_data=f"edsr_addssn_{f_id}"), InlineKeyboardButton("📚 Manage Seasons", callback_data=f"edsr_mng_{f_id}")],
@@ -2669,7 +3054,10 @@ async def edsrcat_cb(c, q):
 async def edsrlang_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
     ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
+    if doc is not None and tdb is not None:
+        doc["language"] = ls[int(idx)]
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)], "languages": collect_doc_languages(doc)}})
+        invalidate_home_cache()
     await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_name_wait") & ~filters.regex(r"^/") & unique_msg)
@@ -2753,6 +3141,79 @@ async def edsrs_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, si = rest.rsplit("_", 1)
     await show_edit_season_panel(q, f_id, int(si), edit=True)
 
+def _edsr_keep_pending(uid, f_id):
+    prev = admin_steps.get(uid, {})
+    return prev.get("pending_edits", []) if prev.get("f_id") == f_id else []
+
+def _edsr_keep_lang(uid, f_id, doc=None):
+    prev = admin_steps.get(uid, {})
+    if prev.get("f_id") == f_id and "current_lang" in prev:
+        return prev["current_lang"]
+    return doc.get("language", "") if doc else ""
+
+def suggest_next_ep_no(doc, si, pending_edits, cur_ep_no=None):
+    if cur_ep_no:
+        m = re.search(r"\d+", str(cur_ep_no))
+        if m:
+            return str(int(m.group(0)) + 1)
+    nums = []
+    if doc and 0 <= si < len(doc.get("seasons", [])):
+        for e in doc["seasons"][si].get("episodes", []):
+            m = re.search(r"\d+", str(e.get("ep_no", "")))
+            if m: nums.append(int(m.group(0)))
+    for p in (pending_edits or []):
+        if p.get("s_idx") == si:
+            m = re.search(r"\d+", str(p.get("ep_no", "")))
+            if m: nums.append(int(m.group(0)))
+    return str((max(nums) if nums else 0) + 1)
+
+async def build_edsr_q_markup(st):
+    f_id = st["f_id"]; si = st["s_idx"]; ei = st.get("e_idx")
+    pend = st.get("pending_edits", [])
+    langs = await get_languages_list()
+    top_rows = build_lang_pick_rows(langs, st.get("current_lang", ""), "edsrqlg")
+    extra = [[InlineKeyboardButton("⏭ Next Episode", callback_data="edsrnxt_cur")]]
+    if pend:
+        extra.append([InlineKeyboardButton(f"🔍 Review & Confirm ({len(pend)})", callback_data=f"edsrrev_{f_id}")])
+    back_cb = f"edsrep_view_{f_id}_{si}_{ei}" if ei is not None else f"edsrs_{f_id}_{si}"
+    return get_quality_markup("edsrqadd", None, None, back_cb, extra_rows=extra, top_rows=top_rows)
+
+async def show_edsr_next_ep_prompt(mo, st, doc, edit=True):
+    f_id = st["f_id"]; si = st["s_idx"]; pend = st.get("pending_edits", [])
+    next_ep = suggest_next_ep_no(doc, si, pend, st.get("cur_ep_no"))
+    st["step"] = "edsr_addep_no"
+    btns = [[InlineKeyboardButton(f"🎬 Episode {next_ep}", callback_data=f"edsrepq_{next_ep}")]]
+    if pend:
+        btns.append([InlineKeyboardButton(f"🔍 Review & Confirm ({len(pend)})", callback_data=f"edsrrev_{f_id}")])
+    back_cb = "edsrbkq_" if st.get("cur_ep_no") else f"edsrs_{f_id}_{si}"
+    btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
+    txt = f"📺 **Season {st.get('season_no', '1')}**\nপরের **Episode নম্বর লিখুন** অথবা নিচের বাটনে চাপ দিন:"
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
+async def show_edsr_review(mo, st, edit=True):
+    f_id = st["f_id"]; pend = st.get("pending_edits", [])
+    doc, _ = await find_file_in_all_dbs(f_id)
+    title = doc["title"] if doc else f_id
+    txt = f"🔍 **Review Pending Changes — {title}**\n\n⏳ _(Confirm না করা পর্যন্ত সাইটে এড হবে না)_\n\n"
+    if pend:
+        for i, item in enumerate(pend):
+            ql = f"[{item['lang']}] " if item.get("lang") else ""
+            txt += f"{i+1}. S{item['season_no']} E{item['ep_no']} — {ql}**{item['name']}**\n   └ `{item.get('meta', 'Video File')}`\n"
+    else:
+        txt += "_কোনো পেন্ডিং আইটেম নেই।_\n"
+    off = max(0, len(pend) - 15)
+    btns = [
+        [InlineKeyboardButton(f"🗑 Remove #{off+i+1}: S{p['season_no']}E{p['ep_no']} {('['+p['lang']+'] ' if p.get('lang') else '')}[{p['name']}]", callback_data=f"edsrrmp_{off+i}")]
+        for i, p in enumerate(pend[off:])
+    ]
+    btns.append([InlineKeyboardButton("➕ Add More Quality", callback_data="edsrbkq_"), InlineKeyboardButton("⏭ Next Episode", callback_data="edsrnxt_cur")])
+    if pend:
+        btns.append([InlineKeyboardButton("✅ Confirm & Add to Site", callback_data=f"edsrcnf_{f_id}")])
+    btns.append([InlineKeyboardButton("❌ Discard All & Back", callback_data=f"edsrdis_{f_id}")])
+    if edit: await mo.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
+    else: await mo.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
+
 @app.on_callback_query(filters.regex(r"^edsrep_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrep_cb(c, q):
     _, act, rest = q.data.split("_", 2)
@@ -2760,51 +3221,134 @@ async def edsrep_cb(c, q):
         f_id, si, ei = rest.rsplit("_", 2)
         return await show_edit_ep_panel(q, f_id, int(si), int(ei), edit=True)
     elif act == "add":
-        f_id, si = rest.rsplit("_", 1)
-        admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": f_id, "s_idx": int(si)}
-        return await q.message.edit_text("🎬 নতুন Episode নম্বর লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{f_id}_{si}")]]))
+        f_id, si_s = rest.rsplit("_", 1); si = int(si_s)
+        doc, _ = await find_file_in_all_dbs(f_id)
+        ssn_no = clean_season_no(doc["seasons"][si]["season_no"]) if doc and si < len(doc.get("seasons", [])) else "1"
+        pend = _edsr_keep_pending(q.from_user.id, f_id)
+        cl = _edsr_keep_lang(q.from_user.id, f_id, doc)
+        st = {"step": "edsr_addep_no", "f_id": f_id, "s_idx": si, "season_no": ssn_no, "cur_ep_no": None, "e_idx": None, "pending_edits": pend, "current_lang": cl}
+        admin_steps[q.from_user.id] = st
+        return await show_edsr_next_ep_prompt(q.message, st, doc, edit=True)
     elif act == "delssn":
         f_id, si_s = rest.rsplit("_", 1); si = int(si_s); doc, tdb = await find_file_in_all_dbs(f_id)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns): ssns.pop(si)
-            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+            doc["seasons"] = ssns
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns, "languages": collect_doc_languages(doc)}}); invalidate_home_cache()
         return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "delep":
         f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, tdb = await find_file_in_all_dbs(f_id)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]): ssns[si]["episodes"].pop(ei)
-            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+            doc["seasons"] = ssns
+            await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns, "languages": collect_doc_languages(doc)}}); invalidate_home_cache()
         return await show_edit_season_panel(q, f_id, si, edit=True)
     elif act == "addq":
         f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s)
-        admin_steps[q.from_user.id] = {"step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "e_idx": ei}
-        return await q.message.edit_text("➕ Quality সিলেক্ট করুন:", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
+        doc, _ = await find_file_in_all_dbs(f_id)
+        ssn = doc["seasons"][si]; ep = ssn["episodes"][ei]
+        ssn_no = clean_season_no(ssn["season_no"]); ep_no = clean_ep_no(ep["ep_no"])
+        pend = _edsr_keep_pending(q.from_user.id, f_id)
+        cl = _edsr_keep_lang(q.from_user.id, f_id, doc)
+        st = {"step": "edsr_addq_pick", "f_id": f_id, "s_idx": si, "season_no": ssn_no, "e_idx": ei, "cur_ep_no": ep_no, "pending_edits": pend, "current_lang": cl}
+        admin_steps[q.from_user.id] = st
+        mk = await build_edsr_q_markup(st)
+        return await q.message.edit_text(f"➕ **S{ssn_no} E{ep_no}**\n🌐 Current Language: **{cl or 'None'}**\nভাষা ও Quality সিলেক্ট করুন:", reply_markup=mk)
     elif act == "delqmenu":
         f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, _ = await find_file_in_all_dbs(f_id); qs = doc["seasons"][si]["episodes"][ei].get("qualities", [])
         if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
-        btns = [[InlineKeyboardButton(f"❌ {ql['name']}", callback_data=f"edsrqdel_{f_id}_{si}_{ei}_{qi}")] for qi, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")]]
+        btns = [[InlineKeyboardButton(f"❌ {('['+ql['lang']+'] ' if ql.get('lang') else '')}{ql['name']}", callback_data=f"edsrqdel_{f_id}_{si}_{ei}_{qi}")] for qi, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")]]
         return await q.message.edit_text("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
 async def show_edit_ep_panel(mq, f_id, si, ei, edit=True):
     doc, _ = await find_file_in_all_dbs(f_id); ssn = doc["seasons"][si]; ep = ssn["episodes"][ei]
-    q_str = ", ".join([x["name"] for x in ep.get("qualities", [])]) or "None"
+    q_str = ", ".join([(f"[{x['lang']}] {x['name']}" if x.get("lang") else x["name"]) for x in ep.get("qualities", [])]) or "None"
+    uid = mq.from_user.id if getattr(mq, "from_user", None) else ADMIN_ID
+    pend = _edsr_keep_pending(uid, f_id)
     txt = f"🎬 **{doc['title']}** | S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])}\n🎞 Qualities: `{q_str}`"
-    btns = [[InlineKeyboardButton("➕ Add Quality", callback_data=f"edsrep_addq_{f_id}_{si}_{ei}"), InlineKeyboardButton("🗑 Delete Quality", callback_data=f"edsrep_delqmenu_{f_id}_{si}_{ei}")],
-            [InlineKeyboardButton("🗑 Delete Episode", callback_data=f"edsrep_delep_{f_id}_{si}_{ei}")], [InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{f_id}_{si}")]]
+    if pend:
+        txt += f"\n📝 Pending Changes: `{len(pend)}`"
+    btns = [
+        [InlineKeyboardButton("➕ Add Quality", callback_data=f"edsrep_addq_{f_id}_{si}_{ei}"), InlineKeyboardButton("🗑 Delete Quality", callback_data=f"edsrep_delqmenu_{f_id}_{si}_{ei}")],
+        [InlineKeyboardButton("⏭ Next Episode", callback_data=f"edsrnxt_{f_id}_{si}_{ei}")],
+        [InlineKeyboardButton("🗑 Delete Episode", callback_data=f"edsrep_delep_{f_id}_{si}_{ei}")]
+    ]
+    if pend:
+        btns.append([InlineKeyboardButton(f"🔍 Review & Confirm ({len(pend)})", callback_data=f"edsrrev_{f_id}")])
+    btns.append([InlineKeyboardButton("⬅️ Back", callback_data=f"edsrs_{f_id}_{si}")])
     if edit: await mq.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(btns))
     else: await mq.reply(txt, reply_markup=InlineKeyboardMarkup(btns))
 
+@app.on_callback_query(filters.regex(r"^edsrqlg_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrqlg_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    val = q.data.split("_", 1)[1]
+    if val == "none":
+        st["current_lang"] = ""
+    else:
+        langs = await get_languages_list()
+        st["current_lang"] = langs[int(val)] if int(val) < len(langs) else ""
+    cl = st["current_lang"] or "None"
+    await q.answer(f"🌐 Language: {cl}")
+    mk = await build_edsr_q_markup(st)
+    try:
+        await q.message.edit_text(f"➕ **S{st.get('season_no','1')} E{st.get('cur_ep_no','1')}**\n🌐 Current Language: **{cl}**\nভাষা ও Quality সিলেক্ট করুন:", reply_markup=mk)
+    except Exception:
+        pass
+
+@app.on_callback_query(filters.regex(r"^edsrepq_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrepq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    eno = clean_ep_no(q.data.split("_", 1)[1])
+    doc, _ = await find_file_in_all_dbs(st["f_id"])
+    si = st["s_idx"]; ei = None
+    if doc and 0 <= si < len(doc.get("seasons", [])):
+        ei = next((i for i, e in enumerate(doc["seasons"][si].get("episodes", [])) if clean_ep_no(e["ep_no"]).lower() == eno.lower()), None)
+    st["cur_ep_no"] = eno; st["e_idx"] = ei; st["step"] = "edsr_addq_pick"
+    mk = await build_edsr_q_markup(st)
+    await q.message.edit_text(f"📺 **S{st.get('season_no','1')} E{eno}**\n🌐 Current Language: **{st.get('current_lang') or 'None'}**\nভাষা ও Quality সিলেক্ট করুন:", reply_markup=mk)
+
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addep_no") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_addep(c, m):
-    st = admin_steps.pop(m.from_user.id, None)
+    st = admin_steps.get(m.from_user.id)
     if not st or "f_id" not in st: return
-    f_id, si, eno = st["f_id"], st["s_idx"], clean_ep_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc is not None and tdb is not None:
-        ssns = doc.get("seasons", []); eps = ssns[si]["episodes"]; ei = next((i for i, e in enumerate(eps) if clean_ep_no(e["ep_no"]).lower() == eno.lower()), None)
-        if ei is None: eps.append({"ep_no": eno, "qualities": []}); ei = len(eps) - 1; await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
-        await show_edit_ep_panel(m, f_id, si, ei, edit=False)
+    f_id, si, eno = st["f_id"], st["s_idx"], clean_ep_no(m.text.strip())
+    doc, _ = await find_file_in_all_dbs(f_id)
+    ei = None
+    if doc and 0 <= si < len(doc.get("seasons", [])):
+        ei = next((i for i, e in enumerate(doc["seasons"][si].get("episodes", [])) if clean_ep_no(e["ep_no"]).lower() == eno.lower()), None)
+    st["cur_ep_no"] = eno; st["e_idx"] = ei; st["step"] = "edsr_addq_pick"
+    mk = await build_edsr_q_markup(st)
+    await m.reply(f"📺 **S{st.get('season_no','1')} E{eno}**\n🌐 Current Language: **{st.get('current_lang') or 'None'}**\nভাষা ও Quality সিলেক্ট করুন:", reply_markup=mk)
+
+@app.on_callback_query(filters.regex(r"^edsrnxt_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrnxt_cb(c, q):
+    rest = q.data.split("_", 1)[1]
+    if rest == "cur":
+        st = admin_steps.get(q.from_user.id)
+        if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+        doc, _ = await find_file_in_all_dbs(st["f_id"])
+        return await show_edsr_next_ep_prompt(q.message, st, doc, edit=True)
+    f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s)
+    doc, _ = await find_file_in_all_dbs(f_id)
+    ssn = doc["seasons"][si]; ep = ssn["episodes"][ei]
+    pend = _edsr_keep_pending(q.from_user.id, f_id)
+    cl = _edsr_keep_lang(q.from_user.id, f_id, doc)
+    st = {"step": "edsr_addep_no", "f_id": f_id, "s_idx": si, "season_no": clean_season_no(ssn["season_no"]), "cur_ep_no": clean_ep_no(ep["ep_no"]), "e_idx": ei, "pending_edits": pend, "current_lang": cl}
+    admin_steps[q.from_user.id] = st
+    await show_edsr_next_ep_prompt(q.message, st, doc, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrbkq_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrbkq_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    st["step"] = "edsr_addq_pick"
+    mk = await build_edsr_q_markup(st)
+    await q.message.edit_text(f"➕ **S{st.get('season_no','1')} E{st.get('cur_ep_no','1')}**\n🌐 Current Language: **{st.get('current_lang') or 'None'}**\nভাষা ও Quality সিলেক্ট করুন:", reply_markup=mk)
 
 @app.on_callback_query(filters.regex(r"^edsrqdel_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrqdel_cb(c, q):
@@ -2813,36 +3357,105 @@ async def edsrqdel_cb(c, q):
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); qs = ssns[si]["episodes"][ei]["qualities"]
         if 0 <= qi < len(qs): qs.pop(qi)
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
+        doc["seasons"] = ssns
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns, "languages": collect_doc_languages(doc)}}); invalidate_home_cache()
     await show_edit_ep_panel(q, f_id, si, ei, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrqadd_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrqadd_cb(c, q):
     v = q.data.split("_", 1)[1]; st = admin_steps.get(q.from_user.id)
     if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
-    f_id, si, ei = st["f_id"], st["s_idx"], st["e_idx"]
-    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edsrep_addq_{f_id}_{si}_{ei}")]])
-    if v == "custom": st["step"] = "edsr_custom_qname"; return await q.message.edit_text("✏️ কাস্টম কোয়ালিটির নাম লিখুন:", reply_markup=back_kb)
-    st["current_quality"] = v; st["step"] = "edsr_addq_file"; await q.message.edit_text(f"📤 এবার **{v}** ফাইল পাঠান:", reply_markup=back_kb)
+    cl = st.get("current_lang", "")
+    l_tag = f"[{cl}] " if cl else ""
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="edsrbkq_"), InlineKeyboardButton("⏭ Next Episode", callback_data="edsrnxt_cur")]])
+    if v == "custom": st["step"] = "edsr_custom_qname"; return await q.message.edit_text(f"✏️ কাস্টম কোয়ালিটির নাম লিখুন ({l_tag.strip() or 'No Lang'}):", reply_markup=back_kb)
+    st["current_quality"] = v; st["step"] = "edsr_addq_file"
+    await q.message.edit_text(f"📤 এবার **S{st.get('season_no','1')} E{st.get('cur_ep_no','1')} - {l_tag}{v}** ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message(filters.text & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_custom_qname") & ~filters.regex(r"^/") & unique_msg)
 async def handle_edsr_cq(c, m):
     st = admin_steps.get(m.from_user.id)
     if not st or "f_id" not in st: return
     st["current_quality"] = m.text.strip(); st["step"] = "edsr_addq_file"
-    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data=f"edsrep_addq_{st['f_id']}_{st['s_idx']}_{st['e_idx']}")]])
-    await m.reply(f"📤 এবার **{m.text.strip()}** ফাইল পাঠান:", reply_markup=back_kb)
+    cl = st.get("current_lang", "")
+    l_tag = f"[{cl}] " if cl else ""
+    back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Quality", callback_data="edsrbkq_"), InlineKeyboardButton("⏭ Next Episode", callback_data="edsrnxt_cur")]])
+    await m.reply(f"📤 এবার **S{st.get('season_no','1')} E{st.get('cur_ep_no','1')} - {l_tag}{m.text.strip()}** ফাইল পাঠান:", reply_markup=back_kb)
 
 @app.on_message((filters.video | filters.document | filters.audio) & filters.user(ADMIN_ID) & filters.private & is_in_step("edsr_addq_file") & unique_msg)
 async def handle_edsr_qf(c, m):
     st = admin_steps.get(m.from_user.id)
     if not st or "f_id" not in st: return
-    f_id, si, ei, qn = st["f_id"], st["s_idx"], st["e_idx"], st["current_quality"]
-    fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id); doc, tdb = await find_file_in_all_dbs(f_id)
-    if doc is not None and tdb is not None: ssns = doc.get("seasons", []); ssns[si]["episodes"][ei]["qualities"].append({"name": qn, "file_id": fid}); await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
-    st["step"] = "edsr_addq_pick"; await m.reply(f"✅ **{qn}** অ্যাড হয়েছে!", reply_markup=get_quality_markup("edsrqadd", f"edsrep_view_{f_id}_{si}_{ei}", "⬅️ Back"))
+    qn = st["current_quality"]; ql = st.get("current_lang", "")
+    fid = m.video.file_id if m.video else (m.document.file_id if m.document else m.audio.file_id)
+    sno = st.get("season_no", "1"); eno = st.get("cur_ep_no", "1")
+    pend = st.setdefault("pending_edits", [])
+    pend.append({"s_idx": st["s_idx"], "season_no": sno, "ep_no": eno, "name": qn, "lang": ql, "file_id": fid, "meta": extract_file_meta(m)})
+    st["step"] = "edsr_addq_pick"
+    l_tag = f"[{ql}] " if ql else ""
+    cur_ep_qs = ", ".join([(f"[{p['lang']}] {p['name']}" if p.get("lang") else p["name"]) for p in pend if p["s_idx"] == st["s_idx"] and p["ep_no"] == eno])
+    mk = await build_edsr_q_markup(st)
+    await m.reply(
+        f"📝 **S{sno} E{eno} - {l_tag}{qn}** পেন্ডিং লিস্টে যোগ হয়েছে!\n"
+        f"⏳ _(Review & Confirm না করা পর্যন্ত সাইটে এড হবে না)_\n"
+        f"🎞 এই এপিসোডের পেন্ডিং: `{cur_ep_qs}` | মোট পেন্ডিং: `{len(pend)}`",
+        reply_markup=mk
+    )
 
-# ==========================================
+@app.on_callback_query(filters.regex(r"^edsrrev_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrrev_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    await show_edsr_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrrmp_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrrmp_cb(c, q):
+    st = admin_steps.get(q.from_user.id)
+    if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
+    idx = int(q.data.split("_", 1)[1])
+    pend = st.get("pending_edits", [])
+    if 0 <= idx < len(pend):
+        rm = pend.pop(idx)
+        await q.answer(f"🗑 S{rm['season_no']}E{rm['ep_no']} [{rm['name']}] রিমুভ হয়েছে!", show_alert=False)
+    await show_edsr_review(q.message, st, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrcnf_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrcnf_cb(c, q):
+    f_id = q.data.split("_", 1)[1]
+    st = admin_steps.pop(q.from_user.id, None)
+    if not st or not st.get("pending_edits"):
+        return await q.answer("❌ কোনো পেন্ডিং ফাইল নেই!", show_alert=True)
+    pend = st["pending_edits"]; si = st.get("s_idx", 0)
+    doc, tdb = await find_file_in_all_dbs(f_id)
+    if doc is not None and tdb is not None:
+        ssns = doc.get("seasons", [])
+        for item in pend:
+            s_idx = item["s_idx"]
+            if not (0 <= s_idx < len(ssns)):
+                continue
+            eps = ssns[s_idx].setdefault("episodes", [])
+            eno = clean_ep_no(item["ep_no"])
+            ep_obj = next((e for e in eps if clean_ep_no(e.get("ep_no", "")).lower() == eno.lower()), None)
+            if ep_obj is None:
+                ep_obj = {"ep_no": eno, "qualities": []}
+                eps.append(ep_obj)
+            ep_obj.setdefault("qualities", []).append({"name": item["name"], "lang": item.get("lang", ""), "file_id": item["file_id"]})
+        doc["seasons"] = ssns
+        upd = {"seasons": ssns, "languages": collect_doc_languages(doc)}
+        if not doc.get("language") and upd["languages"]:
+            upd["language"] = upd["languages"][0]
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": upd})
+        invalidate_home_cache()
+        await q.answer(f"✅ কনফার্ম সফল! {len(pend)} টি কোয়ালিটি সাইটে এড হয়েছে!", show_alert=True)
+    await show_edit_season_panel(q, f_id, si, edit=True)
+
+@app.on_callback_query(filters.regex(r"^edsrdis_") & filters.user(ADMIN_ID) & unique_cb)
+async def edsrdis_cb(c, q):
+    f_id = q.data.split("_", 1)[1]
+    admin_steps.pop(q.from_user.id, None)
+    await q.answer("🗑 পেন্ডিং পরিবর্তন বাতিল করা হয়েছে!", show_alert=False)
+    await show_edit_series_panel(q, f_id, edit=True)
+    # ==========================================
 # 9. LEGACY COMMANDS & SEPARATE ZONE / DIRECT LINK TASKS
 # ==========================================
 @app.on_message(filters.command("addfile", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -3195,8 +3808,7 @@ def serve_poster_from_mongo(poster_id):
         except: pass
 
     return Response(make_clean_placeholder_svg(), mimetype="image/svg+xml", headers={"Cache-Control": "no-cache, max-age=60"})
-
-def warm_site_logo_sync(req_v=""):
+    def warm_site_logo_sync(req_v=""):
     if "site_logo" in POSTER_CACHE:
         cached = POSTER_CACHE["site_logo"]
         c_ver = cached[2] if len(cached) > 2 else ""
@@ -3455,8 +4067,7 @@ def api_shorten():
         return jsonify({"status": "success", "short_url": f"{live_url}/s/{code}"})
     except Exception as e:
         return jsonify({"status": "error", "msg": f"Shortener ত্রুটি: {e}"})
-
-SHORT_VERIFY_HTML = r"""<!DOCTYPE html>
+        SHORT_VERIFY_HTML = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
@@ -3821,8 +4432,7 @@ def unlock_file():
         exp = (datetime.utcnow() + timedelta(seconds=rl)).isoformat() + "Z"
         sync_db["users"].update_one({"_id": uid}, {"$set": {f"unlocked_files.{fid}": exp}}, upsert=True)
     return jsonify({"status": "success", "expiry": exp, "relock_sec": rl})
-
-@web.route('/api/earn_info/<int:uid>')
+    @web.route('/api/earn_info/<int:uid>')
 def get_earn_info(uid):
     conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
     if u.get("last_activity_date") != td:
@@ -4032,8 +4642,7 @@ def api_home_data():
     resp = jsonify({"files": p["files"], "user": u_state})
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp
-    
-# ==========================================
+    # ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -4070,15 +4679,15 @@ body.ready{background:#f4f5f7}
 @keyframes rippleAnim{to{transform:scale(4);opacity:0}}
 @keyframes gentleBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
 
-.anim-btn,button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c,.tut-lang-pill{
+.anim-btn,button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.btn-p,.unlock-opt,.p-like,.p-dl,.p-save,.tut-btn,.back-btn,.shr-c,.tut-lang-pill,.lang-pick-btn{
   transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .22s ease,background .25s ease;
   position:relative;overflow:hidden;
 }
-button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active,.tut-lang-pill:active{
+button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:active,.q-btn:active,.s-tab:active,.btn-p:active,.unlock-opt:active,.p-like:active,.p-dl:active,.p-save:active,.tut-btn:active,.tut-lang-pill:active,.lang-pick-btn:active{
   transform:scale(.92)!important;
 }
 .btn-p,.q-btn,.p-dl,.unlock-opt,.watch-pill,.tut-btn{animation:gradFlow 3.5s ease infinite,neonBtnGlow 3.2s ease-in-out infinite}
-.btn-p::after,.q-btn::after,.p-dl::after,.unlock-opt::after,.watch-pill::after,.tut-btn::after,.cat-pill.active::after,.p-like::after,.p-save::after,.s-tab.active::after{
+.btn-p::after,.q-btn::after,.p-dl::after,.unlock-opt::after,.watch-pill::after,.tut-btn::after,.cat-pill.active::after,.p-like::after,.p-save::after,.s-tab.active::after,.lang-pick-btn.active::after{
   content:"";position:absolute;top:0;left:-120%;width:55%;height:100%;
   background:linear-gradient(90deg,transparent,rgba(255,255,255,.42),transparent);
   transform:skewX(-20deg);animation:btnShine 2.5s infinite ease-in-out;pointer-events:none;
@@ -4172,6 +4781,9 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 .act-r{display:flex;gap:10px;margin-bottom:14px}
 .p-like{flex:1;background:#fff;border:1.5px solid #fda4af;color:#e11d48;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 3px 10px rgba(225,29,72,.14)}.p-dl{flex:1.2;background:linear-gradient(90deg,#0f172a,#334155,#4f46e5);background-size:200% 200%;border:none;color:#fff;padding:10px;border-radius:25px;font-weight:700;cursor:pointer}.p-save{flex:1;background:#fff;border:1.5px solid #fed7aa;color:#d97706;padding:10px;border-radius:25px;font-weight:700;cursor:pointer;box-shadow:0 3px 10px rgba(217,119,6,.14)}
 .sel-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-bottom:14px}.q-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.q-btn{background:linear-gradient(90deg,#4f46e5,#7c3aed,#ec4899);background-size:200% 200%;color:#fff;border:none;padding:9px 14px;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer}
+.lang-pick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-top:8px}
+.lang-pick-btn{background:#fff;color:#312e81;border:1.5px solid #c7d2fe;padding:12px 10px;border-radius:13px;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 3px 10px rgba(79,70,229,.12)}
+.lang-pick-btn.active{background:linear-gradient(90deg,#4f46e5,#7c3aed,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
 .s-tab{flex:0 0 auto;width:max-content;background:#fff;border:1px solid #cbd5e1;color:#334155;padding:7px 14px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap}.s-tab.active{background:linear-gradient(90deg,#111827,#4f46e5);color:#fff;border-color:#4f46e5;box-shadow:0 3px 12px rgba(79,70,229,.35)}.ep-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-top:8px;animation:fadeInSlide .22s ease}
 .rate-c{background:#fffbeb;border:1px solid #fde68a;border-radius:14px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-size:13px;font-weight:600}.star-b{font-size:20px;color:#cbd5e1;background:none;border:none;cursor:pointer;padding:0 2px}.star-b.lit{color:#f59e0b}
 .cmt-sec{background:#fff;margin-top:10px;padding:14px 16px 80px 16px}.cmt-bar{position:fixed;bottom:0;left:0;width:100%;background:#fff;padding:10px 14px;border-top:1px solid #eee;display:none;gap:10px;z-index:120}.cmt-bar input{flex:1;background:#f1f5f9;border:none;border-radius:22px;padding:10px 16px;outline:none;font-size:14px}.cmt-bar button{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#4f46e5,#ec4899);color:#fff;border:none;font-size:16px;cursor:pointer}
@@ -4425,7 +5037,7 @@ function ensureZoneSdk(zid){
 }
 
 document.addEventListener('click',function(e){
-  const btn=e.target.closest('button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.unlock-opt,.tut-lang-pill');
+  const btn=e.target.closest('button,.cat-pill,.lang-pill,.watch-pill,.q-btn,.s-tab,.unlock-opt,.tut-lang-pill,.lang-pick-btn');
   if(!btn)return;
   const r=document.createElement('span'); r.className='ripple-fx';
   const rect=btn.getBoundingClientRect(), sz=Math.max(rect.width,rect.height);
@@ -4481,7 +5093,7 @@ function closeWelcome(){
 }
 
 let userState=initialUserState||{balance:0,is_premium:false,expiry:null,history:[],favorites:[],unlocked_files:{}};
-let activeCat='All',activeLang='All',activeType='all',pendingCat=null,curFile=null,curSeasonIdx=0,feedLimit=15,lastFilteredLen=0;
+let activeCat='All',activeLang='All',activeType='all',pendingCat=null,curFile=null,curSeasonIdx=0,curSelLang=null,detLangOpts=[],feedLimit=15,lastFilteredLen=0;
 let blurTimers={}, detBlurTimer=null, curTutId=(tutorialsList.length?tutorialsList[0]._id:'default');
 
 function openTgLink(u){
@@ -4614,7 +5226,8 @@ function buildPosterCardHtml(f, i, pfx, badgeHtml){
   const imgCls=adult?'adult-blur':'';
   const tapAttr=adult?`onclick="revealCardPoster('${key}','${f._id}',event)"`:'';
   const blurOv=adult?`<div class="blur-ov" id="blurov-${key}"><span>🔞 Tap Poster to View</span></div>`:'';
-  return `<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w" ${tapAttr}><img id="pimg-${key}" class="${imgCls}" loading="${i<2?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}">${badgeHtml}${brandBadgeHtml()}${blurOv}</div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${f.language?'• '+f.language:''}</span></div></div></div>`;
+  const lDisp=(f.languages&&f.languages.length)?f.languages.join(', '):(f.language||'');
+  return `<div class="feed-card" onclick="openDetails('${f._id}')"><div class="feed-img-w" ${tapAttr}><img id="pimg-${key}" class="${imgCls}" loading="${i<2?'eager':'lazy'}" decoding="async" src="${f.thumb_url||'/poster/default'}">${badgeHtml}${brandBadgeHtml()}${blurOv}</div><div class="feed-body"><div class="feed-title">${f.title}</div><div class="feed-meta"><span>${timeAgo(f.created_at)}</span><span>${f.category||''} ${lDisp?'• '+lDisp:''}</span></div></div></div>`;
 }
 
 function renderFeed(){
@@ -4626,7 +5239,8 @@ function renderFeed(){
     } else {
       if((f.category||'All')!==activeCat)return false;
     }
-    if(activeLang!=='All'&&(f.language||'')!==activeLang)return false;
+    const fLangs=(f.languages&&f.languages.length)?f.languages:(f.language?[f.language]:[]);
+    if(activeLang!=='All'&&!fLangs.includes(activeLang))return false;
     if(q&&!f.title.toLowerCase().includes(q))return false;
     return true;
   });
@@ -4686,7 +5300,7 @@ function handleDetPosterTap(){
 function openDetails(id){
   curFile=allFiles.find(f=>f._id===id); if(!curFile)return;
   if(isAdult(curFile)&&sessionStorage.getItem('age_18_ok')!=='1'){pendingCat=curFile.category;document.getElementById('age-modal').style.display='flex';return;}
-  curSeasonIdx=0; document.getElementById('main-chrome').style.display='none'; document.getElementById('bottom-nav').style.display='none'; document.getElementById('float-search-btn').style.display='none';
+  curSeasonIdx=0; curSelLang=null; document.getElementById('main-chrome').style.display='none'; document.getElementById('bottom-nav').style.display='none'; document.getElementById('float-search-btn').style.display='none';
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); document.getElementById('page-details').classList.add('active'); document.getElementById('cmt-bar').style.display='flex'; window.scrollTo(0,0);
   const tb=document.getElementById('inline-tut-box'), tv=document.getElementById('det-tut-vid'), tbtn=document.getElementById('tut-toggle-btn');
   tv.pause(); tb.style.display='none'; tbtn.innerText='❓ Need help? Watch the tutorial';
@@ -4699,7 +5313,9 @@ function openDetails(id){
   document.getElementById('det-title').innerText=curFile.title;
   document.getElementById('det-likes').innerText=(curFile.likes||[]).length; document.getElementById('det-views').innerText=curFile.views||0;
   document.getElementById('det-cmts-cnt').innerText=(curFile.comments||[]).length; document.getElementById('cmt-cnt-h').innerText=(curFile.comments||[]).length;
-  let tags=[]; if(curFile.year)tags.push(curFile.year); if(curFile.category)tags.push(curFile.category); if(curFile.language)tags.push(curFile.language);
+  let tags=[]; if(curFile.year)tags.push(curFile.year); if(curFile.category)tags.push(curFile.category);
+  const fLangs=(curFile.languages&&curFile.languages.length)?curFile.languages:(curFile.language?[curFile.language]:[]);
+  fLangs.forEach(l=>{if(l&&!tags.includes(l))tags.push('🌐 '+l);});
   document.getElementById('det-tags').innerHTML=tags.map(t=>`<span class="d-tag">${t}</span>`).join('');
   document.getElementById('btn-save').innerText=(userState.favorites||[]).includes(id)?'✅ Saved':'🔖 Save';
   document.getElementById('btn-like').innerText=(curFile.likes||[]).includes(userId)?'❤️ Liked':'🤍 Like';
@@ -4777,33 +5393,79 @@ function sortNumKey(v){
   return m?parseInt(m[0],10):999999;
 }
 
+function getFileQualLangs(){
+  const ls=[];
+  const addL=(v)=>{const s=(v||'').trim();if(s&&!ls.includes(s))ls.push(s);};
+  if(curFile.type==='series'&&curFile.seasons?.length){
+    curFile.seasons.forEach(s=>(s.episodes||[]).forEach(e=>(e.qualities||[]).forEach(q=>addL(q.lang||curFile.language))));
+  } else if(curFile.qualities?.length){
+    curFile.qualities.forEach(q=>addL(q.lang||curFile.language));
+  }
+  return ls;
+}
+function selectDetLang(idx){
+  curSelLang=detLangOpts[idx]||null;
+  curSeasonIdx=0;
+  renderSelectors();
+}
+
 function renderSelectors(){
   const area=document.getElementById('det-selector-area');
+  detLangOpts=getFileQualLangs();
+  if(detLangOpts.length===1 && !curSelLang){curSelLang=detLangOpts[0];}
+  let langHtml='';
+  if(detLangOpts.length>0){
+    langHtml=`<div class="sel-box"><div style="font-size:14px;font-weight:700;margin-bottom:4px;">🌐 ভাষা সিলেক্ট করুন (Select Language)</div><div class="lang-pick-grid">`+
+      detLangOpts.map((ln,li)=>`<button class="lang-pick-btn ${curSelLang===ln?'active':''}" onclick="selectDetLang(${li})">🌐 ${ln}</button>`).join('')+
+      `</div>`;
+    if(!curSelLang){
+      area.innerHTML=langHtml+`<div style="text-align:center;font-size:12.5px;color:#64748b;margin-top:10px;">👆 ডাউনলোড লিংক পেতে ওপর থেকে আপনার পছন্দের ভাষা সিলেক্ট করুন</div></div>`;
+      return;
+    }
+    langHtml+=`</div>`;
+  }
+
   if(curFile.type==='series'&&curFile.seasons?.length){
-    const ssns=[...curFile.seasons].sort((a,b)=>sortNumKey(a.season_no)-sortNumKey(b.season_no));
+    let ssns=[...curFile.seasons].sort((a,b)=>sortNumKey(a.season_no)-sortNumKey(b.season_no));
+    if(curSelLang){
+      ssns=ssns.filter(s=>(s.episodes||[]).some(e=>(e.qualities||[]).some(q=>((q.lang||curFile.language||'').trim()===curSelLang))));
+    }
+    if(!ssns.length){
+      area.innerHTML=langHtml+`<div class="sel-box" style="text-align:center;color:#64748b;font-size:13px;">এই ভাষায় এখনো কোনো এপিসোড যোগ করা হয়নি।</div>`;
+      return;
+    }
     if(curSeasonIdx>=ssns.length)curSeasonIdx=0;
     const curS=ssns[curSeasonIdx];
     const sOrig=(curS.orig_idx!==undefined)?curS.orig_idx:curSeasonIdx;
-    let h=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;margin-bottom:8px;">📺 Select Season & Episode</div><div style="display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;">`;
+    let h=langHtml+`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;margin-bottom:8px;">📺 Select Season & Episode ${curSelLang?'('+curSelLang+')':''}</div><div style="display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px;">`;
     ssns.forEach((s,si)=>{
       const sLbl=pad2(s.season_no);
       h+=`<button class="s-tab ${si===curSeasonIdx?'active':''}" onclick="curSeasonIdx=${si};renderSelectors()">Season ${sLbl}</button>`;
     });
     h+=`</div>`;
-    const eps=[...(curS?.episodes||[])].sort((a,b)=>sortNumKey(a.ep_no)-sortNumKey(b.ep_no));
+    let eps=[...(curS?.episodes||[])].sort((a,b)=>sortNumKey(a.ep_no)-sortNumKey(b.ep_no));
     eps.forEach((e,ei)=>{
       const eOrig=(e.orig_idx!==undefined)?e.orig_idx:ei;
       const eLbl=pad2(e.ep_no);
+      let qs=(e.qualities||[]).map((q,qi)=>({q,qOrig:(q.orig_idx!==undefined)?q.orig_idx:qi}));
+      if(curSelLang){
+        qs=qs.filter(x=>((x.q.lang||curFile.language||'').trim()===curSelLang));
+      }
+      if(!qs.length)return;
       h+=`<div class="ep-card"><div style="font-size:13px;font-weight:700;margin-bottom:6px;">🎬 Episode ${eLbl}</div><div class="q-grid">`;
-      (e.qualities||[]).forEach((q,qi)=>{
-        h+=`<button class="q-btn" onclick="triggerDownload('sfile_${curFile._id}_${sOrig}_${eOrig}_${qi}')">⬇️ Episode ${eLbl} ${q.name}</button>`;
+      qs.forEach(x=>{
+        h+=`<button class="q-btn" onclick="triggerDownload('sfile_${curFile._id}_${sOrig}_${eOrig}_${x.qOrig}')">⬇️ Episode ${eLbl} ${x.q.name}</button>`;
       });
       h+=`</div></div>`;
     });
     area.innerHTML=h+`</div>`;
   } else if(curFile.qualities?.length){
-    area.innerHTML=`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;">🎞 Select Quality</div><div class="q-grid">`+curFile.qualities.map((q,qi)=>`<button class="q-btn" onclick="triggerDownload('mfile_${curFile._id}_${qi}')">⬇️ Download ${q.name}</button>`).join('')+`</div></div>`;
-  } else { area.innerHTML=`<div class="sel-box"><button class="btn-p" onclick="triggerDownload('file_${curFile._id}')">⬇️ Download Movie</button></div>`; }
+    let qs=curFile.qualities.map((q,qi)=>({q,qOrig:(q.orig_idx!==undefined)?q.orig_idx:qi}));
+    if(curSelLang){
+      qs=qs.filter(x=>((x.q.lang||curFile.language||'').trim()===curSelLang));
+    }
+    area.innerHTML=langHtml+`<div class="sel-box"><div style="font-size:13.5px;font-weight:700;">🎞 Select Quality ${curSelLang?'('+curSelLang+')':''}</div><div class="q-grid">`+qs.map(x=>`<button class="q-btn" onclick="triggerDownload('mfile_${curFile._id}_${x.qOrig}')">⬇️ Download ${x.q.name}</button>`).join('')+`</div></div>`;
+  } else { area.innerHTML=langHtml+`<div class="sel-box"><button class="btn-p" onclick="triggerDownload('file_${curFile._id}')">⬇️ Download Movie</button></div>`; }
 }
 function scrollToDownload(){document.getElementById('det-selector-area')?.scrollIntoView({behavior:'smooth'});}
 
@@ -5442,7 +6104,6 @@ hydrateAppFast();
 </script>
 </body>
 </html>"""
-
 def _fetch_shell_payload():
     now = time.time()
     db_ver = get_db_cache_ver()
@@ -5603,7 +6264,14 @@ def _fetch_home_payload():
                     indexed_eps.append({
                         "ep_no": ep_lbl,
                         "orig_idx": ei,
-                        "qualities": [{"name": q.get("name", "HD")} for q in e.get("qualities", [])]
+                        "qualities": [
+                            {
+                                "name": q.get("name", "HD"),
+                                "lang": q.get("lang", ""),
+                                "orig_idx": qi
+                            }
+                            for qi, q in enumerate(e.get("qualities", []))
+                        ]
                     })
                 indexed_eps.sort(key=lambda x: natural_sort_key(x["ep_no"]))
                 ssn_lbl = clean_season_no(s.get("season_no", "1"))
@@ -5614,6 +6282,7 @@ def _fetch_home_payload():
                 })
             indexed_seasons.sort(key=lambda x: natural_sort_key(x["season_no"]))
 
+            avail_langs = collect_doc_languages(doc)
             clean_doc = {
                 "_id": fid,
                 "type": doc.get("type", "movie"),
@@ -5621,7 +6290,8 @@ def _fetch_home_payload():
                 "name": doc.get("name", ""),
                 "year": doc.get("year", ""),
                 "category": doc.get("category", "All"),
-                "language": doc.get("language", ""),
+                "language": doc.get("language", "") or (", ".join(avail_langs) if avail_langs else ""),
+                "languages": avail_langs,
                 "is_premium": bool(doc.get("is_premium", False)),
                 "thumb_url": tu,
                 "pinned": bool(doc.get("pinned", False)),
@@ -5630,7 +6300,14 @@ def _fetch_home_payload():
                 "views": doc.get("views", 0),
                 "likes": doc.get("likes", []),
                 "comments": doc.get("comments", []),
-                "qualities": [{"name": q.get("name", "HD")} for q in doc.get("qualities", [])],
+                "qualities": [
+                    {
+                        "name": q.get("name", "HD"),
+                        "lang": q.get("lang", ""),
+                        "orig_idx": qi
+                    }
+                    for qi, q in enumerate(doc.get("qualities", []))
+                ],
                 "seasons": indexed_seasons
             }
             files.append(clean_doc)
