@@ -1604,9 +1604,6 @@ async def check_join_cb(c, q):
         def __init__(self, u): self.from_user = u; self.text = "/start"
         async def reply(self, *a, **k): return await c.send_message(q.from_user.id, *a, **k)
     await start_cmd(c, FakeMsg(q.from_user))
-
-📦 PART 3/7
-
 # ==========================================
 # 6. CATEGORY, LANGUAGE, UPCOMING, ZONE ID, REDEEM, PREMIUM, TG TASK
 # ==========================================
