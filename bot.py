@@ -477,7 +477,7 @@ def decode_b64_to_bytes(val):
         except: return None, mime
     try: return base64.b64decode(val), mime
     except: return None, mime
-        def make_clean_placeholder_svg():
+def make_clean_placeholder_svg():
     svg = """<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
   <defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#141624"/><stop offset="100%" stop-color="#271b3d"/></linearGradient></defs>
   <rect width="640" height="360" fill="url(#g)"/>
