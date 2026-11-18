@@ -990,14 +990,30 @@ async def get_lang_markup(prefix, skip_cb, back_cb=None):
     if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns), langs
 
-def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None):
+def extract_file_meta(m):
+    media = m.video or m.document or m.audio
+    fname = getattr(media, "file_name", None) or ""
+    fsize = getattr(media, "file_size", 0) or 0
+    cap = (m.caption or "").strip().replace("\n", " ")
+    raw_lbl = cap[:38] if cap else (fname[:38] if fname else "Video File")
+    label = re.sub(r"[`*_]", " ", raw_lbl).strip() or "Video File"
+    if fsize > 0:
+        mb = fsize / (1024 * 1024)
+        sz = f"{mb:.1f} MB" if mb < 1024 else f"{mb/1024:.2f} GB"
+        return f"{label} ({sz})"
+    return label
+
+def get_quality_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", back_cb=None, extra_rows=None):
     btns, row = [], []
     for q in QUALITIES:
         row.append(InlineKeyboardButton(f"🎬 {q}", callback_data=f"{prefix}_{q}"))
         if len(row) == 3: btns.append(row); row = []
     if row: btns.append(row)
     btns.append([InlineKeyboardButton("➕ Custom Quality", callback_data=f"{prefix}_custom")])
-    btns.append([InlineKeyboardButton(finish_label, callback_data=skip_cb)])
+    if extra_rows:
+        btns.extend(extra_rows)
+    if finish_label and skip_cb:
+        btns.append([InlineKeyboardButton(finish_label, callback_data=skip_cb)])
     if back_cb: btns.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns)
 
