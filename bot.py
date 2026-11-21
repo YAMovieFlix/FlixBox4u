@@ -4645,26 +4645,21 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
   <div id="task-options-area"></div>
 </div></div>
 
-<div id="ad-modal" class="modal-ov"><div class="modal-card">
-  <button onclick="cancelActiveAd('⚠️ অ্যাড বাতিল করা হয়েছে! কিছুই আনলক হয়নি, পুনরায় অ্যাড দেখুন।')" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
-  <h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3>
-  <p id="ad-status-msg" style="font-size:13px;color:#64748b;">সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।</p>
-  <h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1>
-  <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় অ্যাডে ক্লিক করুন</button>
-  <button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button>
-</div></div>
-
-<div id="inapp-ad-ov" class="inapp-ad-ov">
+<div id="ad-modal" class="modal-ov"><div class="modal-card ad-browser-card">
   <div class="inapp-ad-hdr">
-    <button type="button" id="inapp-ad-back" class="inapp-back-btn">❮ Back</button>
-    <div class="inapp-ad-ttl">🔒 WebApp Ad Browser</div>
-    <div id="inapp-ad-badge" class="inapp-ad-badge">⏳ 5s</div>
+    <button type="button" class="inapp-back-btn" onclick="cancelActiveAd('⚠️ অ্যাড বাতিল করা হয়েছে! কিছুই আনলক হয়নি, পুনরায় অ্যাড দেখুন।')">❮ Back</button>
+    <div class="inapp-ad-ttl">🌐 Telegram Mini Browser</div>
+    <div id="ad-hdr-badge" class="inapp-ad-badge">⏳ 1s</div>
   </div>
-  <div class="inapp-ad-body">
-    <div id="inapp-ad-loader" class="inapp-ad-loader">⏳ অ্যাড লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
-    <iframe id="inapp-ad-frame" class="inapp-ad-frame" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+  <div class="ad-browser-body">
+    <div id="ad-status-msg" style="font-size:13px;color:#475569;line-height:1.5;">টেলিগ্রামের ব্রাউজারে অ্যাড ওপেন হচ্ছে... সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না।</div>
+    <h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0 4px 0;line-height:1.1;">1</h1>
+    <div class="ad-prog-wrap"><div id="ad-prog-fill" class="ad-prog-fill"></div></div>
+    <button id="ad-reopen-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#0ea5e9,#2563eb);margin-bottom:8px;">🌐 মিনি ব্রাউজারে অ্যাড দেখুন</button>
+    <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় মিনি ব্রাউজারে অ্যাড দেখুন</button>
+    <button id="ad-action-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#10b981,#059669);">✅ Continue</button>
   </div>
-</div>
+</div></div>
 
 <div id="tool-modal" class="modal-ov"><div class="modal-card"><button onclick="document.getElementById('tool-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button><h3 id="tool-m-title" style="margin:0 0 10px 0;"></h3><div id="tool-m-body"></div></div></div>
 
