@@ -3627,6 +3627,28 @@ def serve_welcome_audio():
         return send_file(mp3_path, mimetype="audio/mpeg")
     return "", 204
 
+@web.route('/api/continue_audio')
+def serve_continue_audio():
+    phrase = "Please click the Continue button to get your file."
+    h = hashlib.md5(phrase.encode("utf-8")).hexdigest()[:12]
+    mp3_path = f"/tmp/continue_{h}.mp3"
+    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 300:
+        try:
+            r = requests.get(
+                "https://translate.google.com/translate_tts",
+                params={"ie": "UTF-8", "q": phrase, "tl": "en", "client": "tw-ob"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=8
+            )
+            if r.status_code == 200 and len(r.content) > 300:
+                with open(mp3_path, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            print("Continue TTS error:", e, flush=True)
+    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 300:
+        return send_file(mp3_path, mimetype="audio/mpeg")
+    return "", 204
+
 @web.route('/tutorial_video')
 def serve_tutorial_video():
     tut_id = request.args.get("id", "").strip()
