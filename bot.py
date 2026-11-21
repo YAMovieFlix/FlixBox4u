@@ -1834,7 +1834,6 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
-
 # ==========================================
 # 7. MOVIES WORKFLOW (MULTI-LANGUAGE + REVIEW & CONFIRM + POSTER IN MONGODB)
 # ==========================================
@@ -3649,6 +3648,34 @@ def serve_continue_audio():
         return send_file(mp3_path, mimetype="audio/mpeg")
     return "", 204
 
+NUM_AUDIO_CACHE = {}
+
+@web.route('/api/num_audio/<int:num>')
+def serve_num_audio(num):
+    n = max(1, min(120, int(num)))
+    if n in NUM_AUDIO_CACHE:
+        return Response(NUM_AUDIO_CACHE[n], mimetype="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
+    mp3_path = f"/tmp/num_en_{n}.mp3"
+    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 200:
+        try:
+            r = requests.get(
+                "https://translate.google.com/translate_tts",
+                params={"ie": "UTF-8", "q": str(n), "tl": "en", "client": "tw-ob"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=6
+            )
+            if r.status_code == 200 and len(r.content) > 200:
+                with open(mp3_path, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            print("Num TTS error:", e, flush=True)
+    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 200:
+        with open(mp3_path, "rb") as f:
+            data = f.read()
+        NUM_AUDIO_CACHE[n] = data
+        return Response(data, mimetype="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
+    return "", 204
+
 @web.route('/tutorial_video')
 def serve_tutorial_video():
     tut_id = request.args.get("id", "").strip()
@@ -4405,7 +4432,7 @@ def api_home_data():
     resp = jsonify({"files": p["files"], "user": u_state})
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp
-    # ==========================================
+# ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -4600,6 +4627,7 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 
 <audio id="welcome-audio" preload="auto" playsinline style="display:none;"></audio>
 <audio id="continue-audio" src="/api/continue_audio" preload="auto" playsinline style="display:none;"></audio>
+<audio id="count-audio" preload="auto" playsinline style="display:none;"></audio>
 
 <div id="main-chrome">
   <div class="top-header"><div class="brand"><img class="hdr-logo" src="/site_logo?v={{ logo_ver }}" alt="Logo"><span id="brand-title"></span></div><div class="hdr-r"><div class="coin-pill">🪙 <span id="hdr-bal">0</span></div><div class="r-search" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div></div></div>
@@ -4657,7 +4685,14 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
     <div class="ad-prog-wrap"><div id="ad-prog-fill" class="ad-prog-fill"></div></div>
     <button id="ad-reopen-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#0ea5e9,#2563eb);margin-bottom:8px;">🌐 মিনি ব্রাউজারে অ্যাড দেখুন</button>
     <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় মিনি ব্রাউজারে অ্যাড দেখুন</button>
-    <button id="ad-action-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#10b981,#059669);">✅ Continue</button>
+    <button id="ad-action-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#10b981,#059669);margin-bottom:8px;">✅ Continue</button>
+    <button type="button" id="ad-guide-btn" onclick="toggleInAppBrowserGuide()" style="width:100%;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;padding:8px 10px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;">⚙️ বাইরের ব্রাউজার খুললে? টেলিগ্রাম মিনি ব্রাউজার চালু করুন</button>
+    <div id="ad-guide-box" style="display:none;margin-top:8px;padding:10px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;text-align:left;font-size:12px;color:#78350f;line-height:1.5;">
+      <b>📲 টেলিগ্রাম মিনি ব্রাউজার চালু করার নিয়ম:</b><br>
+      ১. টেলিগ্রামের হোম থেকে <b>☰ Menu &gt; Settings</b>-এ যান<br>
+      ২. <b>Chat Settings</b> ওপেন করুন<br>
+      ৩. নিচে গিয়ে <b>In-App Browser</b> অপশনটি <b>ON ✅</b> করে দিন।
+    </div>
   </div>
 </div></div>
 
@@ -5268,14 +5303,29 @@ function isFileLocallyUnlocked(btnKey){
 }
 
 let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdCleanupList=[], activeAdCancelCb=null;
-
 let activeVibIv=null, activeVoiceIv=null;
+const NUM_AUDIO_BLOBS={};
 
-function primeContinueAudio(){
-  const aud=document.getElementById('continue-audio');
+function toggleInAppBrowserGuide(){
+  const gb=document.getElementById('ad-guide-box');
+  if(gb)gb.style.display=(gb.style.display==='none'||!gb.style.display)?'block':'none';
+}
+
+function preloadCountAudio(sec){
+  const maxN=Math.min(30,Math.max(1,sec));
+  for(let i=1;i<=maxN;i++){
+    if(NUM_AUDIO_BLOBS[i])continue;
+    fetch('/api/num_audio/'+i).then(r=>r.ok?r.blob():null).then(b=>{
+      if(b&&b.size>100)NUM_AUDIO_BLOBS[i]=URL.createObjectURL(b);
+    }).catch(()=>{});
+  }
+}
+
+function primeAudioEl(id,src){
+  const aud=document.getElementById(id);
   if(!aud)return;
   try{
-    if(!aud.getAttribute('src'))aud.src='/api/continue_audio';
+    if(src&&!aud.getAttribute('src'))aud.src=src;
     aud.muted=true;
     const p=aud.play();
     if(p&&p.then){
@@ -5284,6 +5334,31 @@ function primeContinueAudio(){
       aud.pause();aud.currentTime=0;aud.muted=false;
     }
   }catch(e){}
+}
+
+function playCountNumber(n){
+  const aud=document.getElementById('count-audio');
+  const speakFallback=()=>{
+    try{
+      if('speechSynthesis' in window){
+        window.speechSynthesis.cancel();
+        const u=new SpeechSynthesisUtterance(String(n));
+        u.lang='en-US'; u.rate=1.05;
+        window.speechSynthesis.speak(u);
+      }
+    }catch(e){}
+  };
+  if(aud){
+    try{
+      aud.muted=false;
+      aud.src=NUM_AUDIO_BLOBS[n]||('/api/num_audio/'+n);
+      aud.currentTime=0;
+      const p=aud.play();
+      if(p&&p.catch)p.catch(()=>speakFallback());
+      return;
+    }catch(e){}
+  }
+  speakFallback();
 }
 
 function playContinueVoiceOnce(){
@@ -5329,8 +5404,10 @@ function stopContinueAlertLoop(){
   if(activeVibIv){clearInterval(activeVibIv);activeVibIv=null;}
   if(activeVoiceIv){clearInterval(activeVoiceIv);activeVoiceIv=null;}
   try{if(navigator.vibrate)navigator.vibrate(0);}catch(e){}
-  const aud=document.getElementById('continue-audio');
-  if(aud){try{aud.pause();aud.currentTime=0;}catch(e){}}
+  ['continue-audio','count-audio'].forEach(id=>{
+    const a=document.getElementById(id);
+    if(a){try{a.pause();a.currentTime=0;}catch(e){}}
+  });
   try{if('speechSynthesis' in window)window.speechSynthesis.cancel();}catch(e){}
 }
 
@@ -5501,8 +5578,10 @@ async function directStepWait(){
 function runAdTimer(link,sec,onDone,onCancel,adMeta){
   cleanupAdWatchers();
   stopContinueAlertLoop();
-  primeContinueAudio();
   sec=Math.max(1,Number(sec)||1);
+  primeAudioEl('continue-audio','/api/continue_audio');
+  primeAudioEl('count-audio','/api/num_audio/1');
+  preloadCountAudio(sec);
   activeAdCancelCb=onCancel||null;
   const ov=document.getElementById('ad-modal'),
         tm=document.getElementById('ad-timer'),
@@ -5511,8 +5590,10 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
         st=document.getElementById('ad-status-msg'),
         reopenBtn=document.getElementById('ad-reopen-btn'),
         retryBtn=document.getElementById('ad-retry-btn'),
-        btn=document.getElementById('ad-action-btn');
+        btn=document.getElementById('ad-action-btn'),
+        gb=document.getElementById('ad-guide-box');
 
+  if(gb)gb.style.display='none';
   ov.style.display='flex';
   btn.style.display='none';
   btn.disabled=false;
@@ -5529,13 +5610,19 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
   progFill.style.width='0%';
 
   const startTs=Date.now();
-  let leftPage=false, leftAt=0, paused=false, completed=false;
+  let leftPage=false, leftAt=0, paused=false, completed=false, lastSpoken=0;
   const tokenPromise=(adMeta&&adMeta.kind)?startServerAdToken(adMeta.kind,adMeta.target||'','link'):Promise.resolve(null);
 
   if(link){
-    reopenBtn.onclick=()=>openTgMiniBrowser(link);
+    reopenBtn.onclick=()=>{
+      leftPage=false;
+      openTgMiniBrowser(link);
+    };
     openTgMiniBrowser(link);
   }
+
+  lastSpoken=1;
+  playCountNumber(1);
 
   function finishTimer(){
     if(completed||paused)return;
@@ -5586,12 +5673,19 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     };
   }
 
-  function checkReturnNow(){
+  function markLeft(){
+    if(!leftPage){
+      leftPage=true;
+      leftAt=Date.now();
+    }
+  }
+
+  function checkReturnNow(src){
     if(!leftPage||paused||completed||document.hidden)return;
-    if(tg&&tg.isActive===false)return;
-    if((Date.now()-leftAt)<250)return;
+    if(src==='poll'&&(!document.hasFocus()||(tg&&tg.isActive===false)))return;
+    if((Date.now()-leftAt)<150)return;
     const el=(Date.now()-startTs)/1000;
-    if(el<sec-0.5){
+    if(el<sec-0.35){
       pauseEarly();
     } else {
       finishTimer();
@@ -5599,41 +5693,55 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
   }
 
   if(adConfig.strict_ad && link){
-    const markLeft=()=>{
-      if(!leftPage){leftPage=true;leftAt=Date.now();}
-    };
-    const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow();};
+    const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow('vis');};
+    const onFocus=()=>checkReturnNow('focus');
+    const onShow=()=>checkReturnNow('show');
+    const onAct=()=>checkReturnNow('act');
 
     document.addEventListener('visibilitychange',onVis);
     window.addEventListener('blur',markLeft);
-    window.addEventListener('focus',checkReturnNow);
+    window.addEventListener('focus',onFocus);
     window.addEventListener('pagehide',markLeft);
-    window.addEventListener('pageshow',checkReturnNow);
+    window.addEventListener('pageshow',onShow);
     activeAdCleanupList.push(
       ()=>document.removeEventListener('visibilitychange',onVis),
       ()=>window.removeEventListener('blur',markLeft),
-      ()=>window.removeEventListener('focus',checkReturnNow),
+      ()=>window.removeEventListener('focus',onFocus),
       ()=>window.removeEventListener('pagehide',markLeft),
-      ()=>window.removeEventListener('pageshow',checkReturnNow)
+      ()=>window.removeEventListener('pageshow',onShow)
     );
     if(tg?.onEvent && tg?.offEvent){
       tg.onEvent('deactivated',markLeft);
-      tg.onEvent('activated',checkReturnNow);
+      tg.onEvent('activated',onAct);
       activeAdCleanupList.push(
         ()=>{try{tg.offEvent('deactivated',markLeft);}catch(e){}},
-        ()=>{try{tg.offEvent('activated',checkReturnNow);}catch(e){}}
+        ()=>{try{tg.offEvent('activated',onAct);}catch(e){}}
       );
     }
+
+    let lastRaf=performance.now(), rafId=0;
+    const rafLoop=(now)=>{
+      if(paused||completed)return;
+      if((now-lastRaf)>700){
+        if(!leftPage){leftPage=true;leftAt=Date.now()-200;}
+        checkReturnNow('raf');
+        if(paused||completed)return;
+      }
+      lastRaf=now;
+      rafId=requestAnimationFrame(rafLoop);
+    };
+    rafId=requestAnimationFrame(rafLoop);
+    activeAdCleanupList.push(()=>cancelAnimationFrame(rafId));
   }
 
   activeAdIv=setInterval(()=>{
     if(paused||completed)return;
     if(adConfig.strict_ad && link){
-      const away=document.hidden || (tg && tg.isActive===false);
+      const away=document.hidden || !document.hasFocus() || (tg && tg.isActive===false);
       if(away){
-        if(!leftPage){leftPage=true;leftAt=Date.now();}
+        markLeft();
       } else if(leftPage){
-        checkReturnNow();
+        checkReturnNow('poll');
         if(paused||completed)return;
       }
     }
@@ -5643,6 +5751,10 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     tm.innerText=curCount+' / '+sec;
     hdrBadge.innerText='⏳ '+curCount+'/'+sec+'s';
     progFill.style.width=pct+'%';
+    if(curCount>lastSpoken && el<sec){
+      lastSpoken=curCount;
+      playCountNumber(curCount);
+    }
     if(el>=sec){
       finishTimer();
     }
