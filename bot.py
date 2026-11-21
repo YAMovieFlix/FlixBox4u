@@ -5269,23 +5269,92 @@ function isFileLocallyUnlocked(btnKey){
 
 let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdCleanupList=[], activeAdCancelCb=null;
 
-function closeInAppAdBrowser(){
-  const box=document.getElementById('inapp-ad-ov');
-  const fr=document.getElementById('inapp-ad-frame');
-  const ld=document.getElementById('inapp-ad-loader');
-  if(box)box.style.display='none';
-  if(fr){fr.onload=null;fr.src='about:blank';}
-  if(ld)ld.style.display='flex';
+let activeVibIv=null, activeVoiceIv=null;
+
+function primeContinueAudio(){
+  const aud=document.getElementById('continue-audio');
+  if(!aud)return;
+  try{
+    if(!aud.getAttribute('src'))aud.src='/api/continue_audio';
+    aud.muted=true;
+    const p=aud.play();
+    if(p&&p.then){
+      p.then(()=>{aud.pause();aud.currentTime=0;aud.muted=false;}).catch(()=>{aud.muted=false;});
+    } else {
+      aud.pause();aud.currentTime=0;aud.muted=false;
+    }
+  }catch(e){}
 }
+
+function playContinueVoiceOnce(){
+  const phrase='Please click the Continue button to get your file.';
+  const aud=document.getElementById('continue-audio');
+  const speakFallback=()=>{
+    try{
+      if('speechSynthesis' in window){
+        window.speechSynthesis.cancel();
+        const u=new SpeechSynthesisUtterance(phrase);
+        u.lang='en-US'; u.rate=0.98;
+        window.speechSynthesis.speak(u);
+      }
+    }catch(e){}
+  };
+  if(aud){
+    try{
+      if(!aud.getAttribute('src'))aud.src='/api/continue_audio';
+      aud.muted=false;
+      aud.currentTime=0;
+      const p=aud.play();
+      if(p&&p.catch)p.catch(()=>speakFallback());
+      return;
+    }catch(e){}
+  }
+  speakFallback();
+}
+
+function startContinueAlertLoop(){
+  stopContinueAlertLoop();
+  const buzz=()=>{
+    try{tg?.HapticFeedback?.notificationOccurred('warning');}catch(e){}
+    try{tg?.HapticFeedback?.impactOccurred('heavy');}catch(e){}
+    try{if(navigator.vibrate)navigator.vibrate(280);}catch(e){}
+  };
+  buzz();
+  playContinueVoiceOnce();
+  activeVibIv=setInterval(buzz,750);
+  activeVoiceIv=setInterval(playContinueVoiceOnce,3500);
+}
+
+function stopContinueAlertLoop(){
+  if(activeVibIv){clearInterval(activeVibIv);activeVibIv=null;}
+  if(activeVoiceIv){clearInterval(activeVoiceIv);activeVoiceIv=null;}
+  try{if(navigator.vibrate)navigator.vibrate(0);}catch(e){}
+  const aud=document.getElementById('continue-audio');
+  if(aud){try{aud.pause();aud.currentTime=0;}catch(e){}}
+  try{if('speechSynthesis' in window)window.speechSynthesis.cancel();}catch(e){}
+}
+
+function openTgMiniBrowser(url){
+  if(!url)return;
+  try{
+    if(tg&&typeof tg.openLink==='function'){
+      try{tg.openLink(url,{try_instant_view:false});return;}
+      catch(e){tg.openLink(url);return;}
+    }
+  }catch(e){}
+  try{window.open(url,'_blank');}catch(e){}
+}
+
 function cleanupAdWatchers(){
   if(activeAdIv){clearInterval(activeAdIv);activeAdIv=null;}
   while(activeAdCleanupList.length){
     try{activeAdCleanupList.pop()();}catch(e){}
   }
-  closeInAppAdBrowser();
 }
+
 function cancelActiveAd(reasonMsg){
   cleanupAdWatchers();
+  stopContinueAlertLoop();
   curAdToken=null;
   document.getElementById('ad-modal').style.display='none';
   if(reasonMsg)alert(reasonMsg);
