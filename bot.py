@@ -4599,6 +4599,7 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 </div>
 
 <audio id="welcome-audio" preload="auto" playsinline style="display:none;"></audio>
+<audio id="continue-audio" src="/api/continue_audio" preload="auto" playsinline style="display:none;"></audio>
 
 <div id="main-chrome">
   <div class="top-header"><div class="brand"><img class="hdr-logo" src="/site_logo?v={{ logo_ver }}" alt="Logo"><span id="brand-title"></span></div><div class="hdr-r"><div class="coin-pill">🪙 <span id="hdr-bal">0</span></div><div class="r-search" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div></div></div>
