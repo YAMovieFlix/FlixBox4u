@@ -1834,6 +1834,7 @@ async def cmd_deletepremium(c, m):
     args = m.text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.reply("❌ **সঠিক নিয়ম ও উদাহরণ:**\n`/deletepremium 12345678`")
     await get_db(); await users_col.update_one({"_id": int(args[1])}, {"$set": {"premium_until": None}}); await m.reply(f"✅ User `{args[1]}` এর প্রিমিয়াম রিমুভ হয়েছে!")
+
 # ==========================================
 # 7. MOVIES WORKFLOW (MULTI-LANGUAGE + REVIEW & CONFIRM + POSTER IN MONGODB)
 # ==========================================
@@ -3626,56 +3627,6 @@ def serve_welcome_audio():
         return send_file(mp3_path, mimetype="audio/mpeg")
     return "", 204
 
-@web.route('/api/continue_audio')
-def serve_continue_audio():
-    phrase = "Please click the Continue button to get your file."
-    h = hashlib.md5(phrase.encode("utf-8")).hexdigest()[:12]
-    mp3_path = f"/tmp/continue_{h}.mp3"
-    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 300:
-        try:
-            r = requests.get(
-                "https://translate.google.com/translate_tts",
-                params={"ie": "UTF-8", "q": phrase, "tl": "en", "client": "tw-ob"},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=8
-            )
-            if r.status_code == 200 and len(r.content) > 300:
-                with open(mp3_path, "wb") as f:
-                    f.write(r.content)
-        except Exception as e:
-            print("Continue TTS error:", e, flush=True)
-    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 300:
-        return send_file(mp3_path, mimetype="audio/mpeg")
-    return "", 204
-
-NUM_AUDIO_CACHE = {}
-
-@web.route('/api/num_audio/<int:num>')
-def serve_num_audio(num):
-    n = max(1, min(120, int(num)))
-    if n in NUM_AUDIO_CACHE:
-        return Response(NUM_AUDIO_CACHE[n], mimetype="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
-    mp3_path = f"/tmp/num_en_{n}.mp3"
-    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 200:
-        try:
-            r = requests.get(
-                "https://translate.google.com/translate_tts",
-                params={"ie": "UTF-8", "q": str(n), "tl": "en", "client": "tw-ob"},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=6
-            )
-            if r.status_code == 200 and len(r.content) > 200:
-                with open(mp3_path, "wb") as f:
-                    f.write(r.content)
-        except Exception as e:
-            print("Num TTS error:", e, flush=True)
-    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 200:
-        with open(mp3_path, "rb") as f:
-            data = f.read()
-        NUM_AUDIO_CACHE[n] = data
-        return Response(data, mimetype="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
-    return "", 204
-
 @web.route('/tutorial_video')
 def serve_tutorial_video():
     tut_id = request.args.get("id", "").strip()
@@ -4432,7 +4383,7 @@ def api_home_data():
     resp = jsonify({"files": p["files"], "user": u_state})
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp
-# ==========================================
+    # ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -4606,14 +4557,14 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 .pkg-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
 .pkg-tab{border:1px solid #e2e8f0;background:#f8fafc;color:#475569;padding:9px 4px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer;text-align:center;white-space:nowrap}
 .pkg-tab.active{background:linear-gradient(90deg,#6c5ce7,#4f46e5,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
-.ad-browser-card{padding:0!important;overflow:hidden!important}
-.inapp-ad-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 13px;background:linear-gradient(90deg,#0f172a,#1e293b);color:#fff;border-bottom:1px solid rgba(255,255,255,.12)}
-.inapp-back-btn{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.22);padding:6px 11px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer}
+.inapp-ad-ov{display:none;position:fixed;inset:0;z-index:10050;background:#0f172a;flex-direction:column}
+.inapp-ad-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:#1e293b;color:#fff;border-bottom:1px solid rgba(255,255,255,.12);flex-shrink:0}
+.inapp-back-btn{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.22);padding:6px 12px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer}
 .inapp-ad-ttl{font-size:13px;font-weight:700;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .inapp-ad-badge{background:linear-gradient(90deg,#f59e0b,#ef4444);color:#fff;padding:5px 11px;border-radius:14px;font-size:12px;font-weight:800;white-space:nowrap}
-.ad-browser-body{padding:18px 18px 20px 18px}
-.ad-prog-wrap{width:100%;height:7px;background:#e2e8f0;border-radius:10px;overflow:hidden;margin:10px 0 14px 0}
-.ad-prog-fill{height:100%;width:0%;background:linear-gradient(90deg,#4f46e5,#ec4899,#10b981);border-radius:10px;transition:width .2s linear}
+.inapp-ad-body{position:relative;flex:1;width:100%;height:100%;background:#fff;overflow:hidden}
+.inapp-ad-loader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#cbd5e1;font-size:13.5px;font-weight:600;z-index:2;pointer-events:none}
+.inapp-ad-frame{width:100%;height:100%;border:none;display:block;background:#fff}
 </style>
 </head>
 <body>
@@ -4626,8 +4577,6 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 </div>
 
 <audio id="welcome-audio" preload="auto" playsinline style="display:none;"></audio>
-<audio id="continue-audio" src="/api/continue_audio" preload="auto" playsinline style="display:none;"></audio>
-<audio id="count-audio" preload="auto" playsinline style="display:none;"></audio>
 
 <div id="main-chrome">
   <div class="top-header"><div class="brand"><img class="hdr-logo" src="/site_logo?v={{ logo_ver }}" alt="Logo"><span id="brand-title"></span></div><div class="hdr-r"><div class="coin-pill">🪙 <span id="hdr-bal">0</span></div><div class="r-search" onclick="toggleSearch()"><div class="r-search-in">🔍</div></div></div></div>
@@ -4673,28 +4622,26 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
   <div id="task-options-area"></div>
 </div></div>
 
-<div id="ad-modal" class="modal-ov"><div class="modal-card ad-browser-card">
-  <div class="inapp-ad-hdr">
-    <button type="button" class="inapp-back-btn" onclick="cancelActiveAd('⚠️ অ্যাড বাতিল করা হয়েছে! কিছুই আনলক হয়নি, পুনরায় অ্যাড দেখুন।')">❮ Back</button>
-    <div class="inapp-ad-ttl">🌐 Telegram Mini Browser</div>
-    <div id="ad-hdr-badge" class="inapp-ad-badge">⏳ 1s</div>
-  </div>
-  <div class="ad-browser-body">
-    <div id="ad-status-msg" style="font-size:13px;color:#475569;line-height:1.5;">টেলিগ্রামের ব্রাউজারে অ্যাড ওপেন হচ্ছে... সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না।</div>
-    <h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0 4px 0;line-height:1.1;">1</h1>
-    <div class="ad-prog-wrap"><div id="ad-prog-fill" class="ad-prog-fill"></div></div>
-    <button id="ad-reopen-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#0ea5e9,#2563eb);margin-bottom:8px;">🌐 মিনি ব্রাউজারে অ্যাড দেখুন</button>
-    <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় মিনি ব্রাউজারে অ্যাড দেখুন</button>
-    <button id="ad-action-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#10b981,#059669);margin-bottom:8px;">✅ Continue</button>
-    <button type="button" id="ad-guide-btn" onclick="toggleInAppBrowserGuide()" style="width:100%;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;padding:8px 10px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;">⚙️ বাইরের ব্রাউজার খুললে? টেলিগ্রাম মিনি ব্রাউজার চালু করুন</button>
-    <div id="ad-guide-box" style="display:none;margin-top:8px;padding:10px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;text-align:left;font-size:12px;color:#78350f;line-height:1.5;">
-      <b>📲 টেলিগ্রাম মিনি ব্রাউজার চালু করার নিয়ম:</b><br>
-      ১. টেলিগ্রামের হোম থেকে <b>☰ Menu &gt; Settings</b>-এ যান<br>
-      ২. <b>Chat Settings</b> ওপেন করুন<br>
-      ৩. নিচে গিয়ে <b>In-App Browser</b> অপশনটি <b>ON ✅</b> করে দিন।
-    </div>
-  </div>
+<div id="ad-modal" class="modal-ov"><div class="modal-card">
+  <button onclick="cancelActiveAd('⚠️ অ্যাড বাতিল করা হয়েছে! কিছুই আনলক হয়নি, পুনরায় অ্যাড দেখুন।')" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button>
+  <h3 style="margin-top:0;color:#4f46e5;">🚀 Ad Verification</h3>
+  <p id="ad-status-msg" style="font-size:13px;color:#64748b;">সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।</p>
+  <h1 id="ad-timer" style="font-size:46px;color:#e11d48;margin:10px 0;">5</h1>
+  <button id="ad-retry-btn" class="btn-p" style="display:none;background:linear-gradient(90deg,#ff512f,#dd2476);margin-bottom:8px;">🔗 পুনরায় অ্যাডে ক্লিক করুন</button>
+  <button id="ad-action-btn" class="btn-p" style="display:none;">✅ Continue</button>
 </div></div>
+
+<div id="inapp-ad-ov" class="inapp-ad-ov">
+  <div class="inapp-ad-hdr">
+    <button type="button" id="inapp-ad-back" class="inapp-back-btn">❮ Back</button>
+    <div class="inapp-ad-ttl">🔒 WebApp Ad Browser</div>
+    <div id="inapp-ad-badge" class="inapp-ad-badge">⏳ 5s</div>
+  </div>
+  <div class="inapp-ad-body">
+    <div id="inapp-ad-loader" class="inapp-ad-loader">⏳ অ্যাড লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
+    <iframe id="inapp-ad-frame" class="inapp-ad-frame" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+  </div>
+</div>
 
 <div id="tool-modal" class="modal-ov"><div class="modal-card"><button onclick="document.getElementById('tool-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:#f1f5f9;border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;">✕</button><h3 id="tool-m-title" style="margin:0 0 10px 0;"></h3><div id="tool-m-body"></div></div></div>
 
@@ -5303,135 +5250,24 @@ function isFileLocallyUnlocked(btnKey){
 }
 
 let pendingUnlockData=null, curAdToken=null, activeAdIv=null, activeAdCleanupList=[], activeAdCancelCb=null;
-let activeVibIv=null, activeVoiceIv=null;
-const NUM_AUDIO_BLOBS={};
 
-function toggleInAppBrowserGuide(){
-  const gb=document.getElementById('ad-guide-box');
-  if(gb)gb.style.display=(gb.style.display==='none'||!gb.style.display)?'block':'none';
+function closeInAppAdBrowser(){
+  const box=document.getElementById('inapp-ad-ov');
+  const fr=document.getElementById('inapp-ad-frame');
+  const ld=document.getElementById('inapp-ad-loader');
+  if(box)box.style.display='none';
+  if(fr){fr.onload=null;fr.src='about:blank';}
+  if(ld)ld.style.display='flex';
 }
-
-function preloadCountAudio(sec){
-  const maxN=Math.min(30,Math.max(1,sec));
-  for(let i=1;i<=maxN;i++){
-    if(NUM_AUDIO_BLOBS[i])continue;
-    fetch('/api/num_audio/'+i).then(r=>r.ok?r.blob():null).then(b=>{
-      if(b&&b.size>100)NUM_AUDIO_BLOBS[i]=URL.createObjectURL(b);
-    }).catch(()=>{});
-  }
-}
-
-function primeAudioEl(id,src){
-  const aud=document.getElementById(id);
-  if(!aud)return;
-  try{
-    if(src&&!aud.getAttribute('src'))aud.src=src;
-    aud.muted=true;
-    const p=aud.play();
-    if(p&&p.then){
-      p.then(()=>{aud.pause();aud.currentTime=0;aud.muted=false;}).catch(()=>{aud.muted=false;});
-    } else {
-      aud.pause();aud.currentTime=0;aud.muted=false;
-    }
-  }catch(e){}
-}
-
-function playCountNumber(n){
-  const aud=document.getElementById('count-audio');
-  const speakFallback=()=>{
-    try{
-      if('speechSynthesis' in window){
-        window.speechSynthesis.cancel();
-        const u=new SpeechSynthesisUtterance(String(n));
-        u.lang='en-US'; u.rate=1.05;
-        window.speechSynthesis.speak(u);
-      }
-    }catch(e){}
-  };
-  if(aud){
-    try{
-      aud.muted=false;
-      aud.src=NUM_AUDIO_BLOBS[n]||('/api/num_audio/'+n);
-      aud.currentTime=0;
-      const p=aud.play();
-      if(p&&p.catch)p.catch(()=>speakFallback());
-      return;
-    }catch(e){}
-  }
-  speakFallback();
-}
-
-function playContinueVoiceOnce(){
-  const phrase='Please click the Continue button to get your file.';
-  const aud=document.getElementById('continue-audio');
-  const speakFallback=()=>{
-    try{
-      if('speechSynthesis' in window){
-        window.speechSynthesis.cancel();
-        const u=new SpeechSynthesisUtterance(phrase);
-        u.lang='en-US'; u.rate=0.98;
-        window.speechSynthesis.speak(u);
-      }
-    }catch(e){}
-  };
-  if(aud){
-    try{
-      if(!aud.getAttribute('src'))aud.src='/api/continue_audio';
-      aud.muted=false;
-      aud.currentTime=0;
-      const p=aud.play();
-      if(p&&p.catch)p.catch(()=>speakFallback());
-      return;
-    }catch(e){}
-  }
-  speakFallback();
-}
-
-function startContinueAlertLoop(){
-  stopContinueAlertLoop();
-  const buzz=()=>{
-    try{tg?.HapticFeedback?.notificationOccurred('warning');}catch(e){}
-    try{tg?.HapticFeedback?.impactOccurred('heavy');}catch(e){}
-    try{if(navigator.vibrate)navigator.vibrate(280);}catch(e){}
-  };
-  buzz();
-  playContinueVoiceOnce();
-  activeVibIv=setInterval(buzz,750);
-  activeVoiceIv=setInterval(playContinueVoiceOnce,3500);
-}
-
-function stopContinueAlertLoop(){
-  if(activeVibIv){clearInterval(activeVibIv);activeVibIv=null;}
-  if(activeVoiceIv){clearInterval(activeVoiceIv);activeVoiceIv=null;}
-  try{if(navigator.vibrate)navigator.vibrate(0);}catch(e){}
-  ['continue-audio','count-audio'].forEach(id=>{
-    const a=document.getElementById(id);
-    if(a){try{a.pause();a.currentTime=0;}catch(e){}}
-  });
-  try{if('speechSynthesis' in window)window.speechSynthesis.cancel();}catch(e){}
-}
-
-function openTgMiniBrowser(url){
-  if(!url)return;
-  try{
-    if(tg&&typeof tg.openLink==='function'){
-      try{tg.openLink(url,{try_instant_view:false});return;}
-      catch(e){tg.openLink(url);return;}
-    }
-  }catch(e){}
-  try{window.open(url,'_blank');}catch(e){}
-}
-
 function cleanupAdWatchers(){
   if(activeAdIv){clearInterval(activeAdIv);activeAdIv=null;}
   while(activeAdCleanupList.length){
     try{activeAdCleanupList.pop()();}catch(e){}
   }
+  closeInAppAdBrowser();
 }
-
 function cancelActiveAd(reasonMsg){
   cleanupAdWatchers();
-  stopContinueAlertLoop();
   curAdToken=null;
   document.getElementById('ad-modal').style.display='none';
   if(reasonMsg)alert(reasonMsg);
@@ -5577,70 +5413,41 @@ async function directStepWait(){
 
 function runAdTimer(link,sec,onDone,onCancel,adMeta){
   cleanupAdWatchers();
-  stopContinueAlertLoop();
-  sec=Math.max(1,Number(sec)||1);
-  primeAudioEl('continue-audio','/api/continue_audio');
-  primeAudioEl('count-audio','/api/num_audio/1');
-  preloadCountAudio(sec);
   activeAdCancelCb=onCancel||null;
   const ov=document.getElementById('ad-modal'),
         tm=document.getElementById('ad-timer'),
-        hdrBadge=document.getElementById('ad-hdr-badge'),
-        progFill=document.getElementById('ad-prog-fill'),
         st=document.getElementById('ad-status-msg'),
-        reopenBtn=document.getElementById('ad-reopen-btn'),
         retryBtn=document.getElementById('ad-retry-btn'),
         btn=document.getElementById('ad-action-btn'),
-        gb=document.getElementById('ad-guide-box');
+        inappOv=document.getElementById('inapp-ad-ov'),
+        inappBack=document.getElementById('inapp-ad-back'),
+        inappBadge=document.getElementById('inapp-ad-badge'),
+        inappLoader=document.getElementById('inapp-ad-loader'),
+        inappFrame=document.getElementById('inapp-ad-frame');
 
-  if(gb)gb.style.display='none';
   ov.style.display='flex';
   btn.style.display='none';
-  btn.disabled=false;
   retryBtn.style.display='none';
-  reopenBtn.style.display=link?'block':'none';
-  st.style.color='#475569';
-  st.innerText=link
-    ?`টেলিগ্রামের ব্রাউজারে অ্যাড ওপেন হয়েছে! ${sec} সেকেন্ড পূর্ণ না হওয়া পর্যন্ত ব্যাক করবেন না।`
-    :`${sec} সেকেন্ড পূর্ণ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।`;
+  st.style.color='#64748b';
+  st.innerText='সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।';
   tm.style.color='#e11d48';
-  tm.innerText='1 / '+sec;
-  hdrBadge.innerText='⏳ 1/'+sec+'s';
-  hdrBadge.style.background='linear-gradient(90deg,#f59e0b,#ef4444)';
-  progFill.style.width='0%';
+  tm.innerText=sec;
 
   const startTs=Date.now();
-  let leftPage=false, leftAt=0, paused=false, completed=false, lastSpoken=0;
+  let leftPage=false, leftAt=0, paused=false, completed=false;
   const tokenPromise=(adMeta&&adMeta.kind)?startServerAdToken(adMeta.kind,adMeta.target||'','link'):Promise.resolve(null);
-
-  if(link){
-    reopenBtn.onclick=()=>{
-      leftPage=false;
-      openTgMiniBrowser(link);
-    };
-    openTgMiniBrowser(link);
-  }
-
-  lastSpoken=1;
-  playCountNumber(1);
 
   function finishTimer(){
     if(completed||paused)return;
     completed=true;
     cleanupAdWatchers();
     tm.style.color='#059669';
-    tm.innerText=sec+' / '+sec;
-    hdrBadge.innerText='✅ '+sec+'/'+sec+'s';
-    hdrBadge.style.background='linear-gradient(90deg,#10b981,#059669)';
-    progFill.style.width='100%';
+    tm.innerText='0';
     st.style.color='#059669';
-    st.innerText='✅ সময় সম্পন্ন! ফাইল পেতে নিচের Continue বাটনে ক্লিক করুন।';
-    reopenBtn.style.display='none';
+    st.innerText='✅ অ্যাড ভেরিফিকেশন সম্পন্ন হয়েছে! নিচের বাটনে ক্লিক করুন।';
     retryBtn.style.display='none';
     btn.style.display='block';
-    startContinueAlertLoop();
     btn.onclick=async()=>{
-      stopContinueAlertLoop();
       btn.disabled=true;
       const tokRes=await tokenPromise;
       if(tokRes&&tokRes.token)curAdToken=tokRes.token;
@@ -5655,17 +5462,12 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     if(paused||completed)return;
     paused=true;
     cleanupAdWatchers();
-    stopContinueAlertLoop();
     curAdToken=null;
-    const elapsed=(Date.now()-startTs)/1000;
-    const doneSec=Math.min(sec,Math.max(1,Math.floor(elapsed)+1));
+    const rem=Math.max(1,Math.ceil(sec-((Date.now()-startTs)/1000)));
     tm.style.color='#f59e0b';
-    tm.innerText=doneSec+' / '+sec+' ⏸️';
-    hdrBadge.innerText='⏸️ '+doneSec+'/'+sec+'s';
-    hdrBadge.style.background='linear-gradient(90deg,#f59e0b,#dc2626)';
+    tm.innerText=rem+'s ⏸️';
     st.style.color='#dc2626';
-    st.innerText=msg||'⏸️ সময় শেষ হওয়ার আগেই ফিরে এসেছেন! টাইমার পজ হয়েছে। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
-    reopenBtn.style.display='none';
+    st.innerText=msg||'⏸️ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! টাইমার পজ হয়েছে। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
     btn.style.display='none';
     retryBtn.style.display='block';
     retryBtn.onclick=()=>{
@@ -5673,88 +5475,98 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     };
   }
 
-  function markLeft(){
-    if(!leftPage){
-      leftPage=true;
-      leftAt=Date.now();
+  function handleEarlyBack(){
+    if(paused||completed)return;
+    const el=(Date.now()-startTs)/1000;
+    if(el<sec-0.5){
+      if(adConfig.strict_ad){
+        pauseEarly();
+      } else {
+        closeInAppAdBrowser();
+      }
+    } else {
+      finishTimer();
     }
   }
 
-  function checkReturnNow(src){
+  function checkReturnNow(){
     if(!leftPage||paused||completed||document.hidden)return;
-    if(src==='poll'&&(!document.hasFocus()||(tg&&tg.isActive===false)))return;
-    if((Date.now()-leftAt)<150)return;
+    if(tg && tg.isActive===false)return;
+    if((Date.now()-leftAt)<120)return;
     const el=(Date.now()-startTs)/1000;
-    if(el<sec-0.35){
+    if(el<sec-0.5){
       pauseEarly();
     } else {
       finishTimer();
     }
   }
 
+  if(link){
+    inappBadge.innerText='⏳ '+sec+'s';
+    inappBadge.style.background='linear-gradient(90deg,#f59e0b,#ef4444)';
+    inappLoader.style.display='flex';
+    inappFrame.onload=()=>{inappLoader.style.display='none';};
+    const ldTimer=setTimeout(()=>{inappLoader.style.display='none';},2000);
+    inappFrame.src=link;
+    inappOv.style.display='flex';
+    inappBack.onclick=handleEarlyBack;
+    activeAdCleanupList.push(()=>{clearTimeout(ldTimer);inappBack.onclick=null;});
+
+    if(tg?.BackButton){
+      try{
+        tg.BackButton.show();
+        tg.BackButton.onClick(handleEarlyBack);
+        activeAdCleanupList.push(()=>{try{tg.BackButton.offClick(handleEarlyBack);tg.BackButton.hide();}catch(e){}});
+      }catch(e){}
+    } else {
+      try{
+        history.pushState({inappAd:1},'');
+        const onPop=()=>{handleEarlyBack();};
+        window.addEventListener('popstate',onPop);
+        activeAdCleanupList.push(()=>window.removeEventListener('popstate',onPop));
+      }catch(e){}
+    }
+  }
+
   if(adConfig.strict_ad && link){
-    const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow('vis');};
-    const onFocus=()=>checkReturnNow('focus');
-    const onShow=()=>checkReturnNow('show');
-    const onAct=()=>checkReturnNow('act');
+    const markLeft=()=>{
+      if(!leftPage){leftPage=true;leftAt=Date.now();}
+    };
+    const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow();};
 
     document.addEventListener('visibilitychange',onVis);
-    window.addEventListener('blur',markLeft);
-    window.addEventListener('focus',onFocus);
     window.addEventListener('pagehide',markLeft);
-    window.addEventListener('pageshow',onShow);
+    window.addEventListener('pageshow',checkReturnNow);
     activeAdCleanupList.push(
       ()=>document.removeEventListener('visibilitychange',onVis),
-      ()=>window.removeEventListener('blur',markLeft),
-      ()=>window.removeEventListener('focus',onFocus),
       ()=>window.removeEventListener('pagehide',markLeft),
-      ()=>window.removeEventListener('pageshow',onShow)
+      ()=>window.removeEventListener('pageshow',checkReturnNow)
     );
     if(tg?.onEvent && tg?.offEvent){
       tg.onEvent('deactivated',markLeft);
-      tg.onEvent('activated',onAct);
+      tg.onEvent('activated',checkReturnNow);
       activeAdCleanupList.push(
         ()=>{try{tg.offEvent('deactivated',markLeft);}catch(e){}},
-        ()=>{try{tg.offEvent('activated',onAct);}catch(e){}}
+        ()=>{try{tg.offEvent('activated',checkReturnNow);}catch(e){}}
       );
     }
-
-    let lastRaf=performance.now(), rafId=0;
-    const rafLoop=(now)=>{
-      if(paused||completed)return;
-      if((now-lastRaf)>700){
-        if(!leftPage){leftPage=true;leftAt=Date.now()-200;}
-        checkReturnNow('raf');
-        if(paused||completed)return;
-      }
-      lastRaf=now;
-      rafId=requestAnimationFrame(rafLoop);
-    };
-    rafId=requestAnimationFrame(rafLoop);
-    activeAdCleanupList.push(()=>cancelAnimationFrame(rafId));
   }
 
   activeAdIv=setInterval(()=>{
     if(paused||completed)return;
     if(adConfig.strict_ad && link){
-      const away=document.hidden || !document.hasFocus() || (tg && tg.isActive===false);
+      const away=document.hidden || (tg && tg.isActive===false);
       if(away){
-        markLeft();
+        if(!leftPage){leftPage=true;leftAt=Date.now();}
       } else if(leftPage){
-        checkReturnNow('poll');
+        checkReturnNow();
         if(paused||completed)return;
       }
     }
     const el=(Date.now()-startTs)/1000;
-    const curCount=Math.min(sec,Math.max(1,Math.floor(el)+1));
-    const pct=Math.min(100,Math.max(0,(el/sec)*100));
-    tm.innerText=curCount+' / '+sec;
-    hdrBadge.innerText='⏳ '+curCount+'/'+sec+'s';
-    progFill.style.width=pct+'%';
-    if(curCount>lastSpoken && el<sec){
-      lastSpoken=curCount;
-      playCountNumber(curCount);
-    }
+    const rem=Math.max(0,Math.ceil(sec-el));
+    tm.innerText=rem;
+    if(link)inappBadge.innerText=rem>0?('⏳ '+rem+'s'):'✅ 0s';
     if(el>=sec){
       finishTimer();
     }
