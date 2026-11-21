@@ -5500,41 +5500,60 @@ async function directStepWait(){
 
 function runAdTimer(link,sec,onDone,onCancel,adMeta){
   cleanupAdWatchers();
+  stopContinueAlertLoop();
+  primeContinueAudio();
+  sec=Math.max(1,Number(sec)||1);
   activeAdCancelCb=onCancel||null;
   const ov=document.getElementById('ad-modal'),
         tm=document.getElementById('ad-timer'),
+        hdrBadge=document.getElementById('ad-hdr-badge'),
+        progFill=document.getElementById('ad-prog-fill'),
         st=document.getElementById('ad-status-msg'),
+        reopenBtn=document.getElementById('ad-reopen-btn'),
         retryBtn=document.getElementById('ad-retry-btn'),
-        btn=document.getElementById('ad-action-btn'),
-        inappOv=document.getElementById('inapp-ad-ov'),
-        inappBack=document.getElementById('inapp-ad-back'),
-        inappBadge=document.getElementById('inapp-ad-badge'),
-        inappLoader=document.getElementById('inapp-ad-loader'),
-        inappFrame=document.getElementById('inapp-ad-frame');
+        btn=document.getElementById('ad-action-btn');
 
   ov.style.display='flex';
   btn.style.display='none';
+  btn.disabled=false;
   retryBtn.style.display='none';
-  st.style.color='#64748b';
-  st.innerText='সময় শেষ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।';
+  reopenBtn.style.display=link?'block':'none';
+  st.style.color='#475569';
+  st.innerText=link
+    ?`টেলিগ্রামের ব্রাউজারে অ্যাড ওপেন হয়েছে! ${sec} সেকেন্ড পূর্ণ না হওয়া পর্যন্ত ব্যাক করবেন না।`
+    :`${sec} সেকেন্ড পূর্ণ না হওয়া পর্যন্ত ব্যাক করবেন না, নইলে কোনো কয়েন/ভিডিও পাবেন না।`;
   tm.style.color='#e11d48';
-  tm.innerText=sec;
+  tm.innerText='1 / '+sec;
+  hdrBadge.innerText='⏳ 1/'+sec+'s';
+  hdrBadge.style.background='linear-gradient(90deg,#f59e0b,#ef4444)';
+  progFill.style.width='0%';
 
   const startTs=Date.now();
   let leftPage=false, leftAt=0, paused=false, completed=false;
   const tokenPromise=(adMeta&&adMeta.kind)?startServerAdToken(adMeta.kind,adMeta.target||'','link'):Promise.resolve(null);
+
+  if(link){
+    reopenBtn.onclick=()=>openTgMiniBrowser(link);
+    openTgMiniBrowser(link);
+  }
 
   function finishTimer(){
     if(completed||paused)return;
     completed=true;
     cleanupAdWatchers();
     tm.style.color='#059669';
-    tm.innerText='0';
+    tm.innerText=sec+' / '+sec;
+    hdrBadge.innerText='✅ '+sec+'/'+sec+'s';
+    hdrBadge.style.background='linear-gradient(90deg,#10b981,#059669)';
+    progFill.style.width='100%';
     st.style.color='#059669';
-    st.innerText='✅ অ্যাড ভেরিফিকেশন সম্পন্ন হয়েছে! নিচের বাটনে ক্লিক করুন।';
+    st.innerText='✅ সময় সম্পন্ন! ফাইল পেতে নিচের Continue বাটনে ক্লিক করুন।';
+    reopenBtn.style.display='none';
     retryBtn.style.display='none';
     btn.style.display='block';
+    startContinueAlertLoop();
     btn.onclick=async()=>{
+      stopContinueAlertLoop();
       btn.disabled=true;
       const tokRes=await tokenPromise;
       if(tokRes&&tokRes.token)curAdToken=tokRes.token;
@@ -5549,12 +5568,17 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     if(paused||completed)return;
     paused=true;
     cleanupAdWatchers();
+    stopContinueAlertLoop();
     curAdToken=null;
-    const rem=Math.max(1,Math.ceil(sec-((Date.now()-startTs)/1000)));
+    const elapsed=(Date.now()-startTs)/1000;
+    const doneSec=Math.min(sec,Math.max(1,Math.floor(elapsed)+1));
     tm.style.color='#f59e0b';
-    tm.innerText=rem+'s ⏸️';
+    tm.innerText=doneSec+' / '+sec+' ⏸️';
+    hdrBadge.innerText='⏸️ '+doneSec+'/'+sec+'s';
+    hdrBadge.style.background='linear-gradient(90deg,#f59e0b,#dc2626)';
     st.style.color='#dc2626';
-    st.innerText=msg||'⏸️ অ্যাডের সময় শেষ হওয়ার আগেই ফিরে এসেছেন! টাইমার পজ হয়েছে। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
+    st.innerText=msg||'⏸️ সময় শেষ হওয়ার আগেই ফিরে এসেছেন! টাইমার পজ হয়েছে। নিচের বাটনে ক্লিক করে পুনরায় অ্যাড দেখুন।';
+    reopenBtn.style.display='none';
     btn.style.display='none';
     retryBtn.style.display='block';
     retryBtn.onclick=()=>{
@@ -5562,56 +5586,15 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     };
   }
 
-  function handleEarlyBack(){
-    if(paused||completed)return;
-    const el=(Date.now()-startTs)/1000;
-    if(el<sec-0.5){
-      if(adConfig.strict_ad){
-        pauseEarly();
-      } else {
-        closeInAppAdBrowser();
-      }
-    } else {
-      finishTimer();
-    }
-  }
-
   function checkReturnNow(){
     if(!leftPage||paused||completed||document.hidden)return;
-    if(tg && tg.isActive===false)return;
-    if((Date.now()-leftAt)<120)return;
+    if(tg&&tg.isActive===false)return;
+    if((Date.now()-leftAt)<250)return;
     const el=(Date.now()-startTs)/1000;
     if(el<sec-0.5){
       pauseEarly();
     } else {
       finishTimer();
-    }
-  }
-
-  if(link){
-    inappBadge.innerText='⏳ '+sec+'s';
-    inappBadge.style.background='linear-gradient(90deg,#f59e0b,#ef4444)';
-    inappLoader.style.display='flex';
-    inappFrame.onload=()=>{inappLoader.style.display='none';};
-    const ldTimer=setTimeout(()=>{inappLoader.style.display='none';},2000);
-    inappFrame.src=link;
-    inappOv.style.display='flex';
-    inappBack.onclick=handleEarlyBack;
-    activeAdCleanupList.push(()=>{clearTimeout(ldTimer);inappBack.onclick=null;});
-
-    if(tg?.BackButton){
-      try{
-        tg.BackButton.show();
-        tg.BackButton.onClick(handleEarlyBack);
-        activeAdCleanupList.push(()=>{try{tg.BackButton.offClick(handleEarlyBack);tg.BackButton.hide();}catch(e){}});
-      }catch(e){}
-    } else {
-      try{
-        history.pushState({inappAd:1},'');
-        const onPop=()=>{handleEarlyBack();};
-        window.addEventListener('popstate',onPop);
-        activeAdCleanupList.push(()=>window.removeEventListener('popstate',onPop));
-      }catch(e){}
     }
   }
 
@@ -5622,10 +5605,14 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
     const onVis=()=>{if(document.hidden)markLeft();else checkReturnNow();};
 
     document.addEventListener('visibilitychange',onVis);
+    window.addEventListener('blur',markLeft);
+    window.addEventListener('focus',checkReturnNow);
     window.addEventListener('pagehide',markLeft);
     window.addEventListener('pageshow',checkReturnNow);
     activeAdCleanupList.push(
       ()=>document.removeEventListener('visibilitychange',onVis),
+      ()=>window.removeEventListener('blur',markLeft),
+      ()=>window.removeEventListener('focus',checkReturnNow),
       ()=>window.removeEventListener('pagehide',markLeft),
       ()=>window.removeEventListener('pageshow',checkReturnNow)
     );
@@ -5651,9 +5638,11 @@ function runAdTimer(link,sec,onDone,onCancel,adMeta){
       }
     }
     const el=(Date.now()-startTs)/1000;
-    const rem=Math.max(0,Math.ceil(sec-el));
-    tm.innerText=rem;
-    if(link)inappBadge.innerText=rem>0?('⏳ '+rem+'s'):'✅ 0s';
+    const curCount=Math.min(sec,Math.max(1,Math.floor(el)+1));
+    const pct=Math.min(100,Math.max(0,(el/sec)*100));
+    tm.innerText=curCount+' / '+sec;
+    hdrBadge.innerText='⏳ '+curCount+'/'+sec+'s';
+    progFill.style.width=pct+'%';
     if(el>=sec){
       finishTimer();
     }
