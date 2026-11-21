@@ -4579,14 +4579,14 @@ button:active,.cat-pill:active,.lang-pill:active,.nav-i:active,.watch-pill:activ
 .pkg-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:12px}
 .pkg-tab{border:1px solid #e2e8f0;background:#f8fafc;color:#475569;padding:9px 4px;border-radius:12px;font-size:12px;font-weight:700;cursor:pointer;text-align:center;white-space:nowrap}
 .pkg-tab.active{background:linear-gradient(90deg,#6c5ce7,#4f46e5,#ec4899);background-size:200% 200%;animation:gradFlow 3s ease infinite,neonBtnGlow 3s infinite;color:#fff;border-color:transparent}
-.inapp-ad-ov{display:none;position:fixed;inset:0;z-index:10050;background:#0f172a;flex-direction:column}
-.inapp-ad-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:#1e293b;color:#fff;border-bottom:1px solid rgba(255,255,255,.12);flex-shrink:0}
-.inapp-back-btn{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.22);padding:6px 12px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer}
+.ad-browser-card{padding:0!important;overflow:hidden!important}
+.inapp-ad-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 13px;background:linear-gradient(90deg,#0f172a,#1e293b);color:#fff;border-bottom:1px solid rgba(255,255,255,.12)}
+.inapp-back-btn{background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.22);padding:6px 11px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer}
 .inapp-ad-ttl{font-size:13px;font-weight:700;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .inapp-ad-badge{background:linear-gradient(90deg,#f59e0b,#ef4444);color:#fff;padding:5px 11px;border-radius:14px;font-size:12px;font-weight:800;white-space:nowrap}
-.inapp-ad-body{position:relative;flex:1;width:100%;height:100%;background:#fff;overflow:hidden}
-.inapp-ad-loader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#cbd5e1;font-size:13.5px;font-weight:600;z-index:2;pointer-events:none}
-.inapp-ad-frame{width:100%;height:100%;border:none;display:block;background:#fff}
+.ad-browser-body{padding:18px 18px 20px 18px}
+.ad-prog-wrap{width:100%;height:7px;background:#e2e8f0;border-radius:10px;overflow:hidden;margin:10px 0 14px 0}
+.ad-prog-fill{height:100%;width:0%;background:linear-gradient(90deg,#4f46e5,#ec4899,#10b981);border-radius:10px;transition:width .2s linear}
 </style>
 </head>
 <body>
