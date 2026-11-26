@@ -2,6 +2,7 @@ import os, sys, re, asyncio, threading, random, string, time, requests, json, ba
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 from datetime import datetime, timedelta
+from requests.adapters import HTTPAdapter
 try:
     from PIL import Image, ImageDraw, ImageFont
     HAS_PIL = True
@@ -78,6 +79,12 @@ POSTER_CACHE = {}
 BRANDED_POSTER_CACHE = {}
 BRANDED_COVER_ID_CACHE = {}
 EXTRA_URI_CACHE = {"uris": None, "ts": 0}
+ASYNC_URI_CACHE = {"uris": None, "ts": 0}
+CONFIG_CACHE = {"data": None, "ts": 0}
+MUST_JOIN_CACHE = {"data": None, "ts": 0}
+SYNC_AD_META_CACHE = {"data": None, "ts": 0}
+FILE_DOC_CACHE = {}
+JOINED_USER_CACHE = {}
 HOME_DATA_CACHE = {"data": None, "ts": 0, "ver": 0}
 SHELL_DATA_CACHE = {"data": None, "ts": 0, "ver": 0}
 AD_TOKENS = {}
@@ -85,10 +92,20 @@ AD_TOKENS_LOCK = threading.Lock()
 WEB_POOL = ThreadPoolExecutor(max_workers=10)
 TUTORIAL_DL_LOCK = threading.Lock()
 HOME_CACHE_LOCK = threading.Lock()
-TG_HTTP = requests.Session()
+_TG_HTTP_LOCAL = threading.local()
 NON_VIDEO_FILE_IDS = set()
 FILE_DB_IDX_CACHE = {}
 bg_task_ref = None
+
+def get_tg_http():
+    sess = getattr(_TG_HTTP_LOCAL, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        _TG_HTTP_LOCAL.session = sess
+    return sess
 
 def get_db_cache_ver():
     try:
@@ -105,10 +122,20 @@ def invalidate_home_cache():
     SHELL_DATA_CACHE["data"] = None
     SHELL_DATA_CACHE["ts"] = 0
     SHELL_DATA_CACHE["ver"] = 0
+    CONFIG_CACHE["data"] = None
+    CONFIG_CACHE["ts"] = 0
+    SYNC_AD_META_CACHE["data"] = None
+    SYNC_AD_META_CACHE["ts"] = 0
+    FILE_DOC_CACHE.clear()
     try:
         sync_db["config"].update_one({"_id": "settings"}, {"$set": {"cache_ver": now}}, upsert=True)
     except:
         pass
+
+def invalidate_channel_cache():
+    MUST_JOIN_CACHE["data"] = None
+    MUST_JOIN_CACHE["ts"] = 0
+    JOINED_USER_CACHE.clear()
 
 def poster_cache_put(pid, raw_bytes, mime="image/jpeg", ver=""):
     if not pid or not raw_bytes: return
@@ -185,7 +212,10 @@ async def get_db():
         posters_col, short_links_col, tutorials_col = db["posters"], db["short_links"], db["tutorials"]
     return db
 
-async def get_config():
+async def get_config(use_cache=True):
+    now = time.time()
+    if use_cache and CONFIG_CACHE["data"] is not None and (now - CONFIG_CACHE["ts"]) < 12:
+        return CONFIG_CACHE["data"]
     await get_db()
     conf = await config_col.find_one({"_id": "settings"})
     if not conf:
@@ -205,7 +235,31 @@ async def get_config():
             "marquee_text": "VLC Player অথবা MX Player দিয়ে চালিয়ে দেখুন। ✅ সাউন্ড/অডিও সমস্যা হলে ভিডিওটি ডাউনলোড করে দেখুন।"
         }
         await config_col.insert_one(conf)
+    CONFIG_CACHE["data"] = conf
+    CONFIG_CACHE["ts"] = now
     return conf
+
+async def get_must_join_channels():
+    now = time.time()
+    if MUST_JOIN_CACHE["data"] is not None and (now - MUST_JOIN_CACHE["ts"]) < 30:
+        return MUST_JOIN_CACHE["data"]
+    await get_db()
+    chs = await channels_col.find({"type": "must_join"}).to_list(100)
+    MUST_JOIN_CACHE["data"] = chs
+    MUST_JOIN_CACHE["ts"] = now
+    return chs
+
+def get_sync_ad_meta():
+    now = time.time()
+    if SYNC_AD_META_CACHE["data"] is not None and (now - SYNC_AD_META_CACHE["ts"]) < 15:
+        return SYNC_AD_META_CACHE["data"]
+    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+    meta = {"conf": conf, "zones": zones, "links": links}
+    SYNC_AD_META_CACHE["data"] = meta
+    SYNC_AD_META_CACHE["ts"] = now
+    return meta
 
 async def delete_msg_later(client, chat_id, msg_id, delay):
     await asyncio.sleep(delay)
@@ -233,7 +287,7 @@ def send_tg_api_fallback(chat_id, text):
             asyncio.run_coroutine_threadsafe(app.send_message(chat_id, text), loop); return
     except: pass
     if BOT_TOKEN:
-        try: requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=5)
+        try: get_tg_http().post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}, timeout=5)
         except: pass
 
 def send_tg_tutorial_sync(chat_id, vid, title="Tutorial Video"):
@@ -250,10 +304,11 @@ def send_tg_tutorial_sync(chat_id, vid, title="Tutorial Video"):
     except: pass
     if BOT_TOKEN:
         try:
+            sess = get_tg_http()
             if str(vid).startswith("http"):
-                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"{cap}\n{vid}"}, timeout=8).json()
+                r = sess.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"{cap}\n{vid}"}, timeout=8).json()
             else:
-                r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json={"chat_id": chat_id, "video": vid, "caption": cap}, timeout=10).json()
+                r = sess.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json={"chat_id": chat_id, "video": vid, "caption": cap}, timeout=10).json()
             return bool(r.get("ok"))
         except: pass
     return False
@@ -266,11 +321,15 @@ def keep_alive():
 async_mongo_clients, sync_mongo_clients = {}, {}
 
 async def get_extra_dbs_async():
-    await get_db(); dbs = [db]
-    async for m in mongos_col.find():
-        uri = m["uri"]
+    await get_db()
+    dbs = [db]
+    now = time.time()
+    if ASYNC_URI_CACHE["uris"] is None or (now - ASYNC_URI_CACHE["ts"]) > 60:
+        ASYNC_URI_CACHE["uris"] = [m["uri"] for m in await mongos_col.find().to_list(None)]
+        ASYNC_URI_CACHE["ts"] = now
+    for uri in ASYNC_URI_CACHE["uris"]:
         if uri not in async_mongo_clients:
-            try: async_mongo_clients[uri] = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=3000)["NewBot"]
+            try: async_mongo_clients[uri] = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=2500)["NewBot"]
             except: continue
         dbs.append(async_mongo_clients[uri])
     return dbs
@@ -284,15 +343,20 @@ def get_extra_dbs_sync():
             EXTRA_URI_CACHE["ts"] = now
         for uri in EXTRA_URI_CACHE["uris"]:
             if uri not in sync_mongo_clients:
-                try: sync_mongo_clients[uri] = MongoClient(uri, serverSelectionTimeoutMS=3000)["NewBot"]
+                try: sync_mongo_clients[uri] = MongoClient(uri, serverSelectionTimeoutMS=2500)["NewBot"]
                 except: continue
             dbs.append(sync_mongo_clients[uri])
     except: pass
     return dbs
 
-async def find_file_in_all_dbs(f_id):
+async def find_file_in_all_dbs(f_id, use_cache=True):
     dbs = await get_extra_dbs_async()
     key = str(f_id)
+
+    if use_cache and key in FILE_DOC_CACHE:
+        doc, idx = FILE_DOC_CACHE[key]
+        if 0 <= idx < len(dbs):
+            return doc, dbs[idx]
 
     async def _find_in(d):
         try:
@@ -311,6 +375,9 @@ async def find_file_in_all_dbs(f_id):
     if cached_idx is not None and 0 <= cached_idx < len(dbs):
         doc, d = await _find_in(dbs[cached_idx])
         if doc is not None:
+            if len(FILE_DOC_CACHE) >= 3000:
+                FILE_DOC_CACHE.clear()
+            FILE_DOC_CACHE[key] = (doc, cached_idx)
             return doc, d
 
     results = await asyncio.gather(*[_find_in(d) for d in dbs])
@@ -318,7 +385,10 @@ async def find_file_in_all_dbs(f_id):
         if doc is not None:
             if len(FILE_DB_IDX_CACHE) >= 3000:
                 FILE_DB_IDX_CACHE.clear()
+            if len(FILE_DOC_CACHE) >= 3000:
+                FILE_DOC_CACHE.clear()
             FILE_DB_IDX_CACHE[key] = idx
+            FILE_DOC_CACHE[key] = (doc, idx)
             return doc, d
     return None, None
 
@@ -330,11 +400,12 @@ async def get_all_files_across_dbs(query_filter=None):
     return all_files
 
 def _bot_api_download_sync(file_id):
-    gf = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": file_id}, timeout=10).json()
+    sess = get_tg_http()
+    gf = sess.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": file_id}, timeout=10).json()
     if not gf.get("ok") or not gf.get("result", {}).get("file_path"):
         return None
     fpath = gf["result"]["file_path"]
-    r = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fpath}", timeout=15)
+    r = sess.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fpath}", timeout=15)
     if r.status_code == 200 and r.content:
         return r.content
     return None
@@ -498,15 +569,36 @@ def _load_brand_font(size):
     try: return ImageFont.load_default(size=size)
     except: return ImageFont.load_default()
 
+def _compress_cover_bytes_sync(raw_bytes, mime="image/jpeg"):
+    if not raw_bytes or not HAS_PIL:
+        return raw_bytes, mime
+    try:
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        w, h = img.size
+        if w > 1280:
+            nh = max(1, int(h * (1280.0 / w)))
+            img = img.resize((1280, nh), getattr(Image, "Resampling", Image).LANCZOS)
+        elif len(raw_bytes) <= 180 * 1024 and mime == "image/jpeg":
+            return raw_bytes, mime
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=82, optimize=True)
+        return buf.getvalue(), "image/jpeg"
+    except:
+        return raw_bytes, mime
+
 def apply_brand_watermark_sync(raw_bytes, mime, brand_name):
     text = (brand_name or "").strip()
     if not raw_bytes or not text or not HAS_PIL:
-        return raw_bytes, mime
+        return _compress_cover_bytes_sync(raw_bytes, mime)
     try:
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
         w, h = img.size
         if w < 60 or h < 40:
             return raw_bytes, mime
+        if w > 1280:
+            nh = max(1, int(h * (1280.0 / w)))
+            img = img.resize((1280, nh), getattr(Image, "Resampling", Image).LANCZOS)
+            w, h = img.size
 
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
         od = ImageDraw.Draw(overlay)
@@ -554,7 +646,7 @@ def apply_brand_watermark_sync(raw_bytes, mime, brand_name):
 
         out = Image.alpha_composite(img, overlay).convert("RGB")
         buf = io.BytesIO()
-        out.save(buf, format="JPEG", quality=90)
+        out.save(buf, format="JPEG", quality=82, optimize=True)
         return buf.getvalue(), "image/jpeg"
     except:
         return raw_bytes, mime
@@ -587,7 +679,7 @@ def get_poster_bytes_sync(file_doc):
             return raw, mime
     if thumb.startswith("http") and "/poster/" not in thumb:
         try:
-            r = requests.get(thumb, timeout=8)
+            r = get_tg_http().get(thumb, timeout=6)
             ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
             if r.status_code == 200 and r.content and ct.startswith("image/"):
                 return r.content, ("image/jpeg" if ct == "image/jpg" else ct)
@@ -600,13 +692,43 @@ def get_poster_bytes_sync(file_doc):
         except: pass
     return None, "image/jpeg"
 
+def _persist_branded_cover_sync(fid, brand_hash, cov_id):
+    try:
+        for d in get_extra_dbs_sync():
+            res = d["files"].update_one({"_id": fid}, {"$set": {f"branded_covers.{brand_hash}": cov_id}})
+            if res.matched_count > 0:
+                break
+        if str(fid) in FILE_DOC_CACHE:
+            FILE_DOC_CACHE[str(fid)][0].setdefault("branded_covers", {})[brand_hash] = cov_id
+    except:
+        pass
+
+def _persist_non_video_sync(fid, f_id_send):
+    try:
+        for d in get_extra_dbs_sync():
+            res = d["files"].update_one({"_id": fid}, {"$addToSet": {"non_video_fids": f_id_send}})
+            if res.matched_count > 0:
+                break
+        if str(fid) in FILE_DOC_CACHE:
+            nv = FILE_DOC_CACHE[str(fid)][0].setdefault("non_video_fids", [])
+            if f_id_send not in nv:
+                nv.append(f_id_send)
+    except:
+        pass
+
 def send_video_with_cover_sync(uid, f_id_send, cap_html, protect, file_doc, brand_name=""):
     if not BOT_TOKEN or not file_doc or f_id_send in NON_VIDEO_FILE_IDS:
         return None
+    if f_id_send in (file_doc.get("non_video_fids") or []):
+        NON_VIDEO_FILE_IDS.add(f_id_send)
+        return None
+
     brand = (brand_name or "").strip()
     fid = str(file_doc.get("_id") or "")
     thumb_ver = str(file_doc.get("thumb_url") or file_doc.get("tg_thumb_id") or "")
     cache_key = (fid, brand, thumb_ver)
+    brand_hash = hashlib.md5(f"{brand}|{thumb_ver}".encode()).hexdigest()[:12]
+    sess = get_tg_http()
 
     def _post_json_cover(cover_id):
         payload = {
@@ -618,13 +740,14 @@ def send_video_with_cover_sync(uid, f_id_send, cap_html, protect, file_doc, bran
             "supports_streaming": True,
             "protect_content": bool(protect)
         }
-        r = TG_HTTP.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=12).json()
+        r = sess.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", json=payload, timeout=10).json()
         if r.get("ok") and r.get("result", {}).get("message_id"):
             return r["result"]["message_id"], False
         desc = str(r.get("description", "")).lower()
         if r.get("error_code") == 400 and any(k in desc for k in ("document", "audio", "wrong", "type", "video")):
             if "cover" not in desc:
                 NON_VIDEO_FILE_IDS.add(f_id_send)
+                WEB_POOL.submit(_persist_non_video_sync, file_doc.get("_id"), f_id_send)
                 return None, True
         return None, False
 
@@ -640,26 +763,31 @@ def send_video_with_cover_sync(uid, f_id_send, cap_html, protect, file_doc, bran
             "protect_content": "true" if protect else "false"
         }
         files = {"cover": (f"cover.{ext}", raw_b, mime_t)}
-        r = TG_HTTP.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=15).json()
+        r = sess.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=data, files=files, timeout=12).json()
         if r.get("ok") and r.get("result", {}).get("message_id"):
             covers = r.get("result", {}).get("video", {}).get("cover")
             if isinstance(covers, list) and covers and covers[-1].get("file_id"):
+                cov_id = covers[-1]["file_id"]
                 if len(BRANDED_COVER_ID_CACHE) >= 500:
                     try: BRANDED_COVER_ID_CACHE.pop(next(iter(BRANDED_COVER_ID_CACHE)))
                     except: BRANDED_COVER_ID_CACHE.clear()
-                BRANDED_COVER_ID_CACHE[cache_key] = covers[-1]["file_id"]
+                BRANDED_COVER_ID_CACHE[cache_key] = cov_id
+                WEB_POOL.submit(_persist_branded_cover_sync, file_doc.get("_id"), brand_hash, cov_id)
             return r["result"]["message_id"]
         desc = str(r.get("description", "")).lower()
         if r.get("error_code") == 400 and any(k in desc for k in ("document", "audio", "wrong", "type", "video")):
             if "cover" not in desc:
                 NON_VIDEO_FILE_IDS.add(f_id_send)
+                WEB_POOL.submit(_persist_non_video_sync, file_doc.get("_id"), f_id_send)
         return None
 
-    cached_cov = BRANDED_COVER_ID_CACHE.get(cache_key)
+    cached_cov = BRANDED_COVER_ID_CACHE.get(cache_key) or (file_doc.get("branded_covers") or {}).get(brand_hash)
     if cached_cov:
         try:
             mid, is_non_vid = _post_json_cover(cached_cov)
             if mid or is_non_vid:
+                if mid:
+                    BRANDED_COVER_ID_CACHE[cache_key] = cached_cov
                 return mid
             BRANDED_COVER_ID_CACHE.pop(cache_key, None)
         except:
@@ -694,10 +822,32 @@ def send_video_with_cover_sync(uid, f_id_send, cap_html, protect, file_doc, bran
 
     raw_bytes, mime = get_poster_bytes_sync(file_doc)
     if raw_bytes:
+        c_raw, c_mime = _compress_cover_bytes_sync(raw_bytes, mime)
         try:
-            return _post_multipart_cover(raw_bytes, mime)
+            return _post_multipart_cover(c_raw, c_mime)
         except:
             pass
+    return None
+
+def send_document_fast_sync(uid, f_id_send, cap_html, protect):
+    if not BOT_TOKEN:
+        return None
+    try:
+        r = get_tg_http().post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+            json={
+                "chat_id": uid,
+                "document": f_id_send,
+                "caption": cap_html,
+                "parse_mode": "HTML",
+                "protect_content": bool(protect)
+            },
+            timeout=10
+        ).json()
+        if r.get("ok") and r.get("result", {}).get("message_id"):
+            return r["result"]["message_id"]
+    except:
+        pass
     return None
 
 def get_tg_photo(thumb, tg_thumb_id=None, brand_name=""):
@@ -1029,6 +1179,76 @@ def get_quality_lang_markup(prefix, skip_cb, finish_label="⏭ Skip / Finish", b
 def is_in_step(step_name):
     return filters.create(lambda _, __, m: admin_steps.get(m.from_user.id, {}).get("step") == step_name)
 
+async def send_initial_loading_msg(client, uid):
+    try:
+        try:
+            await client.send_chat_action(uid, enums.ChatAction.UPLOAD_VIDEO)
+        except:
+            pass
+        return await client.send_message(
+            uid,
+            "⏳ **লাইভ লোডিং হচ্ছে... `10s`**\n"
+            "`[▓░░░░░░░░░] 10%`\n"
+            "🚀 অনুগ্রহ করে অপেক্ষা করুন, ফাইল পাঠানো হচ্ছে..."
+        )
+    except:
+        return None
+
+async def _live_loading_countdown(client, uid, load_msg, done_event):
+    if not load_msg:
+        return
+    spins = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    bars = [
+        "▓░░░░░░░░░", "▓▓░░░░░░░░", "▓▓▓░░░░░░░", "▓▓▓▓░░░░░░", "▓▓▓▓▓░░░░░",
+        "▓▓▓▓▓▓░░░░", "▓▓▓▓▓▓▓░░░", "▓▓▓▓▓▓▓▓░░", "▓▓▓▓▓▓▓▓▓░", "▓▓▓▓▓▓▓▓▓▓"
+    ]
+    try:
+        for sec in range(9, 0, -1):
+            try:
+                await asyncio.wait_for(done_event.wait(), timeout=1.0)
+                return
+            except asyncio.TimeoutError:
+                pass
+            if done_event.is_set():
+                return
+            step = 10 - sec
+            pct = min(100, (step + 1) * 10)
+            bar = bars[min(step, 9)]
+            sp = spins[step % len(spins)]
+            if sec % 3 == 0:
+                try: await client.send_chat_action(uid, enums.ChatAction.UPLOAD_VIDEO)
+                except: pass
+            try:
+                await load_msg.edit_text(
+                    f"{sp} **লাইভ লোডিং হচ্ছে... `{sec}s`**\n"
+                    f"`[{bar}] {pct}%`\n"
+                    f"🚀 অনুগ্রহ করে অপেক্ষা করুন, ফাইল পাঠানো হচ্ছে..."
+                )
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value)
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        return
+
+async def _finish_loading_msg(client, uid, load_msg, countdown_task, done_event, ok=True, err_txt="❌ ফাইল পাওয়া যায়নি!"):
+    done_event.set()
+    if countdown_task and not countdown_task.done():
+        countdown_task.cancel()
+        try: await countdown_task
+        except asyncio.CancelledError: pass
+        except: pass
+    if not load_msg:
+        return
+    try:
+        if ok:
+            await load_msg.edit_text("✅ **ফাইল পাঠানো হয়েছে!** `[▓▓▓▓▓▓▓▓▓▓] 100%`")
+            asyncio.create_task(delete_msg_later(client, uid, load_msg.id, 2))
+        else:
+            await load_msg.edit_text(err_txt)
+    except:
+        pass
+
 async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=None):
     try:
         dt = config.get("auto_del_time", 0)
@@ -1045,9 +1265,17 @@ async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=No
                 cap_html += f"\n⚠️ {html.escape(str(warn_txt))}"
 
         sent_msg_id = None
-        if file_doc and BOT_TOKEN and f_id_send not in NON_VIDEO_FILE_IDS:
+        is_non_vid = (f_id_send in NON_VIDEO_FILE_IDS) or (file_doc and f_id_send in (file_doc.get("non_video_fids") or []))
+
+        if file_doc and BOT_TOKEN and not is_non_vid:
             sent_msg_id = await asyncio.to_thread(
                 send_video_with_cover_sync, uid, f_id_send, cap_html, config.get("frotect", False), file_doc, config.get("brand_name", "")
+            )
+            is_non_vid = (f_id_send in NON_VIDEO_FILE_IDS)
+
+        if not sent_msg_id and is_non_vid and BOT_TOKEN:
+            sent_msg_id = await asyncio.to_thread(
+                send_document_fast_sync, uid, f_id_send, cap_html, config.get("frotect", False)
             )
 
         if not sent_msg_id:
@@ -1061,8 +1289,10 @@ async def deliver_cached_file(client, uid, f_id_send, title, config, file_doc=No
 
         if dt > 0 and sent_msg_id:
             asyncio.create_task(delete_msg_later(client, uid, sent_msg_id, dt))
+        return True
     except Exception as e:
         await client.send_message(uid, f"❌ ফাইল পাঠাতে সমস্যা হয়েছে! {e}")
+        return False
 
 # ==========================================
 # 5. BOT COMMANDS (START + STATS + SIMPLE CONFIG + STRICT AD + BLUR + BRAND + TUTORIALS)
@@ -1467,22 +1697,33 @@ async def getut_cb(c, q):
     else:
         await c.send_video(q.from_user.id, video=t["video_id"], caption=cap)
 
+async def _register_new_user_bg(client, uid, first_name, ref_by, config):
+    try:
+        new_u = {
+            "_id": uid, "name": first_name, "balance": 0, "pending_file": None,
+            "premium_until": None, "history": [], "favorites": [], "unlocked_files": {},
+            "spin_count": 0, "task_count": 0, "last_activity_date": None,
+            "custom_tasks_done": [], "daily_viewed": {}
+        }
+        res = await users_col.update_one({"_id": uid}, {"$setOnInsert": new_u}, upsert=True)
+        if res.upserted_id is not None and ref_by and ref_by != uid and config.get("ref_on", True):
+            await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
+            try: await client.send_message(ref_by, f"🎉 রেফার বোনাস! +{config.get('ref_coin', 10)} Coins")
+            except: pass
+    except:
+        pass
+
 @app.on_message(filters.command("start", case_sensitive=False) & filters.private & unique_msg)
 async def start_cmd(client, message):
     try:
         await get_db()
         uid = message.from_user.id
         args = message.text.split()
-        config, user, must_join_chs = await asyncio.gather(
-            get_config(),
-            users_col.find_one({"_id": uid}),
-            channels_col.find({"type": "must_join"}).to_list(100)
-        )
-        live_url = get_live_web_url(config)
         ref_by, pf = None, None
         if len(args) > 1:
             v = args[1]
             if v.startswith("tut_"):
+                config = await get_config()
                 tid = v[4:]
                 if tid == "default":
                     vid = config.get("tutorial_vid")
@@ -1505,17 +1746,42 @@ async def start_cmd(client, message):
                 try: p = v.replace("ref", "").split("file"); ref_by, pf = int(p[0]), "file_" + p[1]
                 except: pass
 
+        pre_fd, pre_tdb = None, None
+        load_msg = None
+
+        if pf:
+            base_fid = extract_base_file_id(pf)
+            config, user, must_join_chs, file_res, load_msg = await asyncio.gather(
+                get_config(),
+                users_col.find_one({"_id": uid}, {"pending_file": 1}),
+                get_must_join_channels(),
+                find_file_in_all_dbs(base_fid),
+                send_initial_loading_msg(client, uid)
+            )
+            pre_fd, pre_tdb = file_res
+        else:
+            config, user, must_join_chs = await asyncio.gather(
+                get_config(),
+                users_col.find_one({"_id": uid}, {"pending_file": 1}),
+                get_must_join_channels()
+            )
+
+        live_url = get_live_web_url(config)
+
         if not user:
-            user = {"_id": uid, "name": message.from_user.first_name, "balance": 0, "pending_file": None, "premium_until": None, "history": [], "favorites": [], "unlocked_files": {}, "spin_count": 0, "task_count": 0, "last_activity_date": None, "custom_tasks_done": [], "daily_viewed": {}}
-            await users_col.insert_one(user)
-            if ref_by and ref_by != uid and config.get("ref_on", True):
-                await users_col.update_one({"_id": ref_by}, {"$inc": {"balance": config.get("ref_coin", 10)}})
-                try: await client.send_message(ref_by, f"🎉 রেফার বোনাস! +{config.get('ref_coin', 10)} Coins")
-                except: pass
+            user = {"_id": uid, "pending_file": None}
+            asyncio.create_task(_register_new_user_bg(client, uid, message.from_user.first_name, ref_by, config))
 
         async def _chk_ch(ch):
+            now_t = time.time()
+            ck = (uid, ch["chat_id"])
+            if (now_t - JOINED_USER_CACHE.get(ck, 0)) < 30:
+                return None
             try:
                 await client.get_chat_member(ch["chat_id"], uid)
+                if len(JOINED_USER_CACHE) > 5000:
+                    JOINED_USER_CACHE.clear()
+                JOINED_USER_CACHE[ck] = now_t
                 return None
             except UserNotParticipant:
                 return ch["link"]
@@ -1529,44 +1795,60 @@ async def start_cmd(client, message):
 
         if not_joined:
             if pf:
-                await users_col.update_one({"_id": uid}, {"$set": {"pending_file": pf}})
+                await users_col.update_one({"_id": uid}, {"$set": {"pending_file": pf}}, upsert=True)
             btns = [[InlineKeyboardButton("📢 Join Channel", url=l)] for l in not_joined] + [[InlineKeyboardButton("✅ Joined", callback_data="check_join")]]
+            if load_msg:
+                try:
+                    return await load_msg.edit_text("❌ আগে আমাদের চ্যানেলগুলোতে জয়েন করুন:", reply_markup=InlineKeyboardMarkup(btns))
+                except: pass
             return await message.reply("❌ আগে আমাদের চ্যানেলগুলোতে জয়েন করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
         pf_val = pf or user.get("pending_file")
         if pf_val:
             if user.get("pending_file"):
                 asyncio.create_task(users_col.update_one({"_id": uid}, {"$set": {"pending_file": None}}))
-            if pf_val.startswith("mfile_"):
-                _, f_id, q_idx = pf_val.split("_")
-                fd, tdb = await find_file_in_all_dbs(f_id)
-                if fd is not None and tdb is not None:
-                    asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
-                    qs = fd.get("qualities", []); qi = int(q_idx)
-                    if 0 <= qi < len(qs):
-                        ql = f" • {qs[qi]['lang']}" if qs[qi].get("lang") else ""
-                        return await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}{ql}]", config, file_doc=fd)
-                    elif fd.get("file_id"): return await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config, file_doc=fd)
-                return await message.reply("❌ ফাইল পাওয়া যায়নি!")
-            elif pf_val.startswith("sfile_"):
-                _, f_id, si, ei, qi = pf_val.split("_")
-                fd, tdb = await find_file_in_all_dbs(f_id)
-                if fd is not None and tdb is not None:
-                    asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
-                    try:
-                        ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
-                        ql = f" • {qo['lang']}" if qo.get("lang") else ""
-                        return await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}{ql}]", config, file_doc=fd)
-                    except: pass
-                return await message.reply("❌ এপিসোড ফাইল পাওয়া যায়নি!")
-            else:
-                f_id = pf_val.replace("file_", "")
-                fd, tdb = await find_file_in_all_dbs(f_id)
-                if fd is not None and tdb is not None:
-                    asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
-                    fs = fd.get("file_id") or (fd["qualities"][0]["file_id"] if fd.get("qualities") else None)
-                    if fs: return await deliver_cached_file(client, uid, fs, fd["title"], config, file_doc=fd)
-                return await message.reply("❌ ফাইল পাওয়া যায়নি!")
+            if not load_msg:
+                load_msg = await send_initial_loading_msg(client, uid)
+            done_event = asyncio.Event()
+            countdown_task = asyncio.create_task(_live_loading_countdown(client, uid, load_msg, done_event))
+            delivered = False
+            err_msg = "❌ ফাইল পাওয়া যায়নি!"
+            try:
+                if pf_val.startswith("mfile_"):
+                    _, f_id, q_idx = pf_val.split("_")
+                    fd, tdb = (pre_fd, pre_tdb) if (pf == pf_val and pre_fd is not None) else await find_file_in_all_dbs(f_id)
+                    if fd is not None and tdb is not None:
+                        asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
+                        qs = fd.get("qualities", []); qi = int(q_idx)
+                        if 0 <= qi < len(qs):
+                            ql = f" • {qs[qi]['lang']}" if qs[qi].get("lang") else ""
+                            delivered = await deliver_cached_file(client, uid, qs[qi]["file_id"], f"{fd['title']} [{qs[qi]['name']}{ql}]", config, file_doc=fd)
+                        elif fd.get("file_id"):
+                            delivered = await deliver_cached_file(client, uid, fd["file_id"], fd["title"], config, file_doc=fd)
+                elif pf_val.startswith("sfile_"):
+                    _, f_id, si, ei, qi = pf_val.split("_")
+                    fd, tdb = (pre_fd, pre_tdb) if (pf == pf_val and pre_fd is not None) else await find_file_in_all_dbs(f_id)
+                    if fd is not None and tdb is not None:
+                        asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
+                        try:
+                            ssn = fd["seasons"][int(si)]; ep = ssn["episodes"][int(ei)]; qo = ep["qualities"][int(qi)]
+                            ql = f" • {qo['lang']}" if qo.get("lang") else ""
+                            delivered = await deliver_cached_file(client, uid, qo["file_id"], f"{fd['title']} - S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])} [{qo['name']}{ql}]", config, file_doc=fd)
+                        except:
+                            err_msg = "❌ এপিসোড ফাইল পাওয়া যায়নি!"
+                    else:
+                        err_msg = "❌ এপিসোড ফাইল পাওয়া যায়নি!"
+                else:
+                    f_id = pf_val.replace("file_", "")
+                    fd, tdb = (pre_fd, pre_tdb) if (pf == pf_val and pre_fd is not None) else await find_file_in_all_dbs(f_id)
+                    if fd is not None and tdb is not None:
+                        asyncio.create_task(record_daily_unique_view(tdb, f_id, uid))
+                        fs = fd.get("file_id") or (fd["qualities"][0]["file_id"] if fd.get("qualities") else None)
+                        if fs:
+                            delivered = await deliver_cached_file(client, uid, fs, fd["title"], config, file_doc=fd)
+            finally:
+                await _finish_loading_msg(client, uid, load_msg, countdown_task, done_event, ok=delivered, err_txt=err_msg)
+            return
 
         try: await client.set_chat_menu_button(chat_id=uid, menu_button=MenuButtonWebApp(text="Watch Now 🎬", web_app=WebAppInfo(url=f"{live_url}/?uid={uid}")))
         except: pass
@@ -1596,8 +1878,10 @@ async def start_cmd(client, message):
 @app.on_callback_query(filters.regex("check_join") & unique_cb)
 async def check_join_cb(c, q):
     await get_db()
-    for ch in await channels_col.find({"type": "must_join"}).to_list(100):
-        try: await c.get_chat_member(ch["chat_id"], q.from_user.id)
+    for ch in await get_must_join_channels():
+        try:
+            await c.get_chat_member(ch["chat_id"], q.from_user.id)
+            JOINED_USER_CACHE[(q.from_user.id, ch["chat_id"])] = time.time()
         except: return await q.answer("❌ সব চ্যানেলে জয়েন করুন!", show_alert=True)
     await q.message.delete()
     class FakeMsg:
@@ -2173,7 +2457,7 @@ async def delmvpg_cb(c, q):
 async def delmv_cb(c, q):
     _, rest = q.data.split("_", 1)
     f_id, pg = rest.rsplit("_", 1)
-    doc, tdb = await find_file_in_all_dbs(f_id)
+    doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None:
         await tdb["files"].delete_one({"_id": doc["_id"]})
         for dx in await get_extra_dbs_async():
@@ -2222,7 +2506,7 @@ async def edmvpick_cb(c, q):
     await show_edit_movie_panel(q, q.data.split("_", 1)[1], edit=True)
 
 async def show_edit_movie_panel(mq, f_id, edit=True):
-    doc, _ = await find_file_in_all_dbs(f_id)
+    doc, _ = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
     qs = doc.get("qualities", []); q_str = ", ".join([f"{x['name']}({x.get('lang') or 'Def'})" for x in qs]) if qs else ("Single File" if doc.get("file_id") else "None")
     txt = f"✏️ **Edit Movie:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n🎞 Qualities: `{q_str}`"
@@ -2247,10 +2531,9 @@ async def show_edmv_addq_screen(mq, uid, f_id, edit=True, prefix="➕ ভাষ�
     txt = f"{prefix}\n\n🌐 নির্বাচিত ভাষা: **{cur_l or 'Default'}**\n📦 Pending (সাইটে এড হয়নি): `{p_str}`"
     if edit: await mq.edit_text(txt, reply_markup=mk)
     else: await mq.reply(txt, reply_markup=mk)
-
 @app.on_callback_query(filters.regex(r"^edmv_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmv_cb(c, q):
-    _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
+    _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
     db_id = doc["_id"]
     if act == "pin": await tdb["files"].update_one({"_id": db_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_movie_panel(q, f_id, edit=True)
@@ -2297,21 +2580,21 @@ async def edmvqlang_cb(c, q):
 @app.on_callback_query(filters.regex(r"^edmvcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvcat_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
-    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvlang_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvlang_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
-    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
     await show_edit_movie_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edmvqdel_") & filters.user(ADMIN_ID) & unique_cb)
 async def edmvqdel_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1); idx = int(idx)
-    doc, tdb = await find_file_in_all_dbs(f_id)
+    doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None:
         qs = doc.get("qualities", [])
         if 0 <= idx < len(qs): qs.pop(idx)
@@ -2389,7 +2672,7 @@ async def edmvconf_cb(c, q):
     if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     f_id = st["f_id"]; pend = st.get("pending_qualities", [])
     if not pend: return await show_edit_movie_panel(q, f_id, edit=True)
-    doc, tdb = await find_file_in_all_dbs(f_id)
+    doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None:
         for item in pend:
             await tdb["files"].update_one({"_id": doc["_id"]}, {"$push": {"qualities": item}})
@@ -2403,7 +2686,7 @@ async def edmvconf_cb(c, q):
 async def handle_edmv_name(c, m):
     st = admin_steps.pop(m.from_user.id, None)
     if not st or "f_id" not in st: return
-    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id)
+    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
     await show_edit_movie_panel(m, f_id, edit=False)
 
@@ -2416,13 +2699,13 @@ async def handle_edmv_poster(c, m):
         enc, mime, tg_fid, err = await extract_image_from_message(c, m)
         if err or not enc:
             return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
-        doc, tdb = await find_file_in_all_dbs(f_id)
+        doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is None or tdb is None:
             admin_steps.pop(m.from_user.id, None)
             return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid, "branded_covers": {}}})
         invalidate_home_cache()
         admin_steps.pop(m.from_user.id, None)
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
@@ -2439,7 +2722,7 @@ async def handle_edmv_poster_url(c, m):
     if not st or "f_id" not in st: return
     f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
-        doc, tdb = await find_file_in_all_dbs(f_id)
+        doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is None or tdb is None: return await msg.edit_text("❌ মুভিটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = url
@@ -2449,7 +2732,7 @@ async def handle_edmv_poster_url(c, m):
             if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None, "branded_covers": {}}})
         invalidate_home_cache()
         await msg.delete(); await show_edit_movie_panel(m, f_id, edit=False)
     except Exception as e:
@@ -2775,7 +3058,7 @@ async def delsrpg_cb(c, q):
 async def delsr_cb(c, q):
     _, rest = q.data.split("_", 1)
     f_id, pg = rest.rsplit("_", 1)
-    doc, tdb = await find_file_in_all_dbs(f_id)
+    doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None:
         await tdb["files"].delete_one({"_id": doc["_id"]})
         for dx in await get_extra_dbs_async():
@@ -2824,7 +3107,7 @@ async def edsrpick_cb(c, q):
     await show_edit_series_panel(q, q.data.split("_", 1)[1], edit=True)
 
 async def show_edit_series_panel(mq, f_id, edit=True):
-    doc, _ = await find_file_in_all_dbs(f_id)
+    doc, _ = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is None: txt = "❌ পাওয়া যায়নি!"; return await (mq.message.edit_text(txt) if edit else mq.reply(txt))
     ssns = doc.get("seasons", []); te = sum(len(s.get("episodes", [])) for s in ssns)
     txt = f"📺 **Edit Series:** `{doc['title']}`\n🆔 `{f_id}` | 📂 `{doc.get('category','All')}` | 🌐 `{doc.get('language','None')}`\n📌 Pin: `{'Yes' if doc.get('pinned') else 'No'}` | 💎 VIP: `{'Yes' if doc.get('is_premium') else 'No'}`\n📚 Seasons: `{len(ssns)}` | Eps: `{te}`"
@@ -2838,7 +3121,7 @@ async def show_edit_series_panel(mq, f_id, edit=True):
 
 @app.on_callback_query(filters.regex(r"^edsr_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsr_cb(c, q):
-    _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id)
+    _, act, f_id = q.data.split("_", 2); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is None or tdb is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
     db_id = doc["_id"]
     if act == "pin": await tdb["files"].update_one({"_id": db_id}, {"$set": {"pinned": not doc.get("pinned", False)}}); invalidate_home_cache(); return await show_edit_series_panel(q, f_id, edit=True)
@@ -2871,14 +3154,14 @@ async def edsr_cb(c, q):
 @app.on_callback_query(filters.regex(r"^edsrcat_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrcat_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
-    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    cats = await get_categories_list(); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"category": cats[int(idx)]}}); invalidate_home_cache()
     await show_edit_series_panel(q, f_id, edit=True)
 
 @app.on_callback_query(filters.regex(r"^edsrlang_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrlang_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, idx = rest.rsplit("_", 1)
-    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id)
+    ls = await get_languages_list(); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"language": ls[int(idx)]}}); invalidate_home_cache()
     await show_edit_series_panel(q, f_id, edit=True)
 
@@ -2886,7 +3169,7 @@ async def edsrlang_cb(c, q):
 async def handle_edsr_name(c, m):
     st = admin_steps.pop(m.from_user.id, None)
     if not st or "f_id" not in st: return
-    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id)
+    f_id = st["f_id"]; n, y = parse_name_year(m.text, ""); ft = f"{n} ({y})" if y else n; doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None: await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"name": n, "year": y, "title": ft}}); invalidate_home_cache()
     await show_edit_series_panel(m, f_id, edit=False)
 
@@ -2899,13 +3182,13 @@ async def handle_edsr_poster(c, m):
         enc, mime, tg_fid, err = await extract_image_from_message(c, m)
         if err or not enc:
             return await msg.edit_text(err or "❌ পোস্টার আপডেট ব্যর্থ! আবার ছবি পাঠান বা `/cancel` দিন।")
-        doc, tdb = await find_file_in_all_dbs(f_id)
+        doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is None or tdb is None:
             admin_steps.pop(m.from_user.id, None)
             return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = await save_poster_to_mongo(tdb, f_id, enc, mime, live_url)
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": tg_fid, "branded_covers": {}}})
         invalidate_home_cache()
         admin_steps.pop(m.from_user.id, None)
         await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
@@ -2922,7 +3205,7 @@ async def handle_edsr_poster_url(c, m):
     if not st or "f_id" not in st: return
     f_id = st["f_id"]; msg = await m.reply("⏳ MongoDB-তে পোস্টার আপডেট হচ্ছে...")
     try:
-        doc, tdb = await find_file_in_all_dbs(f_id)
+        doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is None or tdb is None: return await msg.edit_text("❌ সিরিজটি ডাটাবেজে পাওয়া যায়নি!")
         conf = await get_config(); live_url = get_live_web_url(conf)
         purl = url
@@ -2932,7 +3215,7 @@ async def handle_edsr_poster_url(c, m):
             if r.status_code == 200 and r.content and len(r.content) <= 10 * 1024 * 1024 and ct.startswith("image/"):
                 purl = await save_poster_to_mongo(tdb, f_id, base64.b64encode(r.content).decode("utf-8"), "image/jpeg" if ct == "image/jpg" else ct, live_url)
         except: pass
-        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None}})
+        await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"thumb_url": purl, "tg_thumb_id": None, "branded_covers": {}}})
         invalidate_home_cache()
         await msg.delete(); await show_edit_series_panel(m, f_id, edit=False)
     except Exception as e:
@@ -2942,14 +3225,14 @@ async def handle_edsr_poster_url(c, m):
 async def handle_edsr_addssn(c, m):
     st = admin_steps.pop(m.from_user.id, None)
     if not st or "f_id" not in st: return
-    f_id = st["f_id"]; sno = clean_season_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id)
+    f_id = st["f_id"]; sno = clean_season_no(m.text.strip()); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); si = next((i for i, s in enumerate(ssns) if clean_season_no(s["season_no"]).lower() == sno.lower()), None)
         if si is None: ssns.append({"season_no": sno, "episodes": []}); si = len(ssns) - 1; await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         await show_edit_season_panel(m, f_id, si, edit=False)
 
 async def show_edit_season_panel(mq, f_id, si, edit=True):
-    doc, _ = await find_file_in_all_dbs(f_id)
+    doc, _ = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is None or si >= len(doc.get("seasons", [])): return
     ssn = doc["seasons"][si]
     btns = [[InlineKeyboardButton(f"🎬 Ep {clean_ep_no(e['ep_no'])} ({len(e.get('qualities', []))} Q)", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")] for ei, e in enumerate(ssn.get("episodes", []))]
@@ -2975,7 +3258,7 @@ def _calc_next_ep_no(doc, si, cur_ep_no=None):
     except:
         return "1"
 
-async def show_edsr_addq_screen(mo, uid, f_id, edit=True, prefix="➕ ভাষা ও Quality সিলেক্ট করুন:"):
+async def show_edsr_addq_screen(mq, uid, f_id, edit=True, prefix="➕ ভাষা ও Quality সিলেক্ট করুন:"):
     st = admin_steps.get(uid)
     if not st: return
     st["step"] = "edsr_addq_pick"
@@ -2990,8 +3273,8 @@ async def show_edsr_addq_screen(mo, uid, f_id, edit=True, prefix="➕ ভাষ�
     mk = get_quality_lang_markup("edsrqadd", back_cb, back_lbl, None, langs=langs, cur_lang=cur_l, lang_prefix=f"edsrqlang_{f_id}", extra_rows=extra)
     cur_ep_pend = [f"{x['name']}({x.get('lang') or 'Def'})" for x in pend if x["ep_no"] == eno and x["s_idx"] == si]
     txt = f"{prefix}\n\n📺 SeasonIdx `{si+1}` | 🎬 **Episode {eno}**\n🌐 নির্বাচিত ভাষা: **{cur_l or 'Default'}**\n📦 এই এপিসোডে Pending: `{', '.join(cur_ep_pend) or 'None'}`\n📊 মোট Pending (সব এপিসোড): `{len(pend)}` _(Confirm না করা পর্যন্ত সাইটে এড হবে না)_"
-    if edit: await mo.edit_text(txt, reply_markup=mk)
-    else: await mo.reply(txt, reply_markup=mk)
+    if edit: await mq.edit_text(txt, reply_markup=mk)
+    else: await mq.reply(txt, reply_markup=mk)
 
 @app.on_callback_query(filters.regex(r"^edsrep_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrep_cb(c, q):
@@ -3002,7 +3285,7 @@ async def edsrep_cb(c, q):
         return await show_edit_ep_panel(q, f_id, int(si), int(ei), edit=True)
     elif act == "add":
         f_id, si_s = rest.rsplit("_", 1); si = int(si_s)
-        doc, _ = await find_file_in_all_dbs(f_id)
+        doc, _ = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
         nxt = _calc_next_ep_no(doc, si)
         admin_steps[q.from_user.id] = {"step": "edsr_addep_no", "f_id": f_id, "s_idx": si, "current_lang": doc.get("language", ""), "pending_ops": []}
@@ -3012,14 +3295,14 @@ async def edsrep_cb(c, q):
         ])
         return await q.message.edit_text("🎬 নতুন **Episode নম্বর** লিখুন অথবা নিচের বাটনে চাপ দিন:", reply_markup=kb)
     elif act == "delssn":
-        f_id, si_s = rest.rsplit("_", 1); si = int(si_s); doc, tdb = await find_file_in_all_dbs(f_id)
+        f_id, si_s = rest.rsplit("_", 1); si = int(si_s); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns): ssns.pop(si)
             await tdb["files"].update_one({"_id": doc["_id"]}, {"$set": {"seasons": ssns}}); invalidate_home_cache()
         return await show_edit_series_panel(q, f_id, edit=True)
     elif act == "delep":
-        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, tdb = await find_file_in_all_dbs(f_id)
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is not None and tdb is not None:
             ssns = doc.get("seasons", [])
             if 0 <= si < len(ssns) and 0 <= ei < len(ssns[si]["episodes"]): ssns[si]["episodes"].pop(ei)
@@ -3027,7 +3310,7 @@ async def edsrep_cb(c, q):
         return await show_edit_season_panel(q, f_id, si, edit=True)
     elif act == "addq":
         f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s)
-        doc, _ = await find_file_in_all_dbs(f_id)
+        doc, _ = await find_file_in_all_dbs(f_id, use_cache=False)
         if doc is None: return await q.answer("❌ পাওয়া যায়নি!", show_alert=True)
         ep = doc["seasons"][si]["episodes"][ei]
         admin_steps[q.from_user.id] = {
@@ -3036,13 +3319,13 @@ async def edsrep_cb(c, q):
         }
         return await show_edsr_addq_screen(q.message, q.from_user.id, f_id, edit=True)
     elif act == "delqmenu":
-        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, _ = await find_file_in_all_dbs(f_id); qs = doc["seasons"][si]["episodes"][ei].get("qualities", [])
+        f_id, si_s, ei_s = rest.rsplit("_", 2); si, ei = int(si_s), int(ei_s); doc, _ = await find_file_in_all_dbs(f_id, use_cache=False); qs = doc["seasons"][si]["episodes"][ei].get("qualities", [])
         if not qs: return await q.answer("❌ কোনো কোয়ালিটি নেই!", show_alert=True)
         btns = [[InlineKeyboardButton(f"❌ {ql['name']} ({ql.get('lang') or 'Def'})", callback_data=f"edsrqdel_{f_id}_{si}_{ei}_{qi}")] for qi, ql in enumerate(qs)] + [[InlineKeyboardButton("⬅️ Back", callback_data=f"edsrep_view_{f_id}_{si}_{ei}")]]
         return await q.message.edit_text("🗑 ডিলিট করতে ক্লিক করুন:", reply_markup=InlineKeyboardMarkup(btns))
 
 async def show_edit_ep_panel(mq, f_id, si, ei, edit=True):
-    doc, _ = await find_file_in_all_dbs(f_id); ssn = doc["seasons"][si]; ep = ssn["episodes"][ei]
+    doc, _ = await find_file_in_all_dbs(f_id, use_cache=False); ssn = doc["seasons"][si]; ep = ssn["episodes"][ei]
     q_str = ", ".join([f"{x['name']}({x.get('lang') or 'Def'})" for x in ep.get("qualities", [])]) or "None"
     txt = f"🎬 **{doc['title']}** | S{clean_season_no(ssn['season_no'])} E{clean_ep_no(ep['ep_no'])}\n🎞 Qualities: `{q_str}`"
     btns = [[InlineKeyboardButton("➕ Add Quality", callback_data=f"edsrep_addq_{f_id}_{si}_{ei}"), InlineKeyboardButton("🗑 Delete Quality", callback_data=f"edsrep_delqmenu_{f_id}_{si}_{ei}")],
@@ -3075,7 +3358,7 @@ async def edsrnext_cb(c, q):
     st = admin_steps.get(q.from_user.id)
     if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     _, rest = q.data.split("_", 1); f_id, si_s = rest.rsplit("_", 1); si = int(si_s)
-    doc, _ = await find_file_in_all_dbs(f_id)
+    doc, _ = await find_file_in_all_dbs(f_id, use_cache=False)
     nxt = _calc_next_ep_no(doc, si, st.get("cur_ep_no"))
     st["step"] = "edsr_nextep_wait"; st["s_idx"] = si
     btns = [[InlineKeyboardButton(f"🎬 Episode {nxt}", callback_data=f"edsrgoep_{f_id}_{si}_{nxt}")]]
@@ -3102,7 +3385,7 @@ async def handle_edsr_nextep(c, m):
 @app.on_callback_query(filters.regex(r"^edsrqdel_") & filters.user(ADMIN_ID) & unique_cb)
 async def edsrqdel_cb(c, q):
     _, rest = q.data.split("_", 1); f_id, si_s, ei_s, qi_s = rest.rsplit("_", 3)
-    si, ei, qi = int(si_s), int(ei_s), int(qi_s); doc, tdb = await find_file_in_all_dbs(f_id)
+    si, ei, qi = int(si_s), int(ei_s), int(qi_s); doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", []); qs = ssns[si]["episodes"][ei]["qualities"]
         if 0 <= qi < len(qs): qs.pop(qi)
@@ -3176,7 +3459,7 @@ async def edsrconf_cb(c, q):
     if not st or "f_id" not in st: return await q.answer("❌ সেশন এক্সপায়ার!", show_alert=True)
     f_id = st["f_id"]; si_ret = st["s_idx"]; pend = st.get("pending_ops", [])
     if not pend: return await show_edit_season_panel(q, f_id, si_ret, edit=True)
-    doc, tdb = await find_file_in_all_dbs(f_id)
+    doc, tdb = await find_file_in_all_dbs(f_id, use_cache=False)
     if doc is not None and tdb is not None:
         ssns = doc.get("seasons", [])
         for op in pend:
@@ -3193,7 +3476,7 @@ async def edsrconf_cb(c, q):
         invalidate_home_cache()
         await q.answer(f"✅ {len(pend)}টি ফাইল সাইটে সেভ হয়েছে!", show_alert=True)
     await show_edit_season_panel(q, f_id, si_ret, edit=True)
-    # ==========================================
+# ==========================================
 # 9. LEGACY COMMANDS & SEPARATE ZONE / DIRECT LINK TASKS
 # ==========================================
 @app.on_message(filters.command("addfile", case_sensitive=False) & filters.user(ADMIN_ID) & unique_msg)
@@ -3276,7 +3559,7 @@ async def cmd_legacy_router(c, m):
             return await m.reply("✅ সব ফাইল ডিলিট হয়েছে!")
         if cmd == "mongo":
             if len(parts) < 2: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['mongo']}")
-            await AsyncIOMotorClient(parts[1], serverSelectionTimeoutMS=3000).server_info(); await mongos_col.insert_one({"uri": parts[1]}); EXTRA_URI_CACHE["uris"] = None; invalidate_home_cache(); return await m.reply("✅ MongoDB যুক্ত হয়েছে!")
+            await AsyncIOMotorClient(parts[1], serverSelectionTimeoutMS=3000).server_info(); await mongos_col.insert_one({"uri": parts[1]}); EXTRA_URI_CACHE["uris"] = None; ASYNC_URI_CACHE["uris"] = None; invalidate_home_cache(); return await m.reply("✅ MongoDB যুক্ত হয়েছে!")
         if cmd == "delmongo": dbs = await mongos_col.find().to_list(None); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {d['uri'][:25]}", callback_data=f"delmongo_{d['_id']}")] for d in dbs])) if dbs else await m.reply("❌ কোনো এক্সট্রা MongoDB নেই!")
         if cmd == "mongostats":
             dbs = await get_extra_dbs_async(); txt = "📊 **MongoDB Stats:**\n\n"
@@ -3370,7 +3653,7 @@ async def cmd_legacy_router(c, m):
         if cmd == "delcnl": chs = await channels_col.find({"type": "inline"}).to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"delch_{ch['_id']}")] for ch in chs])) if chs else await m.reply("❌ কোনো চ্যানেল নেই!")
         if cmd == "vercnl":
             if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['vercnl']}")
-            await channels_col.insert_one({"type": "must_join", "chat_id": int(parts[1]), "link": parts[2]}); return await m.reply("✅ Must Join Added!")
+            await channels_col.insert_one({"type": "must_join", "chat_id": int(parts[1]), "link": parts[2]}); invalidate_channel_cache(); return await m.reply("✅ Must Join Added!")
         if cmd == "delvrcnl": chs = await channels_col.find({"type": "must_join"}).to_list(100); return await m.reply("ডিলিট:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {ch['chat_id']}", callback_data=f"delch_{ch['_id']}")] for ch in chs])) if chs else await m.reply("❌ কোনো Must Join চ্যানেল নেই!")
         if cmd == "logo":
             if m.reply_to_message and (m.reply_to_message.photo or m.reply_to_message.document):
@@ -3388,7 +3671,7 @@ async def cmd_legacy_router(c, m):
                 return await m.reply("✅ লোগো লিংক সেট হয়েছে!")
             return await m.reply("❌ **নিয়ম:** কোনো ছবিতে রিপ্লাই করে `/logo` লিখুন অথবা `/logo https://...` দিন।")
         if cmd == "autvid":
-            if m.reply_to_message: await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_msg_id": m.reply_to_message.id, "autovid_chat_id": m.chat.id}}); return await m.reply("✅ Auto Video Set!")
+            if m.reply_to_message: await config_col.update_one({"_id": "settings"}, {"$set": {"autovid_msg_id": m.reply_to_message.id, "autovid_chat_id": m.chat.id}}); invalidate_home_cache(); return await m.reply("✅ Auto Video Set!")
             return await m.reply("❌ **নিয়ম:** কোনো ভিডিওতে রিপ্লাই করে `/autvid` লিখুন।")
         if cmd == "usd":
             if len(parts) < 3: return await m.reply(f"❌ **উদাহরণ:** {LEGACY_EXAMPLES['usd']}")
@@ -3433,7 +3716,11 @@ async def legacy_del_cb(c, q):
     await get_db(); pfx, oid = q.data.split("_", 1)
     col_map = {"delttl": titles_col, "delpromo": promotions_col, "delmongo": mongos_col, "delautoch": auto_channels_col, "deltask": tasks_col, "dellink": links_col, "delch": channels_col, "delpkg": pkgs_col}
     await col_map[pfx].delete_one({"_id": ObjectId(oid)})
-    if pfx == "delmongo": EXTRA_URI_CACHE["uris"] = None
+    if pfx == "delmongo":
+        EXTRA_URI_CACHE["uris"] = None
+        ASYNC_URI_CACHE["uris"] = None
+    if pfx == "delch":
+        invalidate_channel_cache()
     invalidate_home_cache()
     await q.message.edit_text("✅ ডিলিট করা হয়েছে!")
 
@@ -3473,8 +3760,7 @@ async def legacy_auto_cb(c, q):
     sid = ''.join(random.choices(string.ascii_letters + string.digits, k=8)); dbs = await get_extra_dbs_async()
     nf = {"_id": sid, "title": sd["title"], "category": "All", "is_premium": (q.data == "auto_prem"), "file_id": sd["file_id"], "thumb_url": sd["thumb_url"], "created_at": datetime.utcnow().isoformat() + "Z", "views": 0, "likes": [], "comments": []}
     await dbs[0]["files"].insert_one(nf); del admin_steps[q.from_user.id]; invalidate_home_cache(); await notify_new_post(c, nf, await get_config()); await q.message.edit_text(f"✅ আপলোড সফল! ID: `{sid}`")
-
-# ==========================================
+    # ==========================================
 # 10. FLASK WEB API & MONGODB POSTER HOSTING + STRICT AD + TG VERIFY + TUTORIALS
 # ==========================================
 @web.route('/poster/<poster_id>')
@@ -3762,7 +4048,7 @@ def api_ad_start():
     kind = d.get("kind", "file")
     target = str(d.get("target") or "")
     mode = d.get("mode", "link")
-    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    conf = get_sync_ad_meta()["conf"]
     strict_ad = bool(conf.get("strict_ad", True))
     req_sec = 0
     if strict_ad:
@@ -3771,9 +4057,12 @@ def api_ad_start():
         elif kind == "file":
             base_fid = extract_base_file_id(target)
             fd = None
-            for dbx in get_extra_dbs_sync():
-                fd = dbx["files"].find_one({"_id": base_fid}, {"is_premium": 1})
-                if fd: break
+            if base_fid in FILE_DOC_CACHE:
+                fd = FILE_DOC_CACHE[base_fid][0]
+            else:
+                for dbx in get_extra_dbs_sync():
+                    fd = dbx["files"].find_one({"_id": base_fid}, {"is_premium": 1})
+                    if fd: break
             if fd and fd.get("is_premium"):
                 req_sec = int(conf.get("prem_vid_wait", 10))
             else:
@@ -3801,7 +4090,7 @@ def api_shorten():
             "clicks": 0,
             "created_at": datetime.utcnow().isoformat() + "Z"
         })
-        conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+        conf = get_sync_ad_meta()["conf"]
         live_url = get_live_web_url(conf)
         return jsonify({"status": "success", "short_url": f"{live_url}/s/{code}"})
     except Exception as e:
@@ -4053,10 +4342,11 @@ def short_link_gate(code):
     if not doc:
         return "<h2 style='font-family:sans-serif;text-align:center;margin-top:50px;'>❌ লিংকটি পাওয়া যায়নি বা মেয়াদ শেষ হয়েছে!</h2>", 404
     sync_db["short_links"].update_one({"_id": code}, {"$inc": {"clicks": 1}})
-    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
-    links = list(sync_db["ad_links"].find())
-    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
-    ad_link = random.choice(links)["link"] if links else None
+    meta = get_sync_ad_meta()
+    conf = meta["conf"]
+    links = meta["links"]
+    zones = meta["zones"]
+    ad_link = random.choice(links) if links else None
     wait_time = random.choice(conf.get("direk_wait", [5]))
     return render_template_string(
         SHORT_VERIFY_HTML,
@@ -4079,7 +4369,7 @@ def api_verify_short():
     doc = sync_db["short_links"].find_one({"_id": code})
     if not doc:
         return jsonify({"status": "error", "msg": "❌ লিংক পাওয়া যায়নি!"})
-    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
+    conf = get_sync_ad_meta()["conf"]
     if conf.get("strict_ad", True):
         ok, msg = verify_ad_token(tok, 0)
         if not ok:
@@ -4106,11 +4396,17 @@ def extract_base_file_id(file_key):
 
 @web.route('/api/get_ad/<int:user_id>/<file_id>')
 def get_ad_api(user_id, file_id):
-    config = sync_db["config"].find_one({"_id": "settings"}) or {}; user = sync_db["users"].find_one({"_id": user_id}) or {}; fd = None
+    meta = get_sync_ad_meta()
+    config = meta["conf"]
+    user = sync_db["users"].find_one({"_id": user_id}) or {}
+    fd = None
     base_fid = extract_base_file_id(file_id)
-    for d in get_extra_dbs_sync():
-        fd = d["files"].find_one({"_id": base_fid}, {"is_premium": 1})
-        if fd: break
+    if base_fid in FILE_DOC_CACHE:
+        fd = FILE_DOC_CACHE[base_fid][0]
+    else:
+        for d in get_extra_dbs_sync():
+            fd = d["files"].find_one({"_id": base_fid}, {"is_premium": 1})
+            if fd: break
     if user.get("premium_until") and user["premium_until"] > datetime.now():
         return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
     if file_id in user.get("unlocked_files", {}):
@@ -4118,8 +4414,8 @@ def get_ad_api(user_id, file_id):
             if datetime.fromisoformat(user["unlocked_files"][file_id].replace("Z", "")) > datetime.utcnow():
                 return jsonify({"show_ad": False, "is_unlocked": True, "requires_coin": False})
         except: pass
-    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
-    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
+    zones = meta["zones"]
+    links = meta["links"]
     coin_price = config.get("premium_vid_coin", 50)
     is_prem_file = bool(fd and fd.get("is_premium"))
     ads_on = config.get("ads_on", True)
@@ -4147,7 +4443,9 @@ def get_ad_api(user_id, file_id):
 @web.route('/api/unlock_file', methods=['POST'])
 def unlock_file():
     d = request.json or {}; uid, fid, m = d['uid'], d['file_id'], d['method']
-    conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}
+    meta = get_sync_ad_meta()
+    conf = meta["conf"]
+    u = sync_db["users"].find_one({"_id": uid}) or {}
     if m == "coin":
         cost = conf.get("premium_vid_coin", 50)
         if u.get("balance", 0) < cost: return jsonify({"status": "error", "msg": "❌ পর্যাপ্ত কয়েন নেই!"})
@@ -4155,9 +4453,7 @@ def unlock_file():
     else:
         is_prem_user = bool(u.get("premium_until") and u["premium_until"] > datetime.now())
         if not is_prem_user and conf.get("strict_ad", True):
-            zones = list(sync_db["zone_ids"].find())
-            links = list(sync_db["ad_links"].find())
-            if zones or links or DEFAULT_ZONE_ID:
+            if meta["zones"] or meta["links"] or DEFAULT_ZONE_ID:
                 ok, msg = verify_ad_token(d.get("ad_token"), uid)
                 if not ok:
                     return jsonify({"status": "error", "msg": msg})
@@ -4175,7 +4471,8 @@ def unlock_file():
 
 @web.route('/api/earn_info/<int:uid>')
 def get_earn_info(uid):
-    conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
+    meta = get_sync_ad_meta()
+    conf = meta["conf"]; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
     if u.get("last_activity_date") != td:
         sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": td, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}}, upsert=True)
         u["spin_count"], u["task_count"], u["custom_tasks_done"] = 0, 0, []
@@ -4184,8 +4481,6 @@ def get_earn_info(uid):
         t["_id"] = str(t["_id"])
         if not t.get("task_type"):
             t["task_type"] = "zone" if t.get("zone_id") else "link"
-    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
-    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
     return jsonify({
         "spins_done": u.get("spin_count", 0),
         "spin_limit": conf.get("spin_limit", 5),
@@ -4194,8 +4489,8 @@ def get_earn_info(uid):
         "task_step": max(1, int(conf.get("task_step", 1))),
         "custom_tasks": cts,
         "custom_tasks_done": u.get("custom_tasks_done", []),
-        "zone_ids": zones,
-        "ad_links": links,
+        "zone_ids": meta["zones"],
+        "ad_links": meta["links"],
         "wait_time": int(conf.get("task_wait_sec", 10)),
         "monetag_wait": int(conf.get("monetag_wait", 4)),
         "strict_ad": bool(conf.get("strict_ad", True))
@@ -4203,9 +4498,10 @@ def get_earn_info(uid):
 
 @web.route('/api/get_earn_ad/<ad_type>')
 def get_earn_ad_dynamic(ad_type):
-    conf = sync_db["config"].find_one({"_id": "settings"}) or {}
-    links = [l["link"] for l in sync_db["ad_links"].find() if l.get("link")]
-    zones = [z["zone_id"] for z in sync_db["zone_ids"].find()] or ([DEFAULT_ZONE_ID] if DEFAULT_ZONE_ID else [])
+    meta = get_sync_ad_meta()
+    conf = meta["conf"]
+    links = meta["links"]
+    zones = meta["zones"]
     return jsonify({
         "ad_link": random.choice(links) if links else None,
         "zone_id": random.choice(zones) if zones else None,
@@ -4236,7 +4532,7 @@ def api_verify_tg_task():
     if not BOT_TOKEN:
         return jsonify({"status": "error", "msg": "❌ বট টোকেন কনফিগার করা নেই!"})
     try:
-        r = requests.get(
+        r = get_tg_http().get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember",
             params={"chat_id": t["chat_id"], "user_id": int(uid)},
             timeout=8
@@ -4255,14 +4551,14 @@ def api_verify_tg_task():
 
 @web.route('/api/claim_earn', methods=['POST'])
 def claim_earn():
-    d = request.json or {}; uid, tt = d['uid'], d['type']; conf = sync_db["config"].find_one({"_id": "settings"}) or {}; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
+    d = request.json or {}; uid, tt = d['uid'], d['type']
+    meta = get_sync_ad_meta()
+    conf = meta["conf"]; u = sync_db["users"].find_one({"_id": uid}) or {}; td = datetime.now().strftime("%Y-%m-%d")
     if u.get("last_activity_date") != td:
         sync_db["users"].update_one({"_id": uid}, {"$set": {"last_activity_date": td, "spin_count": 0, "task_count": 0, "custom_tasks_done": []}}, upsert=True)
         u["spin_count"], u["task_count"], u["custom_tasks_done"] = 0, 0, []
     if conf.get("strict_ad", True):
-        zones = list(sync_db["zone_ids"].find())
-        links = list(sync_db["ad_links"].find())
-        need_ad = bool(zones or links or DEFAULT_ZONE_ID)
+        need_ad = bool(meta["zones"] or meta["links"] or DEFAULT_ZONE_ID)
         if tt.startswith("custom_"):
             tid = tt.split("_")[1]
             t = sync_db["custom_tasks"].find_one({"_id": ObjectId(tid)})
@@ -4383,7 +4679,7 @@ def api_home_data():
     resp = jsonify({"files": p["files"], "user": u_state})
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp
-    # ==========================================
+# ==========================================
 # 11. HTML MINI APP UI & SERVER RUNNER
 # ==========================================
 HTML_TEMPLATE = r"""<!DOCTYPE html>
